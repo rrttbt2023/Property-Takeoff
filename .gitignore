@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+Auto-measure-backend/venv/
+Auto-measure-backend/.venv-train/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vercel/
+frontend/*.local
+
+# Env files
+.env
+.env.*
+frontend/.env
+frontend/.env.*
+Auto-measure-backend/.env
+Auto-measure-backend/.env.*
+
+# Local runtime data
+Auto-measure-backend/data/measurements.db
+Auto-measure-backend/data/shared_projects/
+
+# Training artifacts (too large for normal git hosting)
+Auto-measure-backend/training/data/
+Auto-measure-backend/training/checkpoints/*.pt
+Auto-measure-backend/training/checkpoints/*.ts
+Auto-measure-backend/training/checkpoints_smoke/
+Auto-measure-backend/training/checkpoints_smoke_r50/

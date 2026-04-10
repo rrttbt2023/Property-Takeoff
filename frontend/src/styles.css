@@ -1,0 +1,124 @@
+html, body, #root { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+.sidebar {
+  width: 420px;          /* fixed sidebar */
+  max-width: 420px;
+  min-width: 420px;
+  padding: 14px;
+  border-right: 1px solid #e5e7eb;
+  overflow-y: auto;      /* scroll if content is tall */
+  background: #111;
+  color: #fff;
+}
+
+.map {
+  flex: 1;               /* takes remaining space */
+  min-width: 0;
+  height: 100vh;
+  touch-action: none;
+}
+.block { margin: 14px 0; }
+.label { display: block; font-weight: 600; margin-bottom: 8px; }
+.btn { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #d1d5db; background: white; cursor: pointer; border-radius: 10px; }
+.btn-active { border-color: #111827; font-weight: 700; }
+.row { display:flex; justify-content: space-between; gap: 10px; margin: 6px 0; }
+.hint { font-size: 12px; color: #6b7280; line-height: 1.3; }
+.logo-header {
+  background: white;
+  border-radius: 12px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+
+.logo-img {
+  width: 100%;
+  max-height: 300px;   /* <-- key: prevents it from being huge */
+  height: auto;
+  object-fit: contain; /* keeps full logo visible */
+  display: block;
+}
+.logo-header img,
+.logo-img {
+  width: 100% !important;
+  max-height: 300px !important;
+  height: 300px !important;
+  object-fit: contain !important;
+  display: block !important;
+}
+/* Make sure MapboxDraw UI stays visible + clickable */
+.map .mapboxgl-ctrl-group button {
+  width: 29px;          /* default-ish */
+  height: 29px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background-color: white;
+}
+
+/* keep the icons visible */
+.map .mapboxgl-ctrl-group button span {
+  display: block;
+}
+
+/* ensure controls can receive clicks */
+.map .mapboxgl-ctrl-top-right,
+.map .mapboxgl-ctrl-group {
+  pointer-events: auto;
+}
+.sidebar input {
+  background: #fff;
+  color: #000;
+}
+/* Make Draw polygons stand out more */
+.map .mapboxgl-canvas {
+  outline: none;
+}
+
+/* iPad/Safari gesture reliability */
+.map .maplibregl-map,
+.map .maplibregl-canvas-container,
+.map .maplibregl-canvas,
+.map .mapboxgl-map,
+.map .mapboxgl-canvas-container,
+.map .mapboxgl-canvas {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.compact-ui .map .maplibregl-canvas-container,
+.compact-ui .map .mapboxgl-canvas-container {
+  touch-action: pan-x pan-y pinch-zoom;
+}
+
+.compact-ui .sidebar {
+  padding-bottom: 170px;
+}
+
+.compact-ui .sidebar button,
+.compact-ui .sidebar input,
+.compact-ui .sidebar select {
+  min-height: 38px;
+}
+
+/* Thicker control icons area (optional) */
+.map .mapboxgl-ctrl-group {
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.35);
+}
+
+/* Force draw lines/vertices more visible */
+.map .mapboxgl-ctrl-top-right,
+.map .mapboxgl-ctrl-group button {
+  opacity: 1;
+}
+
+/* Make the vertex dots easier to see */
+.map .mapbox-gl-draw_vertex,
+.map .mapbox-gl-draw_midpoint {
+  transform: scale(1.25);
+}

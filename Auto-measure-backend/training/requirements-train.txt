@@ -1,0 +1,6 @@
+torch>=2.2
+torchvision>=0.17
+segmentation-models-pytorch>=0.3.4
+albumentations>=1.4.0
+opencv-python-headless>=4.10
+numpy>=2.0

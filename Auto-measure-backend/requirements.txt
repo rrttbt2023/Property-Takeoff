@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+httpx
+pytest
+numpy
+opencv-python-headless
+python-multipart
+shapely
+torch
+torchvision
