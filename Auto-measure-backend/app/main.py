@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.repositories.measurement_repository import init_db
+from app.routes.auth import router as auth_router
 from app.routes.measurements import router as measurements_router
 from app.routes.projects import router as projects_router
 
@@ -72,6 +73,8 @@ def home() -> dict[str, str]:
 
 app.include_router(measurements_router)
 app.include_router(measurements_router, prefix="/api")
+app.include_router(auth_router)
+app.include_router(auth_router, prefix="/api")
 app.include_router(projects_router)
 app.include_router(projects_router, prefix="/api")
 

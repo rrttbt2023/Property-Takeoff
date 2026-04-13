@@ -22,10 +22,14 @@ import {
   calculatePixelDistance,
   deleteSharedProject,
   getSharedProject,
+  getSharedAccessSession,
   getMeasurementHistory,
+  loginSharedAccess,
   listSharedProjects,
+  logoutSharedAccess,
   measureGeoJson,
   saveSharedProject,
+  setSharedAuthToken,
   segmentMeasurementUpload,
   uploadMeasurement,
 } from "./api";
@@ -105,6 +109,7 @@ const WORKFLOW_MODE_STORAGE_KEY = "takeoff-workflow-mode-v1";
 const ESTIMATE_TEMPLATES_STORAGE_KEY = "takeoff-estimate-templates-v1";
 const PROJECT_LIBRARY_STORAGE_KEY = "takeoff-project-library-v1";
 const SHARED_PROJECT_QUEUE_STORAGE_KEY = "takeoff-shared-project-queue-v1";
+const SHARED_AUTH_STORAGE_KEY = "takeoff-shared-auth-v1";
 const PROJECT_LIBRARY_MAX_ENTRIES = 30;
 const WORKFLOW_MODE_LOCATION = "location";
 const WORKFLOW_MODE_PDF = "pdf";
@@ -1424,6 +1429,32 @@ function readStoredSharedProjectQueue() {
   }
 }
 
+function readStoredSharedAuth() {
+  if (typeof window === "undefined") {
+    return { token: "", username: "admin", expiresAt: "" };
+  }
+  try {
+    const raw = window.localStorage.getItem(SHARED_AUTH_STORAGE_KEY);
+    if (!raw) return { token: "", username: "admin", expiresAt: "" };
+    const parsed = JSON.parse(raw);
+    const token = String(parsed?.token || "").trim();
+    const username = String(parsed?.username || "admin").trim() || "admin";
+    const expiresAt = String(parsed?.expiresAt || "").trim();
+    return { token, username, expiresAt };
+  } catch {
+    return { token: "", username: "admin", expiresAt: "" };
+  }
+}
+
+function isAuthError(error) {
+  const text = String(error?.message || "").toLowerCase();
+  return (
+    text.includes("401") ||
+    text.includes("login required") ||
+    text.includes("session expired")
+  );
+}
+
 function upsertSharedQueueOperation(prevQueue, nextOp) {
   const queue = Array.isArray(prevQueue) ? prevQueue : [];
   const normalized = normalizeSharedQueueOperation(nextOp);
@@ -2192,9 +2223,22 @@ export default function App() {
   const [sharedProjectQueue, setSharedProjectQueue] = useState(() =>
     readStoredSharedProjectQueue()
   );
-  const [sharedProjectLibraryStatus, setSharedProjectLibraryStatus] = useState("connecting");
+  const [sharedAuth, setSharedAuth] = useState(() => readStoredSharedAuth());
+  const [sharedAuthChecking, setSharedAuthChecking] = useState(() =>
+    !!readStoredSharedAuth().token
+  );
+  const [sharedLoginUsername, setSharedLoginUsername] = useState(
+    () => readStoredSharedAuth().username || "admin"
+  );
+  const [sharedLoginPassword, setSharedLoginPassword] = useState("");
+  const [sharedLoginSubmitting, setSharedLoginSubmitting] = useState(false);
+  const [sharedProjectLibraryStatus, setSharedProjectLibraryStatus] = useState(() =>
+    readStoredSharedAuth().token ? "connecting" : "locked"
+  );
   const [sharedProjectLibrarySyncing, setSharedProjectLibrarySyncing] = useState(false);
   const [sharedProjectQueueSyncing, setSharedProjectQueueSyncing] = useState(false);
+  const sharedAccessToken = String(sharedAuth?.token || "").trim();
+  const sharedAccessAuthenticated = !!sharedAccessToken;
   const [appScreen, setAppScreen] = useState(APP_SCREEN_HOME); // "home" | "location" | "pdf"
   const [estimateTemplates, setEstimateTemplates] = useState(() =>
     readStoredEstimateTemplates()
@@ -2336,8 +2380,107 @@ export default function App() {
     }
   }, [sharedProjectQueue]);
 
+  useEffect(() => {
+    setSharedAuthToken(sharedAccessToken);
+  }, [sharedAccessToken]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (sharedAccessToken) {
+        window.localStorage.setItem(
+          SHARED_AUTH_STORAGE_KEY,
+          JSON.stringify({
+            token: sharedAccessToken,
+            username: String(sharedAuth?.username || "admin").trim() || "admin",
+            expiresAt: String(sharedAuth?.expiresAt || "").trim(),
+          })
+        );
+      } else {
+        window.localStorage.setItem(
+          SHARED_AUTH_STORAGE_KEY,
+          JSON.stringify({
+            token: "",
+            username: String(sharedAuth?.username || "admin").trim() || "admin",
+            expiresAt: "",
+          })
+        );
+      }
+    } catch {
+      /* intentionally ignore localStorage errors */
+    }
+  }, [sharedAccessToken, sharedAuth?.expiresAt, sharedAuth?.username]);
+
+  useEffect(() => {
+    let canceled = false;
+    if (!sharedAccessToken) {
+      setSharedAuthChecking(false);
+      setSharedProjectLibraryStatus("locked");
+      return () => {
+        canceled = true;
+      };
+    }
+
+    setSharedAuthChecking(true);
+    setSharedProjectLibraryStatus((prev) =>
+      prev === "connected" ? "connected" : "connecting"
+    );
+
+    (async () => {
+      try {
+        const session = await getSharedAccessSession();
+        if (canceled) return;
+        const username = String(session?.username || sharedAuth?.username || "admin").trim() || "admin";
+        const expiresAt = String(session?.expires_at || sharedAuth?.expiresAt || "").trim();
+        setSharedAuth((prev) => {
+          const next = {
+            token: sharedAccessToken,
+            username,
+            expiresAt,
+          };
+          if (
+            String(prev?.token || "") === next.token &&
+            String(prev?.username || "") === next.username &&
+            String(prev?.expiresAt || "") === next.expiresAt
+          ) {
+            return prev;
+          }
+          return next;
+        });
+        setSharedLoginUsername(username);
+        setSharedProjectLibraryStatus("connected");
+      } catch (error) {
+        if (canceled) return;
+        if (isAuthError(error)) {
+          setSharedAuth((prev) => ({
+            token: "",
+            username: String(prev?.username || sharedLoginUsername || "admin").trim() || "admin",
+            expiresAt: "",
+          }));
+          setSharedProjectLibraryStatus("locked");
+          pushToast("Shared session expired. Log in again to access shared files.", "warn", 5200);
+        } else {
+          setSharedProjectLibraryStatus("offline");
+        }
+      } finally {
+        if (!canceled) setSharedAuthChecking(false);
+      }
+    })();
+
+    return () => {
+      canceled = true;
+    };
+  }, [pushToast, sharedAccessToken, sharedAuth?.expiresAt, sharedAuth?.username, sharedLoginUsername]);
+
   const refreshSharedProjectLibrary = useCallback(
     async ({ quiet = true } = {}) => {
+      if (!sharedAccessAuthenticated) {
+        setSharedProjectLibraryStatus("locked");
+        if (!quiet) {
+          pushToast("Log in to access shared project files.", "warn", 4200);
+        }
+        return;
+      }
       if (!quiet) setSharedProjectLibrarySyncing(true);
       try {
         const shared = await listSharedProjects(PROJECT_LIBRARY_MAX_ENTRIES);
@@ -2347,7 +2490,19 @@ export default function App() {
           pushToast("Shared project library refreshed.", "info", 3200);
         }
       } catch (error) {
-        setSharedProjectLibraryStatus("offline");
+        if (isAuthError(error)) {
+          setSharedAuth((prev) => ({
+            token: "",
+            username: String(prev?.username || sharedLoginUsername || "admin").trim() || "admin",
+            expiresAt: "",
+          }));
+          setSharedProjectLibraryStatus("locked");
+          if (!quiet) {
+            pushToast("Shared session expired. Log in again.", "warn", 5200);
+          }
+        } else {
+          setSharedProjectLibraryStatus("offline");
+        }
         if (!quiet) {
           pushToast(
             `Shared project sync failed: ${error?.message || "backend unavailable"}.`,
@@ -2359,7 +2514,7 @@ export default function App() {
         if (!quiet) setSharedProjectLibrarySyncing(false);
       }
     },
-    [pushToast]
+    [pushToast, sharedAccessAuthenticated, sharedLoginUsername]
   );
 
   const syncSharedProjectQueue = useCallback(
@@ -2369,6 +2524,13 @@ export default function App() {
         ? sharedProjectQueueRef.current
         : [];
       if (!queue.length) return;
+      if (!sharedAccessAuthenticated) {
+        setSharedProjectLibraryStatus("locked");
+        if (!quiet) {
+          pushToast("Log in to sync queued shared project updates.", "warn", 4500);
+        }
+        return;
+      }
       if (typeof navigator !== "undefined" && navigator.onLine === false) {
         setSharedProjectLibraryStatus("offline");
         if (!quiet) {
@@ -2427,7 +2589,16 @@ export default function App() {
         }
 
         if (lastError) {
-          setSharedProjectLibraryStatus("offline");
+          if (isAuthError(lastError)) {
+            setSharedAuth((prev) => ({
+              token: "",
+              username: String(prev?.username || sharedLoginUsername || "admin").trim() || "admin",
+              expiresAt: "",
+            }));
+            setSharedProjectLibraryStatus("locked");
+          } else {
+            setSharedProjectLibraryStatus("offline");
+          }
           if (!quiet) {
             pushToast(
               `Shared sync paused: ${lastError?.message || "network unavailable"}.`,
@@ -2441,37 +2612,42 @@ export default function App() {
         if (!quiet) setSharedProjectQueueSyncing(false);
       }
     },
-    [pushToast, refreshSharedProjectLibrary]
+    [pushToast, refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedLoginUsername]
   );
 
   useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
     refreshSharedProjectLibrary({ quiet: true });
-  }, [refreshSharedProjectLibrary]);
+  }, [refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedAuthChecking]);
 
   useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
     if (!(sharedProjectQueue?.length > 0)) return;
     syncSharedProjectQueue({ quiet: true });
-  }, [sharedProjectQueue, syncSharedProjectQueue]);
+  }, [sharedProjectQueue, syncSharedProjectQueue, sharedAccessAuthenticated, sharedAuthChecking]);
 
   useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
     if (appScreen !== APP_SCREEN_HOME) return;
     refreshSharedProjectLibrary({ quiet: true });
     const timer = setInterval(() => {
       refreshSharedProjectLibrary({ quiet: true });
     }, 15000);
     return () => clearInterval(timer);
-  }, [appScreen, refreshSharedProjectLibrary]);
+  }, [appScreen, refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedAuthChecking]);
 
   useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
     const timer = setInterval(() => {
       if (sharedProjectQueueRef.current?.length) {
         syncSharedProjectQueue({ quiet: true });
       }
     }, 12000);
     return () => clearInterval(timer);
-  }, [syncSharedProjectQueue]);
+  }, [syncSharedProjectQueue, sharedAccessAuthenticated, sharedAuthChecking]);
 
   useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
     const onOnline = () => {
       syncSharedProjectQueue({ quiet: false });
       refreshSharedProjectLibrary({ quiet: true });
@@ -2484,7 +2660,63 @@ export default function App() {
         window.removeEventListener("online", onOnline);
       }
     };
-  }, [refreshSharedProjectLibrary, syncSharedProjectQueue]);
+  }, [refreshSharedProjectLibrary, syncSharedProjectQueue, sharedAccessAuthenticated, sharedAuthChecking]);
+
+  const handleSharedLogin = useCallback(
+    async (event) => {
+      if (event?.preventDefault) event.preventDefault();
+      const username = String(sharedLoginUsername || "").trim();
+      const password = String(sharedLoginPassword || "");
+      if (!username || !password) {
+        pushToast("Enter username and password to access shared files.", "warn", 4200);
+        return;
+      }
+      setSharedLoginSubmitting(true);
+      setSharedProjectLibraryStatus("connecting");
+      try {
+        const response = await loginSharedAccess({ username, password });
+        const token = String(response?.token || "").trim();
+        if (!token) {
+          throw new Error("Login response did not include a session token.");
+        }
+        const normalizedUsername =
+          String(response?.username || username).trim() || "admin";
+        const expiresAt = String(response?.expires_at || "").trim();
+        setSharedAuth({
+          token,
+          username: normalizedUsername,
+          expiresAt,
+        });
+        setSharedLoginUsername(normalizedUsername);
+        setSharedLoginPassword("");
+        setSharedProjectLibraryStatus("connecting");
+        pushToast("Shared files unlocked.", "info", 3600);
+      } catch (error) {
+        setSharedProjectLibraryStatus("locked");
+        pushToast(`Shared login failed: ${error?.message || "invalid credentials"}.`, "error", 6200);
+      } finally {
+        setSharedLoginSubmitting(false);
+      }
+    },
+    [pushToast, sharedLoginPassword, sharedLoginUsername]
+  );
+
+  const handleSharedLogout = useCallback(async () => {
+    if (sharedAccessAuthenticated) {
+      try {
+        await logoutSharedAccess();
+      } catch {
+        /* intentionally ignore non-critical auth/logout errors */
+      }
+    }
+    setSharedAuth((prev) => ({
+      token: "",
+      username: String(prev?.username || sharedLoginUsername || "admin").trim() || "admin",
+      expiresAt: "",
+    }));
+    setSharedProjectLibraryStatus("locked");
+    pushToast("Logged out from shared files.", "info", 3600);
+  }, [pushToast, sharedAccessAuthenticated, sharedLoginUsername]);
 
   useEffect(() => {
     if (
@@ -5144,6 +5376,14 @@ export default function App() {
 
     const fname = `${safeFilename(payload.projectName)}.json`;
     downloadJson(fname, payload);
+    if (!sharedAccessAuthenticated) {
+      pushToast(
+        "Project saved (JSON). Log in on Home to sync this project to shared files.",
+        "info",
+        5200
+      );
+      return;
+    }
     try {
       if (localEntry?.id) {
         await saveSharedProject({
@@ -5169,7 +5409,16 @@ export default function App() {
         return;
       }
     } catch (error) {
-      setSharedProjectLibraryStatus("offline");
+      if (isAuthError(error)) {
+        setSharedAuth((prev) => ({
+          token: "",
+          username: String(prev?.username || sharedLoginUsername || "admin").trim() || "admin",
+          expiresAt: "",
+        }));
+        setSharedProjectLibraryStatus("locked");
+      } else {
+        setSharedProjectLibraryStatus("offline");
+      }
       if (localEntry?.id) {
         setSharedProjectQueue((prev) =>
           upsertSharedQueueOperation(prev, {
@@ -5191,7 +5440,13 @@ export default function App() {
       return;
     }
     pushToast("Project saved (JSON) and added to Home recent projects.", "info");
-  }, [buildProjectPayload, pushToast, refreshSharedProjectLibrary]);
+  }, [
+    buildProjectPayload,
+    pushToast,
+    refreshSharedProjectLibrary,
+    sharedAccessAuthenticated,
+    sharedLoginUsername,
+  ]);
 
   const normalizeFeature = useCallback((layerKey, f) => {
     // ensure properties exist and carry correct layer + outside
@@ -5508,6 +5763,10 @@ export default function App() {
   const removeProjectFromLibrary = useCallback(
     async (id) => {
       setProjectLibrary((prev) => (prev || []).filter((entry) => entry?.id !== id));
+      if (!sharedAccessAuthenticated) {
+        pushToast("Removed from this device. Log in to remove it from shared files too.", "info", 4300);
+        return;
+      }
       try {
         await deleteSharedProject(id);
         setSharedProjectQueue((prev) =>
@@ -5518,7 +5777,16 @@ export default function App() {
         setSharedProjectLibraryStatus("connected");
         pushToast("Removed project from shared Home library.", "info", 3500);
       } catch (error) {
-        setSharedProjectLibraryStatus("offline");
+        if (isAuthError(error)) {
+          setSharedAuth((prev) => ({
+            token: "",
+            username: String(prev?.username || sharedLoginUsername || "admin").trim() || "admin",
+            expiresAt: "",
+          }));
+          setSharedProjectLibraryStatus("locked");
+        } else {
+          setSharedProjectLibraryStatus("offline");
+        }
         setSharedProjectQueue((prev) =>
           upsertSharedQueueOperation(prev, {
             op: "delete",
@@ -5532,7 +5800,7 @@ export default function App() {
         );
       }
     },
-    [pushToast]
+    [pushToast, sharedAccessAuthenticated, sharedLoginUsername]
   );
 
   const loadProjectFromLibrary = useCallback(
@@ -5552,6 +5820,11 @@ export default function App() {
           pushToast("Could not load that saved project.", "error", 5000);
           return;
         }
+      }
+
+      if (!sharedAccessAuthenticated) {
+        pushToast("Log in on Home to open shared projects.", "warn", 4200);
+        return;
       }
 
       try {
@@ -5579,8 +5852,17 @@ export default function App() {
             remoteProject.project_name || "Saved Project"
           )
         );
-      } catch {
-        setSharedProjectLibraryStatus("offline");
+      } catch (error) {
+        if (isAuthError(error)) {
+          setSharedAuth((prev) => ({
+            token: "",
+            username: String(prev?.username || sharedLoginUsername || "admin").trim() || "admin",
+            expiresAt: "",
+          }));
+          setSharedProjectLibraryStatus("locked");
+        } else {
+          setSharedProjectLibraryStatus("offline");
+        }
         pushToast(
           "Could not load that shared project. Check backend server and try refresh.",
           "error",
@@ -5588,7 +5870,7 @@ export default function App() {
         );
       }
     },
-    [applyProjectPayload, projectLibrary, pushToast]
+    [applyProjectPayload, projectLibrary, pushToast, sharedAccessAuthenticated, sharedLoginUsername]
   );
 
   const hasCurrentProjectData = useMemo(() => {
@@ -5599,6 +5881,47 @@ export default function App() {
     if ((pdfAnnotations || []).length > 0) return true;
     return !!String(projectName || "").trim();
   }, [boundary, layerFeatures, pdfAnnotations, projectName]);
+
+  const visibleProjectLibrary = useMemo(() => {
+    const entries = Array.isArray(projectLibrary) ? projectLibrary : [];
+    if (sharedAccessAuthenticated) return entries;
+    return entries.filter(
+      (entry) => entry?.payload && isValidProjectPayload(entry.payload)
+    );
+  }, [projectLibrary, sharedAccessAuthenticated]);
+
+  const sharedStatusUi = useMemo(() => {
+    if (sharedAuthChecking || sharedProjectLibraryStatus === "connecting") {
+      return {
+        label: "Shared: connecting",
+        border: "1px solid rgba(150,190,255,0.6)",
+        background: "rgba(70,110,180,0.22)",
+      };
+    }
+    if (sharedProjectLibraryStatus === "connected") {
+      return {
+        label: "Shared: connected",
+        border: "1px solid rgba(89,226,143,0.55)",
+        background: "rgba(28,162,92,0.20)",
+      };
+    }
+    if (sharedProjectLibraryStatus === "locked" || !sharedAccessAuthenticated) {
+      return {
+        label: "Shared: login required",
+        border: "1px solid rgba(255,214,102,0.55)",
+        background: "rgba(164,130,32,0.24)",
+      };
+    }
+    return {
+      label: "Shared: offline",
+      border: "1px solid rgba(255,180,80,0.55)",
+      background: "rgba(198,116,42,0.22)",
+    };
+  }, [
+    sharedAccessAuthenticated,
+    sharedAuthChecking,
+    sharedProjectLibraryStatus,
+  ]);
 
   const openTrue3DViewer = useCallback(() => {
     setShowTrue3DViewer(true);
@@ -9329,28 +9652,20 @@ export default function App() {
               <div style={{ fontSize: 16, fontWeight: 800 }}>Recent Projects</div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <div style={{ fontSize: 12, opacity: 0.7 }}>
-                  {projectLibrary.length} saved
+                  {visibleProjectLibrary.length} saved
                 </div>
                 <div
                   style={{
                     fontSize: 11,
                     padding: "3px 7px",
                     borderRadius: 999,
-                    border:
-                      sharedProjectLibraryStatus === "connected"
-                        ? "1px solid rgba(89,226,143,0.55)"
-                        : "1px solid rgba(255,180,80,0.55)",
-                    background:
-                      sharedProjectLibraryStatus === "connected"
-                        ? "rgba(28,162,92,0.20)"
-                        : "rgba(198,116,42,0.22)",
+                    border: sharedStatusUi.border,
+                    background: sharedStatusUi.background,
                     color: "#fff",
                     fontWeight: 700,
                   }}
                 >
-                  {sharedProjectLibraryStatus === "connected"
-                    ? "Shared: connected"
-                    : "Shared: offline"}
+                  {sharedStatusUi.label}
                 </div>
                 {sharedProjectQueue.length > 0 && (
                   <div
@@ -9370,15 +9685,29 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => refreshSharedProjectLibrary({ quiet: false })}
-                  disabled={sharedProjectLibrarySyncing}
+                  disabled={
+                    sharedProjectLibrarySyncing ||
+                    sharedAuthChecking ||
+                    !sharedAccessAuthenticated
+                  }
                   style={{
                     padding: "5px 8px",
                     borderRadius: 8,
                     border: "1px solid rgba(255,255,255,0.22)",
                     background: "rgba(255,255,255,0.06)",
                     color: "#fff",
-                    cursor: sharedProjectLibrarySyncing ? "not-allowed" : "pointer",
-                    opacity: sharedProjectLibrarySyncing ? 0.6 : 1,
+                    cursor:
+                      sharedProjectLibrarySyncing ||
+                      sharedAuthChecking ||
+                      !sharedAccessAuthenticated
+                        ? "not-allowed"
+                        : "pointer",
+                    opacity:
+                      sharedProjectLibrarySyncing ||
+                      sharedAuthChecking ||
+                      !sharedAccessAuthenticated
+                        ? 0.6
+                        : 1,
                     fontWeight: 700,
                     fontSize: 11,
                   }}
@@ -9388,7 +9717,12 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => syncSharedProjectQueue({ quiet: false })}
-                  disabled={sharedProjectQueueSyncing || sharedProjectQueue.length === 0}
+                  disabled={
+                    sharedProjectQueueSyncing ||
+                    sharedProjectQueue.length === 0 ||
+                    sharedAuthChecking ||
+                    !sharedAccessAuthenticated
+                  }
                   style={{
                     padding: "5px 8px",
                     borderRadius: 8,
@@ -9396,11 +9730,19 @@ export default function App() {
                     background: "rgba(255,255,255,0.06)",
                     color: "#fff",
                     cursor:
-                      sharedProjectQueueSyncing || sharedProjectQueue.length === 0
+                      sharedProjectQueueSyncing ||
+                      sharedProjectQueue.length === 0 ||
+                      sharedAuthChecking ||
+                      !sharedAccessAuthenticated
                         ? "not-allowed"
                         : "pointer",
                     opacity:
-                      sharedProjectQueueSyncing || sharedProjectQueue.length === 0 ? 0.6 : 1,
+                      sharedProjectQueueSyncing ||
+                      sharedProjectQueue.length === 0 ||
+                      sharedAuthChecking ||
+                      !sharedAccessAuthenticated
+                        ? 0.6
+                        : 1,
                     fontWeight: 700,
                     fontSize: 11,
                   }}
@@ -9410,14 +9752,123 @@ export default function App() {
               </div>
             </div>
 
-            {projectLibrary.length === 0 ? (
+            {!sharedAccessAuthenticated ? (
+              <form
+                onSubmit={handleSharedLogin}
+                style={{
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: 12,
+                  padding: 12,
+                  marginBottom: 10,
+                  background: "rgba(255,255,255,0.04)",
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+                  Log in to access shared files
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>
+                  Shared project library is locked until authenticated.
+                </div>
+                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr auto" }}>
+                  <input
+                    type="text"
+                    value={sharedLoginUsername}
+                    onChange={(event) => setSharedLoginUsername(event.target.value)}
+                    placeholder="Username"
+                    autoComplete="username"
+                    style={{
+                      minWidth: 0,
+                      padding: "8px 10px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(255,255,255,0.18)",
+                      background: "rgba(6,12,18,0.9)",
+                      color: "#fff",
+                    }}
+                  />
+                  <input
+                    type="password"
+                    value={sharedLoginPassword}
+                    onChange={(event) => setSharedLoginPassword(event.target.value)}
+                    placeholder="Password"
+                    autoComplete="current-password"
+                    style={{
+                      minWidth: 0,
+                      padding: "8px 10px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(255,255,255,0.18)",
+                      background: "rgba(6,12,18,0.9)",
+                      color: "#fff",
+                    }}
+                  />
+                  <button
+                    type="submit"
+                    disabled={sharedLoginSubmitting || sharedAuthChecking}
+                    style={{
+                      padding: "8px 10px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(124,214,255,0.55)",
+                      background: "rgba(0,140,255,0.2)",
+                      color: "#fff",
+                      cursor:
+                        sharedLoginSubmitting || sharedAuthChecking ? "not-allowed" : "pointer",
+                      opacity: sharedLoginSubmitting || sharedAuthChecking ? 0.65 : 1,
+                      fontWeight: 700,
+                    }}
+                  >
+                    {sharedLoginSubmitting ? "Signing in..." : "Sign In"}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div
+                style={{
+                  border: "1px solid rgba(89,226,143,0.4)",
+                  borderRadius: 12,
+                  padding: "10px 12px",
+                  marginBottom: 10,
+                  background: "rgba(28,162,92,0.14)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                }}
+              >
+                <div style={{ fontSize: 12, opacity: 0.88 }}>
+                  Signed in as <b>{sharedAuth?.username || "admin"}</b>
+                  {sharedAuth?.expiresAt ? (
+                    <span style={{ opacity: 0.8 }}>
+                      {" "}
+                      • session expires {new Date(sharedAuth.expiresAt).toLocaleString()}
+                    </span>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSharedLogout}
+                  style={{
+                    padding: "7px 10px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(255,255,255,0.2)",
+                    background: "rgba(255,255,255,0.08)",
+                    color: "#fff",
+                    cursor: "pointer",
+                    fontWeight: 700,
+                    fontSize: 12,
+                  }}
+                >
+                  Log Out
+                </button>
+              </div>
+            )}
+
+            {visibleProjectLibrary.length === 0 ? (
               <div style={{ fontSize: 13, opacity: 0.72, lineHeight: 1.4 }}>
                 No saved projects yet. Use <b>Save Project (JSON)</b> in a measuring page and projects
                 will appear here.
               </div>
             ) : (
               <div style={{ display: "grid", gap: 8 }}>
-                {projectLibrary.map((entry) => (
+                {visibleProjectLibrary.map((entry) => (
                   <div
                     key={entry.id}
                     style={{
@@ -11367,17 +11818,26 @@ export default function App() {
           <div style={{ fontSize: 12, opacity: 0.72, marginTop: 6, lineHeight: 1.35 }}>
             Shared sync queue: {sharedProjectQueue.length} pending change
             {sharedProjectQueue.length === 1 ? "" : "s"}.
+            {!sharedAccessAuthenticated ? " Log in on Home to sync shared files." : ""}
           </div>
           <button
             onClick={() => syncSharedProjectQueue({ quiet: false })}
-            disabled={sharedProjectQueueSyncing || sharedProjectQueue.length === 0}
+            disabled={
+              sharedProjectQueueSyncing ||
+              sharedProjectQueue.length === 0 ||
+              !sharedAccessAuthenticated ||
+              sharedAuthChecking
+            }
             style={{
               width: "100%",
               marginTop: 8,
               padding: "8px 10px",
               borderRadius: 10,
               cursor:
-                sharedProjectQueueSyncing || sharedProjectQueue.length === 0
+                sharedProjectQueueSyncing ||
+                sharedProjectQueue.length === 0 ||
+                !sharedAccessAuthenticated ||
+                sharedAuthChecking
                   ? "not-allowed"
                   : "pointer",
               border: "1px solid rgba(255,255,255,0.12)",
@@ -11385,7 +11845,12 @@ export default function App() {
               color: "#fff",
               fontWeight: 700,
               opacity:
-                sharedProjectQueueSyncing || sharedProjectQueue.length === 0 ? 0.6 : 1,
+                sharedProjectQueueSyncing ||
+                sharedProjectQueue.length === 0 ||
+                !sharedAccessAuthenticated ||
+                sharedAuthChecking
+                  ? 0.6
+                  : 1,
             }}
           >
             {sharedProjectQueueSyncing ? "Syncing Shared Queue..." : "Sync Shared Queue Now"}

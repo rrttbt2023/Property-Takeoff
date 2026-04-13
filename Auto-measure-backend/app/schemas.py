@@ -128,3 +128,24 @@ class SharedProjectUpsertRequest(BaseModel):
 
 class SharedProjectDeleteResponse(BaseModel):
     deleted: bool
+
+
+class SharedAuthLoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=120)
+    password: str = Field(..., min_length=1, max_length=240)
+
+
+class SharedAuthLoginResponse(BaseModel):
+    token: str
+    username: str
+    expires_at: str
+
+
+class SharedAuthSessionResponse(BaseModel):
+    authenticated: bool = True
+    username: str
+    expires_at: str
+
+
+class SharedAuthLogoutResponse(BaseModel):
+    ok: bool = True

@@ -3,7 +3,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.schemas import (
     SharedProjectDeleteResponse,
@@ -11,8 +11,13 @@ from app.schemas import (
     SharedProjectSummary,
     SharedProjectUpsertRequest,
 )
+from app.services.shared_auth import require_shared_access
 
-router = APIRouter(prefix="/projects", tags=["projects"])
+router = APIRouter(
+    prefix="/projects",
+    tags=["projects"],
+    dependencies=[Depends(require_shared_access)],
+)
 
 PROJECTS_DIR = Path(__file__).resolve().parents[2] / "data" / "shared_projects"
 MAX_PROJECTS_LIMIT = 500

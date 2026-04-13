@@ -1,5 +1,10 @@
 const RAW_API_BASE = String(import.meta.env.VITE_API_BASE_URL || "").trim();
 const API_BASE_URL = RAW_API_BASE.replace(/\/+$/, "");
+let sharedAuthToken = "";
+
+export function setSharedAuthToken(token) {
+  sharedAuthToken = String(token || "").trim();
+}
 
 function buildApiCandidates(path) {
   const candidates = [];
@@ -177,11 +182,19 @@ export function segmentMeasurementUpload({
 }
 
 export function listSharedProjects(limit = 100) {
-  return request(`/api/projects?limit=${encodeURIComponent(limit)}`);
+  return request(`/api/projects?limit=${encodeURIComponent(limit)}`, {
+    headers: sharedAuthToken
+      ? { Authorization: `Bearer ${sharedAuthToken}` }
+      : {},
+  });
 }
 
 export function getSharedProject(projectId) {
-  return request(`/api/projects/${encodeURIComponent(projectId)}`);
+  return request(`/api/projects/${encodeURIComponent(projectId)}`, {
+    headers: sharedAuthToken
+      ? { Authorization: `Bearer ${sharedAuthToken}` }
+      : {},
+  });
 }
 
 export function saveSharedProject({
@@ -194,7 +207,10 @@ export function saveSharedProject({
 }) {
   return request(`/api/projects/${encodeURIComponent(id)}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(sharedAuthToken ? { Authorization: `Bearer ${sharedAuthToken}` } : {}),
+    },
     body: JSON.stringify({
       id,
       project_name: projectName,
@@ -209,5 +225,36 @@ export function saveSharedProject({
 export function deleteSharedProject(projectId) {
   return request(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
+    headers: sharedAuthToken
+      ? { Authorization: `Bearer ${sharedAuthToken}` }
+      : {},
+  });
+}
+
+export function loginSharedAccess({ username, password }) {
+  return request("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username: String(username || "").trim(),
+      password: String(password || ""),
+    }),
+  });
+}
+
+export function getSharedAccessSession() {
+  return request("/api/auth/session", {
+    headers: sharedAuthToken
+      ? { Authorization: `Bearer ${sharedAuthToken}` }
+      : {},
+  });
+}
+
+export function logoutSharedAccess() {
+  return request("/api/auth/logout", {
+    method: "POST",
+    headers: sharedAuthToken
+      ? { Authorization: `Bearer ${sharedAuthToken}` }
+      : {},
   });
 }
