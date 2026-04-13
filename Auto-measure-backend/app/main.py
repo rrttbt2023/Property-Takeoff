@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,10 +20,40 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Auto Measure Backend", lifespan=lifespan)
 
 
+def _parse_csv_env(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return default
+    values: list[str] = []
+    for item in raw.split(","):
+        candidate = item.strip()
+        if candidate and candidate not in values:
+            values.append(candidate)
+    return values or default
+
+
+DEFAULT_CORS_ORIGIN_REGEX = (
+    r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3})(:\d+)?$"
+    r"|^https://[a-z0-9-]+\.vercel\.app$"
+    r"|^https://[a-z0-9-]+\.onrender\.com$"
+)
+cors_allow_origins = _parse_csv_env(
+    "AUTO_MEASURE_CORS_ALLOW_ORIGINS",
+    [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+)
+cors_allow_origin_regex = os.getenv(
+    "AUTO_MEASURE_CORS_ALLOW_ORIGIN_REGEX",
+    DEFAULT_CORS_ORIGIN_REGEX,
+).strip() or None
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3})(:\d+)?$",
+    allow_origins=cors_allow_origins,
+    allow_origin_regex=cors_allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
