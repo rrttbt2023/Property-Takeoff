@@ -2,11 +2,13 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+from app.repositories.audit_repository import init_db as init_audit_db
 from app.repositories.measurement_repository import init_db
+from app.routes.audit import router as audit_router
 from app.routes.auth import router as auth_router
 from app.routes.measurements import router as measurements_router
 from app.routes.projects import router as projects_router
@@ -15,6 +17,7 @@ from app.routes.projects import router as projects_router
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    init_audit_db()
     yield
 
 
@@ -61,6 +64,26 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "geolocation=(), microphone=(), camera=()",
+    )
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "cross-origin")
+    if request.headers.get("x-forwarded-proto", "").lower() == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    return response
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -77,6 +100,8 @@ app.include_router(auth_router)
 app.include_router(auth_router, prefix="/api")
 app.include_router(projects_router)
 app.include_router(projects_router, prefix="/api")
+app.include_router(audit_router)
+app.include_router(audit_router, prefix="/api")
 
 
 frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"

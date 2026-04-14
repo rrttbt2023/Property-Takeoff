@@ -3,8 +3,9 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from app.repositories.audit_repository import write_event
 from app.schemas import (
     SharedProjectDeleteResponse,
     SharedProjectRecord,
@@ -117,6 +118,21 @@ def _to_summary(record: dict, project_id: str) -> SharedProjectSummary:
     )
 
 
+def _request_meta(request: Request) -> tuple[str, str]:
+    forwarded = str(request.headers.get("x-forwarded-for", "")).split(",")[0].strip()
+    client_ip = forwarded or str(request.client.host if request.client else "")
+    user_agent = str(request.headers.get("user-agent", ""))
+    return client_ip[:120], user_agent[:500]
+
+
+def _write_audit_safe(**kwargs) -> None:
+    try:
+        write_event(**kwargs)
+    except Exception:
+        # Access audit must never block primary project flow.
+        pass
+
+
 @router.get("", response_model=list[SharedProjectSummary])
 def list_shared_projects(
     limit: int = Query(100, ge=1, le=MAX_PROJECTS_LIMIT),
@@ -143,11 +159,22 @@ def list_shared_projects(
 
 @router.get("/{project_id}", response_model=SharedProjectRecord)
 def get_shared_project(
+    request: Request,
     project_id: str,
-    _: dict[str, str] = Depends(require_shared_access),
+    session: dict[str, str] = Depends(require_shared_access),
 ) -> SharedProjectRecord:
+    username = str(session.get("username") or "unknown")
+    ip_address, user_agent = _request_meta(request)
     path = _project_path(project_id)
     if not path.exists():
+        _write_audit_safe(
+            username=username,
+            action="project.open",
+            outcome="not_found",
+            resource=str(_normalize_project_id(project_id)),
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
         raise HTTPException(status_code=404, detail=f"Shared project '{project_id}' not found.")
     record = _read_record(path)
     if not record:
@@ -156,6 +183,14 @@ def get_shared_project(
     payload = record.get("payload")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=500, detail="Shared project payload is invalid.")
+    _write_audit_safe(
+        username=username,
+        action="project.open",
+        outcome="success",
+        resource=summary.id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
     return SharedProjectRecord(
         id=summary.id,
         project_name=summary.project_name,
@@ -170,6 +205,7 @@ def get_shared_project(
 
 @router.put("/{project_id}", response_model=SharedProjectSummary)
 def upsert_shared_project(
+    request: Request,
     project_id: str,
     body: SharedProjectUpsertRequest,
     session: dict[str, str] = Depends(require_shared_access),
@@ -212,16 +248,50 @@ def upsert_shared_project(
     temp_path.write_text(json.dumps(record, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
     temp_path.replace(path)
 
+    ip_address, user_agent = _request_meta(request)
+    _write_audit_safe(
+        username=saved_by,
+        action="project.save",
+        outcome="success",
+        resource=normalized_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details={
+            "polygon_count": int(record["polygon_count"]),
+            "has_boundary": bool(record["has_boundary"]),
+        },
+    )
+
     return _to_summary(record, normalized_id)
 
 
 @router.delete("/{project_id}", response_model=SharedProjectDeleteResponse)
 def delete_shared_project(
+    request: Request,
     project_id: str,
-    _: dict[str, str] = Depends(require_shared_access),
+    session: dict[str, str] = Depends(require_shared_access),
 ) -> SharedProjectDeleteResponse:
     path = _project_path(project_id)
+    normalized_id = _normalize_project_id(project_id)
+    username = str(session.get("username") or "unknown")
+    ip_address, user_agent = _request_meta(request)
     if not path.exists():
+        _write_audit_safe(
+            username=username,
+            action="project.delete",
+            outcome="not_found",
+            resource=normalized_id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
         return SharedProjectDeleteResponse(deleted=False)
     path.unlink(missing_ok=True)
+    _write_audit_safe(
+        username=username,
+        action="project.delete",
+        outcome="success",
+        resource=normalized_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
     return SharedProjectDeleteResponse(deleted=True)

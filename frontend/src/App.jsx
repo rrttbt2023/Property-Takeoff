@@ -23,6 +23,7 @@ import {
   deleteSharedProject,
   getSharedProject,
   getSharedAccessSession,
+  getSecurityAuditEvents,
   getMeasurementHistory,
   loginSharedAccess,
   listSharedProjects,
@@ -2267,6 +2268,9 @@ export default function App() {
   );
   const [sharedProjectLibrarySyncing, setSharedProjectLibrarySyncing] = useState(false);
   const [sharedProjectQueueSyncing, setSharedProjectQueueSyncing] = useState(false);
+  const [securityAuditEvents, setSecurityAuditEvents] = useState([]);
+  const [securityAuditSyncing, setSecurityAuditSyncing] = useState(false);
+  const [showLegalNotes, setShowLegalNotes] = useState(false);
   const sharedAccessToken = String(sharedAuth?.token || "").trim();
   const sharedAccessAuthenticated = !!sharedAccessToken;
   const [appScreen, setAppScreen] = useState(APP_SCREEN_HOME); // "home" | "location" | "pdf"
@@ -2547,6 +2551,48 @@ export default function App() {
     [pushToast, sharedAccessAuthenticated, sharedLoginUsername]
   );
 
+  const refreshSecurityAuditEvents = useCallback(
+    async ({ quiet = true } = {}) => {
+      if (!sharedAccessAuthenticated) {
+        setSecurityAuditEvents([]);
+        if (!quiet) {
+          pushToast("Log in to view security audit events.", "warn", 4200);
+        }
+        return;
+      }
+      setSecurityAuditSyncing(true);
+      try {
+        const events = await getSecurityAuditEvents(180);
+        setSecurityAuditEvents(Array.isArray(events) ? events : []);
+        if (!quiet) {
+          pushToast("Security audit log refreshed.", "info", 3200);
+        }
+      } catch (error) {
+        if (isAuthError(error)) {
+          setSharedAuth((prev) => ({
+            token: "",
+            username: String(prev?.username || sharedLoginUsername || "admin").trim() || "admin",
+            expiresAt: "",
+          }));
+          setSharedProjectLibraryStatus("locked");
+          setSecurityAuditEvents([]);
+          if (!quiet) {
+            pushToast("Shared session expired. Log in again.", "warn", 5200);
+          }
+        } else if (!quiet) {
+          pushToast(
+            `Audit log refresh failed: ${error?.message || "backend unavailable"}.`,
+            "warn",
+            5200
+          );
+        }
+      } finally {
+        setSecurityAuditSyncing(false);
+      }
+    },
+    [pushToast, sharedAccessAuthenticated, sharedLoginUsername]
+  );
+
   const syncSharedProjectQueue = useCallback(
     async ({ quiet = true } = {}) => {
       if (sharedProjectQueueSyncingRef.current) return;
@@ -2667,6 +2713,23 @@ export default function App() {
   }, [appScreen, refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedAuthChecking]);
 
   useEffect(() => {
+    if (!sharedAccessAuthenticated) {
+      setSecurityAuditEvents([]);
+      setSecurityAuditSyncing(false);
+    }
+  }, [sharedAccessAuthenticated]);
+
+  useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+    if (appScreen !== APP_SCREEN_HOME) return;
+    refreshSecurityAuditEvents({ quiet: true });
+    const timer = setInterval(() => {
+      refreshSecurityAuditEvents({ quiet: true });
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [appScreen, refreshSecurityAuditEvents, sharedAccessAuthenticated, sharedAuthChecking]);
+
+  useEffect(() => {
     if (!sharedAccessAuthenticated || sharedAuthChecking) return;
     const timer = setInterval(() => {
       if (sharedProjectQueueRef.current?.length) {
@@ -2745,6 +2808,7 @@ export default function App() {
       expiresAt: "",
     }));
     setSharedProjectLibraryStatus("locked");
+    setSecurityAuditEvents([]);
     pushToast("Logged out from shared files.", "info", 3600);
   }, [pushToast, sharedAccessAuthenticated, sharedLoginUsername]);
 
@@ -9981,6 +10045,183 @@ export default function App() {
                 ))}
               </div>
             )}
+          </div>
+
+          <div
+            style={{
+              marginTop: 14,
+              display: "grid",
+              gap: 12,
+              gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+            }}
+          >
+            <div
+              style={{
+                borderRadius: 20,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(8,16,26,0.75)",
+                padding: "14px 14px 12px",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: 10,
+                  gap: 10,
+                }}
+              >
+                <div style={{ fontSize: 16, fontWeight: 800 }}>Security & Legal</div>
+                <button
+                  type="button"
+                  onClick={() => setShowLegalNotes((prev) => !prev)}
+                  style={{
+                    padding: "6px 9px",
+                    borderRadius: 9,
+                    border: "1px solid rgba(255,255,255,0.22)",
+                    background: "rgba(255,255,255,0.06)",
+                    color: "#fff",
+                    cursor: "pointer",
+                    fontWeight: 700,
+                    fontSize: 11,
+                  }}
+                >
+                  {showLegalNotes ? "Hide Policy" : "Show Policy"}
+                </button>
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.8, lineHeight: 1.45 }}>
+                Access requires login. Project changes are audit-logged (user, action, time, device/IP metadata).
+              </div>
+              {showLegalNotes ? (
+                <div
+                  style={{
+                    marginTop: 10,
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background: "rgba(255,255,255,0.04)",
+                    padding: "10px 11px",
+                    fontSize: 12,
+                    lineHeight: 1.48,
+                    color: "rgba(255,255,255,0.9)",
+                  }}
+                >
+                  <div style={{ fontWeight: 800, marginBottom: 4 }}>Terms of Use</div>
+                  Authorized business use only. Do not upload protected data unless you have rights to process it.
+                  <div style={{ fontWeight: 800, marginTop: 8, marginBottom: 4 }}>Privacy Notice</div>
+                  Shared login events and project actions are logged for accountability and security review.
+                  <div style={{ fontWeight: 800, marginTop: 8, marginBottom: 4 }}>Data Retention</div>
+                  Audit events are retained by backend policy (`AUTO_MEASURE_AUDIT_RETENTION_DAYS`,
+                  default 180 days). Shared project files remain until deleted by a logged-in user.
+                </div>
+              ) : null}
+            </div>
+
+            <div
+              style={{
+                borderRadius: 20,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(8,16,26,0.75)",
+                padding: "14px 14px 12px",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: 10,
+                  gap: 8,
+                }}
+              >
+                <div style={{ fontSize: 16, fontWeight: 800 }}>Access Audit Log</div>
+                <button
+                  type="button"
+                  onClick={() => refreshSecurityAuditEvents({ quiet: false })}
+                  disabled={!sharedAccessAuthenticated || sharedAuthChecking || securityAuditSyncing}
+                  style={{
+                    padding: "6px 9px",
+                    borderRadius: 9,
+                    border: "1px solid rgba(255,255,255,0.22)",
+                    background: "rgba(255,255,255,0.06)",
+                    color: "#fff",
+                    cursor:
+                      !sharedAccessAuthenticated || sharedAuthChecking || securityAuditSyncing
+                        ? "not-allowed"
+                        : "pointer",
+                    opacity:
+                      !sharedAccessAuthenticated || sharedAuthChecking || securityAuditSyncing
+                        ? 0.6
+                        : 1,
+                    fontWeight: 700,
+                    fontSize: 11,
+                  }}
+                >
+                  {securityAuditSyncing ? "Refreshing..." : "Refresh Log"}
+                </button>
+              </div>
+              {!sharedAccessAuthenticated ? (
+                <div style={{ fontSize: 12, opacity: 0.78 }}>
+                  Sign in above to view audit events.
+                </div>
+              ) : securityAuditEvents.length === 0 ? (
+                <div style={{ fontSize: 12, opacity: 0.78 }}>
+                  No audit events yet.
+                </div>
+              ) : (
+                <div
+                  style={{
+                    maxHeight: 250,
+                    overflow: "auto",
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    borderRadius: 10,
+                    background: "rgba(3,8,12,0.72)",
+                  }}
+                >
+                  {securityAuditEvents.slice(0, 80).map((event) => (
+                    <div
+                      key={event.id}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "120px 1fr",
+                        gap: 8,
+                        padding: "8px 10px",
+                        borderBottom: "1px solid rgba(255,255,255,0.08)",
+                        fontSize: 12,
+                        lineHeight: 1.35,
+                      }}
+                    >
+                      <div style={{ opacity: 0.7 }}>
+                        {event.created_at
+                          ? new Date(event.created_at).toLocaleString()
+                          : "Unknown"}
+                      </div>
+                      <div>
+                        <span style={{ fontWeight: 800 }}>{event.username || "unknown"}</span>{" "}
+                        <span style={{ opacity: 0.9 }}>{event.action || "action"}</span>{" "}
+                        <span
+                          style={{
+                            opacity: 0.95,
+                            color:
+                              event.outcome === "success"
+                                ? "#7febad"
+                                : event.outcome === "failure"
+                                ? "#ff8a8a"
+                                : "#ffd786",
+                          }}
+                        >
+                          ({event.outcome || "unknown"})
+                        </span>
+                        {event.resource ? <span style={{ opacity: 0.75 }}> • {event.resource}</span> : null}
+                        {event.ip_address ? (
+                          <span style={{ opacity: 0.62 }}> • {event.ip_address}</span>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

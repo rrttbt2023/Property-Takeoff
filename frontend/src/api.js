@@ -258,3 +258,11 @@ export function logoutSharedAccess() {
       : {},
   });
 }
+
+export function getSecurityAuditEvents(limit = 120) {
+  return request(`/api/audit/events?limit=${encodeURIComponent(limit)}`, {
+    headers: sharedAuthToken
+      ? { Authorization: `Bearer ${sharedAuthToken}` }
+      : {},
+  });
+}

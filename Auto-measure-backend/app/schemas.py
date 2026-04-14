@@ -151,3 +151,15 @@ class SharedAuthSessionResponse(BaseModel):
 
 class SharedAuthLogoutResponse(BaseModel):
     ok: bool = True
+
+
+class SecurityAuditEvent(BaseModel):
+    id: int
+    created_at: str
+    username: str
+    action: str
+    outcome: str
+    resource: str
+    ip_address: str
+    user_agent: str
+    details: dict[str, Any] = Field(default_factory=dict)
