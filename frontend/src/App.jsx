@@ -1370,6 +1370,8 @@ function readStoredProjectLibrary() {
         id: String(entry?.id || buildProjectLibraryId(projectName)),
         projectName,
         savedAt: String(entry?.savedAt || payload?.savedAt || new Date().toISOString()),
+        savedBy: String(entry?.savedBy || "").trim(),
+        lastEditedAt: String(entry?.lastEditedAt || entry?.savedAt || payload?.savedAt || "").trim(),
         polygonCount: Number.isFinite(Number(entry?.polygonCount))
           ? Math.max(0, Number(entry.polygonCount))
           : countProjectPayloadPolygons(payload),
@@ -1464,24 +1466,46 @@ function upsertSharedQueueOperation(prevQueue, nextOp) {
   return [...filtered, normalized].slice(-500);
 }
 
-function buildProjectLibraryEntryFromPayload(payload, fallbackProjectName = "") {
+function buildProjectLibraryEntryFromPayload(payload, fallbackProjectName = "", metadata = null) {
   if (!isValidProjectPayload(payload)) return null;
   const projectName =
     String(payload?.projectName || fallbackProjectName || "").trim() || "Untitled Project";
+  const savedBy = String(metadata?.savedBy || "").trim();
+  const lastEditedAt = String(
+    metadata?.lastEditedAt || payload?.savedAt || new Date().toISOString()
+  ).trim();
   return {
     id: buildProjectLibraryId(projectName),
     projectName,
     savedAt: String(payload?.savedAt || new Date().toISOString()),
+    savedBy,
+    lastEditedAt,
     polygonCount: countProjectPayloadPolygons(payload),
     hasBoundary: !!payload?.boundary,
     payload,
   };
 }
 
-function upsertProjectLibraryEntries(prevEntries, payload, fallbackProjectName = "") {
-  const nextEntry = buildProjectLibraryEntryFromPayload(payload, fallbackProjectName);
+function upsertProjectLibraryEntries(
+  prevEntries,
+  payload,
+  fallbackProjectName = "",
+  metadata = null
+) {
+  const nextEntry = buildProjectLibraryEntryFromPayload(
+    payload,
+    fallbackProjectName,
+    metadata
+  );
   if (!nextEntry) return Array.isArray(prevEntries) ? prevEntries : [];
   const prev = Array.isArray(prevEntries) ? prevEntries : [];
+  const existing = prev.find((entry) => entry?.id === nextEntry.id);
+  if (!nextEntry.savedBy && existing?.savedBy) {
+    nextEntry.savedBy = String(existing.savedBy).trim();
+  }
+  if (!nextEntry.lastEditedAt && existing?.lastEditedAt) {
+    nextEntry.lastEditedAt = String(existing.lastEditedAt).trim();
+  }
   return [nextEntry, ...prev.filter((entry) => entry?.id !== nextEntry.id)].slice(
     0,
     PROJECT_LIBRARY_MAX_ENTRIES
@@ -1501,6 +1525,10 @@ function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
     const id = String(entry?.id || "").trim();
     const projectName = String(entry?.project_name || entry?.projectName || "").trim();
     const savedAt = String(entry?.saved_at || entry?.savedAt || new Date().toISOString());
+    const savedBy = String(entry?.saved_by || entry?.savedBy || "").trim();
+    const lastEditedAt = String(
+      entry?.last_edited_at || entry?.lastEditedAt || savedAt
+    ).trim();
     const polygonCount = Number.isFinite(Number(entry?.polygon_count))
       ? Math.max(0, Number(entry.polygon_count))
       : Number.isFinite(Number(entry?.polygonCount))
@@ -1517,6 +1545,8 @@ function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
       id,
       projectName: projectName || "Untitled Project",
       savedAt,
+      savedBy,
+      lastEditedAt,
       polygonCount,
       hasBoundary,
       payload: payloadById.get(id) || null,
@@ -5849,7 +5879,13 @@ export default function App() {
           upsertProjectLibraryEntries(
             prev,
             remoteProject.payload,
-            remoteProject.project_name || "Saved Project"
+            remoteProject.project_name || "Saved Project",
+            {
+              savedBy: String(remoteProject.saved_by || "").trim(),
+              lastEditedAt: String(
+                remoteProject.last_edited_at || remoteProject.saved_at || ""
+              ).trim(),
+            }
           )
         );
       } catch (error) {
@@ -9894,9 +9930,12 @@ export default function App() {
                         {entry.projectName || "Untitled Project"}
                       </div>
                       <div style={{ fontSize: 12, opacity: 0.72 }}>
-                        {new Date(entry.savedAt).toLocaleString()} •{" "}
                         {Number(entry.polygonCount || 0).toLocaleString()} polygons • Boundary:{" "}
-                        {entry.hasBoundary ? "Yes" : "No"}
+                        {entry.hasBoundary ? "Yes" : "No"} • Saved by:{" "}
+                        {entry.savedBy || "local"} • Last edited:{" "}
+                        {entry.lastEditedAt
+                          ? new Date(entry.lastEditedAt).toLocaleString()
+                          : new Date(entry.savedAt).toLocaleString()}
                       </div>
                     </div>
                     <button

@@ -16,7 +16,6 @@ from app.services.shared_auth import require_shared_access
 router = APIRouter(
     prefix="/projects",
     tags=["projects"],
-    dependencies=[Depends(require_shared_access)],
 )
 
 PROJECTS_DIR = Path(__file__).resolve().parents[2] / "data" / "shared_projects"
@@ -92,10 +91,15 @@ def _to_summary(record: dict, project_id: str) -> SharedProjectSummary:
     project_name = str(record.get("project_name") or payload_dict.get("projectName") or "").strip()
     if not project_name:
         project_name = "Untitled Project"
-    saved_at = _parse_saved_at(
+    saved_at_raw = _parse_saved_at(
         str(record.get("saved_at") or payload_dict.get("savedAt") or "").strip(),
         _now_iso(),
     )
+    last_edited_at = _parse_saved_at(
+        str(record.get("last_edited_at") or "").strip(),
+        saved_at_raw,
+    )
+    saved_by = str(record.get("saved_by") or "").strip() or "unknown"
     polygon_count = record.get("polygon_count")
     if not isinstance(polygon_count, int):
         polygon_count = _count_payload_polygons(payload_dict)
@@ -105,7 +109,9 @@ def _to_summary(record: dict, project_id: str) -> SharedProjectSummary:
     return SharedProjectSummary(
         id=_normalize_project_id(project_id),
         project_name=project_name,
-        saved_at=saved_at,
+        saved_at=saved_at_raw,
+        saved_by=saved_by,
+        last_edited_at=last_edited_at,
         polygon_count=max(0, int(polygon_count)),
         has_boundary=bool(has_boundary),
     )
@@ -114,6 +120,7 @@ def _to_summary(record: dict, project_id: str) -> SharedProjectSummary:
 @router.get("", response_model=list[SharedProjectSummary])
 def list_shared_projects(
     limit: int = Query(100, ge=1, le=MAX_PROJECTS_LIMIT),
+    _: dict[str, str] = Depends(require_shared_access),
 ) -> list[SharedProjectSummary]:
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     summaries: list[SharedProjectSummary] = []
@@ -127,12 +134,18 @@ def list_shared_projects(
         except Exception:
             # Keep listing robust even if one saved file is malformed.
             continue
-    summaries.sort(key=lambda item: item.saved_at, reverse=True)
+    summaries.sort(
+        key=lambda item: str(item.last_edited_at or item.saved_at or ""),
+        reverse=True,
+    )
     return summaries[:limit]
 
 
 @router.get("/{project_id}", response_model=SharedProjectRecord)
-def get_shared_project(project_id: str) -> SharedProjectRecord:
+def get_shared_project(
+    project_id: str,
+    _: dict[str, str] = Depends(require_shared_access),
+) -> SharedProjectRecord:
     path = _project_path(project_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Shared project '{project_id}' not found.")
@@ -147,6 +160,8 @@ def get_shared_project(project_id: str) -> SharedProjectRecord:
         id=summary.id,
         project_name=summary.project_name,
         saved_at=summary.saved_at,
+        saved_by=summary.saved_by,
+        last_edited_at=summary.last_edited_at,
         polygon_count=summary.polygon_count,
         has_boundary=summary.has_boundary,
         payload=payload,
@@ -154,11 +169,17 @@ def get_shared_project(project_id: str) -> SharedProjectRecord:
 
 
 @router.put("/{project_id}", response_model=SharedProjectSummary)
-def upsert_shared_project(project_id: str, body: SharedProjectUpsertRequest) -> SharedProjectSummary:
+def upsert_shared_project(
+    project_id: str,
+    body: SharedProjectUpsertRequest,
+    session: dict[str, str] = Depends(require_shared_access),
+) -> SharedProjectSummary:
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     normalized_id = _normalize_project_id(project_id or body.id)
     now_iso = _now_iso()
     saved_at = _parse_saved_at(body.saved_at, now_iso)
+    saved_by = str(session.get("username") or "").strip() or "unknown"
+    existing = _read_record(_project_path(normalized_id)) or {}
     polygon_count = (
         int(body.polygon_count)
         if isinstance(body.polygon_count, int)
@@ -177,6 +198,10 @@ def upsert_shared_project(project_id: str, body: SharedProjectUpsertRequest) -> 
         "id": normalized_id,
         "project_name": project_name,
         "saved_at": saved_at,
+        "saved_by": saved_by,
+        "last_edited_at": now_iso,
+        "created_at": str(existing.get("created_at") or now_iso),
+        "created_by": str(existing.get("created_by") or saved_by),
         "polygon_count": max(0, polygon_count),
         "has_boundary": has_boundary,
         "payload": body.payload,
@@ -191,7 +216,10 @@ def upsert_shared_project(project_id: str, body: SharedProjectUpsertRequest) -> 
 
 
 @router.delete("/{project_id}", response_model=SharedProjectDeleteResponse)
-def delete_shared_project(project_id: str) -> SharedProjectDeleteResponse:
+def delete_shared_project(
+    project_id: str,
+    _: dict[str, str] = Depends(require_shared_access),
+) -> SharedProjectDeleteResponse:
     path = _project_path(project_id)
     if not path.exists():
         return SharedProjectDeleteResponse(deleted=False)

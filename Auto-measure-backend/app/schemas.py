@@ -109,6 +109,8 @@ class SharedProjectSummary(BaseModel):
     id: str
     project_name: str
     saved_at: str
+    saved_by: str | None = None
+    last_edited_at: str | None = None
     polygon_count: int = Field(0, ge=0)
     has_boundary: bool = False
 
