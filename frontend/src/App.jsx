@@ -9767,7 +9767,7 @@ export default function App() {
                   Log in to access shared files
                 </div>
                 <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>
-                  Shared project library is locked until authenticated.
+                  Shared project library is locked until authenticated. Each team member can use their own login.
                 </div>
                 <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr auto" }}>
                   <input

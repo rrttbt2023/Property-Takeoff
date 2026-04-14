@@ -1,5 +1,6 @@
 import os
 import secrets
+import json
 from datetime import UTC, datetime, timedelta
 from threading import Lock
 
@@ -35,6 +36,69 @@ def _configured_password() -> str:
     return str(os.getenv("AUTO_MEASURE_SHARED_AUTH_PASS", "changeme")).strip() or "changeme"
 
 
+def _append_credential(credentials: dict[str, str], username: str, password: str) -> None:
+    user = str(username or "").strip()
+    pwd = str(password or "")
+    if not user or not pwd:
+        return
+    if len(user) > 120:
+        return
+    credentials[user] = pwd
+
+
+def _parse_credentials_json(raw: str) -> dict[str, str]:
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    credentials: dict[str, str] = {}
+    if isinstance(parsed, dict):
+        for username, password in parsed.items():
+            _append_credential(credentials, str(username), str(password))
+        return credentials
+    if isinstance(parsed, list):
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            _append_credential(credentials, item.get("username"), item.get("password"))
+        return credentials
+    return {}
+
+
+def _parse_credentials_csv(raw: str) -> dict[str, str]:
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    credentials: dict[str, str] = {}
+    for chunk in text.split(","):
+        pair = str(chunk or "").strip()
+        if not pair or ":" not in pair:
+            continue
+        username, password = pair.split(":", 1)
+        _append_credential(credentials, username, password)
+    return credentials
+
+
+def _configured_credentials() -> dict[str, str]:
+    credentials: dict[str, str] = {}
+    json_creds = _parse_credentials_json(
+        str(os.getenv("AUTO_MEASURE_SHARED_AUTH_USERS_JSON", "")).strip()
+    )
+    if json_creds:
+        credentials.update(json_creds)
+    csv_creds = _parse_credentials_csv(
+        str(os.getenv("AUTO_MEASURE_SHARED_AUTH_USERS", "")).strip()
+    )
+    if csv_creds:
+        credentials.update(csv_creds)
+    if credentials:
+        return credentials
+    return {_configured_username(): _configured_password()}
+
+
 def _parse_bearer_token(raw: str | None) -> str:
     text = str(raw or "").strip()
     if not text:
@@ -65,19 +129,20 @@ def _gc_expired_tokens() -> None:
 
 
 def login_shared_user(username: str, password: str) -> dict[str, str]:
-    configured_user = _configured_username()
-    configured_pass = _configured_password()
     user = str(username or "").strip()
     pwd = str(password or "")
-    if not (
-        secrets.compare_digest(user, configured_user)
-        and secrets.compare_digest(pwd, configured_pass)
-    ):
+    configured_credentials = _configured_credentials()
+    expected_password = configured_credentials.get(user)
+    if not expected_password:
+        # Keep timing behavior closer to a valid compare.
+        secrets.compare_digest(pwd, _configured_password())
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    if not secrets.compare_digest(pwd, expected_password):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
     token = secrets.token_urlsafe(36)
     expires_at = _session_expiry().isoformat().replace("+00:00", "Z")
-    session = {"token": token, "username": configured_user, "expires_at": expires_at}
+    session = {"token": token, "username": user, "expires_at": expires_at}
     with _TOKEN_LOCK:
         _gc_expired_tokens()
         _TOKEN_STORE[token] = session
