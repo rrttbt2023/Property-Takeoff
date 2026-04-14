@@ -84,16 +84,19 @@ def _parse_credentials_csv(raw: str) -> dict[str, str]:
 
 def _configured_credentials() -> dict[str, str]:
     credentials: dict[str, str] = {}
-    json_creds = _parse_credentials_json(
-        str(os.getenv("AUTO_MEASURE_SHARED_AUTH_USERS_JSON", "")).strip()
-    )
-    if json_creds:
-        credentials.update(json_creds)
-    csv_creds = _parse_credentials_csv(
-        str(os.getenv("AUTO_MEASURE_SHARED_AUTH_USERS", "")).strip()
-    )
-    if csv_creds:
-        credentials.update(csv_creds)
+    raw_users_json = str(os.getenv("AUTO_MEASURE_SHARED_AUTH_USERS_JSON", "")).strip()
+    raw_users = str(os.getenv("AUTO_MEASURE_SHARED_AUTH_USERS", "")).strip()
+    raw_values = [raw_users_json, raw_users]
+    for raw in raw_values:
+        if not raw:
+            continue
+        json_creds = _parse_credentials_json(raw)
+        if json_creds:
+            credentials.update(json_creds)
+            continue
+        csv_creds = _parse_credentials_csv(raw)
+        if csv_creds:
+            credentials.update(csv_creds)
     if credentials:
         return credentials
     return {_configured_username(): _configured_password()}
