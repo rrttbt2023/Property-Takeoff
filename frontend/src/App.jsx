@@ -5398,17 +5398,21 @@ export default function App() {
   ]);
 
   // Save/load project
-  const saveProject = useCallback(async () => {
+  const saveProject = useCallback(async ({ downloadFile = true } = {}) => {
     const payload = buildProjectPayload();
     const localEntry = buildProjectLibraryEntryFromPayload(payload);
     setLayerFeatures(payload.layerFeatures);
     setProjectLibrary((prev) => upsertProjectLibraryEntries(prev, payload));
 
-    const fname = `${safeFilename(payload.projectName)}.json`;
-    downloadJson(fname, payload);
+    if (downloadFile) {
+      const fname = `${safeFilename(payload.projectName)}.json`;
+      downloadJson(fname, payload);
+    }
     if (!sharedAccessAuthenticated) {
       pushToast(
-        "Project saved (JSON). Log in on Home to sync this project to shared files.",
+        downloadFile
+          ? "Project saved (JSON). Log in on Home to sync this project to shared files."
+          : "Project saved locally in this browser. Log in on Home to sync to shared files.",
         "info",
         5200
       );
@@ -5432,7 +5436,9 @@ export default function App() {
         setSharedProjectLibraryStatus("connected");
         refreshSharedProjectLibrary({ quiet: true });
         pushToast(
-          "Project saved (JSON) and synced to shared Home projects.",
+          downloadFile
+            ? "Project saved (JSON) and synced to shared Home projects."
+            : "Project synced to shared Home projects (no JSON download).",
           "info",
           4200
         );
@@ -5463,13 +5469,18 @@ export default function App() {
         );
       }
       pushToast(
-        `Project saved locally and queued for sync: ${error?.message || "backend unavailable"}.`,
+        `${downloadFile ? "Project saved locally" : "Project saved locally in browser"} and queued for sync: ${error?.message || "backend unavailable"}.`,
         "warn",
         6200
       );
       return;
     }
-    pushToast("Project saved (JSON) and added to Home recent projects.", "info");
+    pushToast(
+      downloadFile
+        ? "Project saved (JSON) and added to Home recent projects."
+        : "Project saved in browser and added to Home recent projects.",
+      "info"
+    );
   }, [
     buildProjectPayload,
     pushToast,
@@ -8381,7 +8392,6 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
         e.preventDefault();
         saveProject();
-        pushToast("Project saved (JSON).", "info", 2500);
         return;
       }
 
@@ -8434,7 +8444,6 @@ export default function App() {
     redoLayerEdit,
     saveProject,
     switchActiveLayer,
-    pushToast,
     undoLayerEdit,
   ]);
 
@@ -11775,7 +11784,7 @@ export default function App() {
           </button>
 
           <button
-            onClick={saveProject}
+            onClick={() => saveProject({ downloadFile: true })}
             style={{
               width: "100%",
               padding: "9px 10px",
@@ -11788,6 +11797,23 @@ export default function App() {
             }}
           >
             Save Project (JSON)
+          </button>
+
+          <button
+            onClick={() => saveProject({ downloadFile: false })}
+            style={{
+              width: "100%",
+              marginTop: 8,
+              padding: "9px 10px",
+              borderRadius: 12,
+              cursor: "pointer",
+              border: "1px solid rgba(124,214,255,0.35)",
+              background: "rgba(0,140,255,0.12)",
+              color: "#fff",
+              fontWeight: 700,
+            }}
+          >
+            Save Project (Shared Only)
           </button>
 
           <label
