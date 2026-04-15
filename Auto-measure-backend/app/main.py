@@ -21,7 +21,24 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Auto Measure Backend", lifespan=lifespan)
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+_env_name = os.getenv("AUTO_MEASURE_ENV", "").strip().lower()
+_is_production = _env_name in {"prod", "production"} or _parse_bool_env("RENDER", False)
+_enable_docs = _parse_bool_env("AUTO_MEASURE_ENABLE_DOCS", default=not _is_production)
+
+app = FastAPI(
+    title="Auto Measure Backend",
+    lifespan=lifespan,
+    docs_url="/docs" if _enable_docs else None,
+    redoc_url="/redoc" if _enable_docs else None,
+    openapi_url="/openapi.json" if _enable_docs else None,
+)
 
 
 def _parse_csv_env(name: str, default: list[str]) -> list[str]:

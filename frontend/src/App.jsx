@@ -7,12 +7,6 @@ import { strToU8, zipSync } from "fflate";
 
 import { loadKmlOrKmz } from "./kml";
 import {
-  exportPDF,
-  exportTotalsCSV,
-  exportLayersKML,
-  exportPolygonsCSV,
-} from "./export";
-import {
   PROJECT_SCHEMA_VERSION,
   isValidProjectPayload,
   normalizeLayerVisibility,
@@ -150,6 +144,14 @@ const PROPERTY_LOOKUP_PROVIDER_GOOGLE = "google";
 const CESIUM_JS_URL = "https://unpkg.com/cesium@1.127.0/Build/Cesium/Cesium.js";
 const CESIUM_CSS_URL = "https://unpkg.com/cesium@1.127.0/Build/Cesium/Widgets/widgets.css";
 let estimateSpreadsheetReaderPromise = null;
+let exportModulePromise = null;
+
+async function loadExportModule() {
+  if (!exportModulePromise) {
+    exportModulePromise = import("./export");
+  }
+  return exportModulePromise;
+}
 
 function ensureStylesheetOnce(href, id) {
   if (typeof document === "undefined") return;
@@ -9230,13 +9232,45 @@ export default function App() {
     reloadDrawForActiveLayer,
   ]);
 
-  const exportPdfSafe = useCallback(() => {
+  const exportTotalsCsvSafe = useCallback(async () => {
+    try {
+      const { exportTotalsCSV } = await loadExportModule();
+      exportTotalsCSV(totals);
+    } catch (error) {
+      pushToast(`Export totals failed: ${error?.message || "unknown error"}.`, "error", 5000);
+    }
+  }, [pushToast, totals]);
+
+  const exportPolygonsCsvSafe = useCallback(async () => {
+    try {
+      const { exportPolygonsCSV } = await loadExportModule();
+      exportPolygonsCSV(polygonRows);
+    } catch (error) {
+      pushToast(`Export polygon list failed: ${error?.message || "unknown error"}.`, "error", 5000);
+    }
+  }, [polygonRows, pushToast]);
+
+  const exportLayersKmlSafe = useCallback(async () => {
+    try {
+      const { exportLayersKML } = await loadExportModule();
+      await exportLayersKML(combinedLayerGeoJSON);
+    } catch (error) {
+      pushToast(`Export KML failed: ${error?.message || "unknown error"}.`, "error", 5000);
+    }
+  }, [combinedLayerGeoJSON, pushToast]);
+
+  const exportPdfSafe = useCallback(async () => {
     const map = mapRef.current;
     if (!map) {
       pushToast("Map not ready yet.", "warn");
       return;
     }
-    exportPDF(map, totals);
+    try {
+      const { exportPDF } = await loadExportModule();
+      await exportPDF(map, totals);
+    } catch (error) {
+      pushToast(`Export PDF failed: ${error?.message || "unknown error"}.`, "error", 5000);
+    }
   }, [pushToast, totals]);
 
   const uploadEstimateTemplate = useCallback(
@@ -12462,21 +12496,21 @@ export default function App() {
           <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Exports</div>
 
           <button
-            onClick={() => exportTotalsCSV(totals)}
+            onClick={exportTotalsCsvSafe}
             style={btnStyleFull()}
           >
             Export CSV (Totals)
           </button>
 
           <button
-            onClick={() => exportPolygonsCSV(polygonRows)}
+            onClick={exportPolygonsCsvSafe}
             style={{ ...btnStyleFull(), marginTop: 8 }}
           >
             Export Polygon List (CSV)
           </button>
 
           <button
-            onClick={() => exportLayersKML(combinedLayerGeoJSON)}
+            onClick={exportLayersKmlSafe}
             style={{ ...btnStyleFull(), marginTop: 8 }}
           >
             Export KML

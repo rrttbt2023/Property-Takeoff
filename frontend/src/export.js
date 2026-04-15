@@ -1,6 +1,3 @@
-import tokml from "tokml";
-import jsPDF from "jspdf";
-
 export function exportTotalsCSV(totals) {
   const rows = [["Layer", "SqFt", "Acres"]];
   for (const [k, v] of Object.entries(totals)) {
@@ -10,7 +7,9 @@ export function exportTotalsCSV(totals) {
   downloadBlob(csv, "text/csv", "takeoff_totals.csv");
 }
 
-export function exportLayersKML(features) {
+export async function exportLayersKML(features) {
+  const tokmlModule = await import("tokml");
+  const tokml = tokmlModule?.default || tokmlModule;
   const fc = { type: "FeatureCollection", features };
   const kmlText = tokml(fc);
   downloadBlob(kmlText, "application/vnd.google-earth.kml+xml", "takeoff_layers.kml");
@@ -18,6 +17,8 @@ export function exportLayersKML(features) {
 
 export async function exportPDF(map, totals) {
   if (!map) return;
+  const jsPdfModule = await import("jspdf");
+  const jsPDF = jsPdfModule?.default || jsPdfModule;
 
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "letter" });
   const dataUrl = map.getCanvas().toDataURL("image/png");
