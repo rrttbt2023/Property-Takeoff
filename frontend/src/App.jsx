@@ -9096,6 +9096,55 @@ export default function App() {
   ]);
 
   const clearActiveLayer = useCallback(() => {
+    const forceSyncPolygonVisuals = (nextFeatures) => {
+      const nextVisible = layerVisibleRef.current;
+      try {
+        const d = drawRef.current;
+        if (d) {
+          try {
+            d.changeMode("simple_select");
+          } catch {
+            /* intentionally ignore non-critical map/draw errors */
+          }
+          try {
+            d.deleteAll();
+          } catch {
+            /* intentionally ignore non-critical map/draw errors */
+          }
+        }
+      } catch {
+        /* intentionally ignore non-critical map/draw errors */
+      }
+
+      reloadDrawForActiveLayer(nextFeatures, nextVisible);
+
+      const map = mapRef.current;
+      if (map?.isStyleLoaded?.()) {
+        const features = [];
+        for (const layerKey of LAYER_KEYS) {
+          if (!nextVisible?.[layerKey]) continue;
+          for (const f of nextFeatures[layerKey] || []) {
+            features.push({
+              ...f,
+              properties: {
+                ...(f.properties || {}),
+                layer: layerKey,
+                outside:
+                  boundary && isPolygonLike(f) ? isOutsideBoundary(f, boundary) : false,
+              },
+            });
+          }
+        }
+        const source = map.getSource("polys-src");
+        if (source && typeof source.setData === "function") {
+          source.setData({ type: "FeatureCollection", features });
+        }
+      }
+
+      refreshPolygonOutlinesRaf();
+      ensureDrawBorderLayers();
+    };
+
     askConfirm({
       title: `Clear ${LAYER_META[activeLayer].name}`,
       message: "This will remove all polygons in the active layer. Continue?",
@@ -9104,14 +9153,26 @@ export default function App() {
       danger: true,
       onConfirm: () => {
         const key = activeLayerRef.current;
-        setLayerFeatures((p) => ({ ...p, [key]: [] }));
-        const d = drawRef.current;
-        if (d) d.deleteAll();
+        const next = {
+          ...cloneLayerFeatures(layerFeaturesRef.current),
+          [key]: [],
+        };
+        layerFeaturesRef.current = next;
+        setLayerFeatures(next);
+        forceSyncPolygonVisuals(next);
         setConfirm(null);
         pushToast("Active layer cleared.", "info");
       },
     });
-  }, [activeLayer, askConfirm, pushToast]);
+  }, [
+    activeLayer,
+    askConfirm,
+    boundary,
+    ensureDrawBorderLayers,
+    pushToast,
+    refreshPolygonOutlinesRaf,
+    reloadDrawForActiveLayer,
+  ]);
 
   const clearAllLayers = useCallback(() => {
     askConfirm({
@@ -9121,20 +9182,53 @@ export default function App() {
       cancelText: "Cancel",
       danger: true,
       onConfirm: () => {
-        setLayerFeatures({
+        const next = {
           plowable: [],
           sidewalks: [],
           turf: [],
           mulch: [],
-        });
+        };
+        layerFeaturesRef.current = next;
+        setLayerFeatures(next);
         setPdfAnnotations([]);
-        const d = drawRef.current;
-        if (d) d.deleteAll();
+        try {
+          const d = drawRef.current;
+          if (d) {
+            try {
+              d.changeMode("simple_select");
+            } catch {
+              /* intentionally ignore non-critical map/draw errors */
+            }
+            try {
+              d.deleteAll();
+            } catch {
+              /* intentionally ignore non-critical map/draw errors */
+            }
+          }
+        } catch {
+          /* intentionally ignore non-critical map/draw errors */
+        }
+        reloadDrawForActiveLayer(next, layerVisibleRef.current);
+        const map = mapRef.current;
+        if (map?.isStyleLoaded?.()) {
+          const source = map.getSource("polys-src");
+          if (source && typeof source.setData === "function") {
+            source.setData({ type: "FeatureCollection", features: [] });
+          }
+        }
+        refreshPolygonOutlinesRaf();
+        ensureDrawBorderLayers();
         setConfirm(null);
         pushToast("All layers and PDF annotations cleared.", "info");
       },
     });
-  }, [askConfirm, pushToast]);
+  }, [
+    askConfirm,
+    ensureDrawBorderLayers,
+    pushToast,
+    refreshPolygonOutlinesRaf,
+    reloadDrawForActiveLayer,
+  ]);
 
   const exportPdfSafe = useCallback(() => {
     const map = mapRef.current;

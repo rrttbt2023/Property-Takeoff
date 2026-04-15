@@ -9,6 +9,7 @@
     "build:review": "VITE_ENABLE_AI=false vite build",
     "build:ai": "VITE_ENABLE_AI=true vite build",
     "deploy:review": "npx --yes vercel --prod --yes",
+    "ship": "bash ../scripts/deploy-main.sh",
     "lint": "eslint .",
     "preview": "vite preview"
   },
