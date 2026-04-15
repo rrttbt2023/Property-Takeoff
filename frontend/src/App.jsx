@@ -5910,6 +5910,10 @@ export default function App() {
 
   const loadProjectFromLibrary = useCallback(
     async (id) => {
+      if (!sharedAccessAuthenticated) {
+        pushToast("Log in on Home to view and open projects.", "warn", 4200);
+        return;
+      }
       const entry = (projectLibrary || []).find((item) => item?.id === id);
       if (entry?.payload && isValidProjectPayload(entry.payload)) {
         try {
@@ -5925,11 +5929,6 @@ export default function App() {
           pushToast("Could not load that saved project.", "error", 5000);
           return;
         }
-      }
-
-      if (!sharedAccessAuthenticated) {
-        pushToast("Log in on Home to open shared projects.", "warn", 4200);
-        return;
       }
 
       try {
@@ -5995,10 +5994,8 @@ export default function App() {
 
   const visibleProjectLibrary = useMemo(() => {
     const entries = Array.isArray(projectLibrary) ? projectLibrary : [];
-    if (sharedAccessAuthenticated) return entries;
-    return entries.filter(
-      (entry) => entry?.payload && isValidProjectPayload(entry.payload)
-    );
+    if (!sharedAccessAuthenticated) return [];
+    return entries;
   }, [projectLibrary, sharedAccessAuthenticated]);
 
   const sharedStatusUi = useMemo(() => {
@@ -9972,8 +9969,9 @@ export default function App() {
 
             {visibleProjectLibrary.length === 0 ? (
               <div style={{ fontSize: 13, opacity: 0.72, lineHeight: 1.4 }}>
-                No saved projects yet. Use <b>Save Project (JSON)</b> in a measuring page and projects
-                will appear here.
+                {!sharedAccessAuthenticated
+                  ? "Log in to view shared projects."
+                  : "No saved projects yet. Use Save Project (JSON) in a measuring page and projects will appear here."}
               </div>
             ) : (
               <div style={{ display: "grid", gap: 8 }}>
