@@ -2303,8 +2303,6 @@ export default function App() {
 
   // Provider switcher
   const [baseMap, setBaseMap] = useState("maptiler"); // "maptiler" | "google" | "mapbox" | "azure"
-  const [azureHybridLabels, setAzureHybridLabels] = useState(false);
-  const [review3d, setReview3d] = useState(false);
   const [terrain3d, setTerrain3d] = useState(false);
   const [terrainExaggeration, setTerrainExaggeration] = useState(DEFAULT_TERRAIN_EXAGGERATION);
   const [objects3d, setObjects3d] = useState(false);
@@ -2330,6 +2328,7 @@ export default function App() {
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(
     () => !readStoredWorkflowMode()
   );
+  const [showAdvancedWorkspaceTools, setShowAdvancedWorkspaceTools] = useState(false);
   const [showTrue3DViewer, setShowTrue3DViewer] = useState(false);
   const [true3DLoading, setTrue3DLoading] = useState(false);
   const [true3DStatus, setTrue3DStatus] = useState("");
@@ -3005,7 +3004,6 @@ export default function App() {
         nextMode === WORKFLOW_MODE_PDF ? WORKFLOW_MODE_PDF : WORKFLOW_MODE_LOCATION;
       setWorkflowMode(normalized);
       if (normalized === WORKFLOW_MODE_PDF) {
-        setReview3d(false);
         setTerrain3d(false);
         setObjects3d(false);
         pushToast("PDF mode selected. Upload a PDF/image in AI Measurement.", "info", 3200);
@@ -3355,7 +3353,6 @@ export default function App() {
   const googleTileSessionExpiryRef = useRef(0);
   const googleTileSessionPromiseRef = useRef(null);
   const baseMapRef = useRef(baseMap);
-  const azureHybridLabelsRef = useRef(azureHybridLabels);
   const terrain3dRef = useRef(false);
   const terrainExaggerationRef = useRef(DEFAULT_TERRAIN_EXAGGERATION);
   const objects3dRef = useRef(false);
@@ -3398,10 +3395,6 @@ export default function App() {
   useEffect(() => {
     baseMapRef.current = baseMap;
   }, [baseMap]);
-
-  useEffect(() => {
-    azureHybridLabelsRef.current = azureHybridLabels;
-  }, [azureHybridLabels]);
 
   useEffect(() => {
     snapToEdgesRef.current = snapToEdges;
@@ -3886,7 +3879,6 @@ export default function App() {
       coordinates: coords,
     });
     setPlanOverlayEnabled(true);
-    setReview3d(false);
     setTerrain3d(false);
     setObjects3d(false);
     if (announce) pushToast("Plan overlay loaded on map.", "info", 4500);
@@ -3928,7 +3920,6 @@ export default function App() {
       setWorkflowMode(WORKFLOW_MODE_PDF);
       setAppScreen(APP_SCREEN_PDF);
       setShowWorkflowPicker(false);
-      setReview3d(false);
       setTerrain3d(false);
       setObjects3d(false);
     }
@@ -4553,7 +4544,7 @@ export default function App() {
   }, [ensureGoogleTileSession, googleMapsKey]);
 
   // Basemap layer visibility toggler
-  const applyBaseMapVisibility = useCallback((map, which, azureLabelsOn) => {
+  const applyBaseMapVisibility = useCallback((map, which) => {
     if (!map) return;
     if (!map.isStyleLoaded()) return;
 
@@ -4570,7 +4561,8 @@ export default function App() {
     safeSet("bm-maptiler", which === "maptiler");
     safeSet("bm-mapbox", which === "mapbox");
     safeSet("bm-azure", which === "azure");
-    safeSet("bm-azure-hybrid", which === "azure" && !!azureLabelsOn);
+    // Azure hybrid labels/roads overlay is intentionally disabled for a cleaner workflow.
+    safeSet("bm-azure-hybrid", false);
     safeSet("bm-google", which === "google");
     safeSet("3d-buildings", which !== "none");
 
@@ -5610,8 +5602,6 @@ export default function App() {
       maskOutsideBoundary,
       warnOutsideBoundary,
       baseMap,
-      azureHybridLabels,
-      review3d,
       terrain3d,
       terrainExaggeration,
       objects3d: ENABLE_OBJECTS_3D ? objects3d : false,
@@ -5627,7 +5617,6 @@ export default function App() {
     };
   }, [
     activeLayer,
-    azureHybridLabels,
     baseMap,
     boundary,
     buildLayerSnapshot,
@@ -5635,7 +5624,6 @@ export default function App() {
     lockNonActiveLayers,
     maskOutsideBoundary,
     projectName,
-    review3d,
     terrain3d,
     terrainExaggeration,
     objects3d,
@@ -5993,9 +5981,6 @@ export default function App() {
           );
         }
       }
-      if (typeof data.azureHybridLabels === "boolean")
-        setAzureHybridLabels(data.azureHybridLabels);
-      if (typeof data.review3d === "boolean") setReview3d(data.review3d);
       if (ENABLE_TRUE_TERRAIN && typeof data.terrain3d === "boolean") {
         setTerrain3d(data.terrain3d);
       } else {
@@ -8750,11 +8735,7 @@ export default function App() {
         workflowModeRef.current === WORKFLOW_MODE_PDF
           ? "none"
           : baseMapRef.current || "maptiler";
-      applyBaseMapVisibility(
-        map,
-        initialBaseMap,
-        !!azureHybridLabelsRef.current
-      );
+      applyBaseMapVisibility(map, initialBaseMap);
       applyPlanOverlayMode(
         map,
         planOverlayEnabledRef.current,
@@ -8792,7 +8773,6 @@ export default function App() {
 
       if (isAzureSource && !azureTileErrorHandled) {
         azureTileErrorHandled = true;
-        setAzureHybridLabels(false);
         setBaseMap("maptiler");
         pushToast(
           "Azure aerial tiles failed to load (usually key/domain restriction). Switched to MapTiler.",
@@ -8868,7 +8848,7 @@ export default function App() {
         }
       }
       if (!cancelled) {
-        applyBaseMapVisibility(map, effectiveBaseMap, azureHybridLabels);
+        applyBaseMapVisibility(map, effectiveBaseMap);
         if (effectiveBaseMap === "google") {
           try {
             if (map.getLayer("bm-maptiler")) {
@@ -8904,7 +8884,6 @@ export default function App() {
     };
   }, [
     applyBaseMapVisibility,
-    azureHybridLabels,
     effectiveBaseMap,
     ensureGoogleBasemapLayer,
     pushToast,
@@ -9130,7 +9109,7 @@ export default function App() {
     try {
       const terrainOn = ENABLE_TRUE_TERRAIN && terrain3d;
       const objectsOn = ENABLE_OBJECTS_3D && objects3d;
-      const use3dCamera = review3d || terrainOn || objectsOn;
+      const use3dCamera = terrainOn || objectsOn;
       const targetPitch = terrainOn ? 68 : use3dCamera ? 60 : 0;
       const targetBearing = use3dCamera ? 20 : 0;
       map.easeTo({
@@ -9141,7 +9120,7 @@ export default function App() {
     } catch {
       /* intentionally ignore non-critical map/draw errors */
     }
-  }, [objects3d, review3d, terrain3d]);
+  }, [objects3d, terrain3d]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -10303,16 +10282,6 @@ export default function App() {
     if (drawMode === "simple_select") return "Select";
     return drawMode || "Select";
   }, [drawMode]);
-
-  const keyStatus = useMemo(
-    () => ({
-      maptiler: !!maptilerKey,
-      mapbox: !!mapboxToken,
-      azure: !!azureMapsKey,
-      google: !!googleMapsKey,
-    }),
-    [azureMapsKey, googleMapsKey, mapboxToken, maptilerKey]
-  );
 
   const commandActions = useMemo(
     () => [
@@ -11973,63 +11942,97 @@ export default function App() {
             border: "1px solid rgba(255,255,255,0.10)",
             borderRadius: 12,
             marginBottom: 12,
+            background: "rgba(255,255,255,0.03)",
           }}
         >
-          <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Quick Actions</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
-            <button
-              type="button"
-              onClick={() => {
-                setShowShortcutHelp(false);
-                setShowCommandPalette(true);
-              }}
-              style={{
-                padding: "7px 8px",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.16)",
-                background: "rgba(255,255,255,0.05)",
-                color: "#fff",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 700,
-              }}
-            >
-              Command (⌘K)
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowVersionHistory(true)}
-              style={{
-                padding: "7px 8px",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.16)",
-                background: "rgba(255,255,255,0.05)",
-                color: "#fff",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 700,
-              }}
-            >
-              Version History
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowShortcutHelp(true)}
-              style={{
-                padding: "7px 8px",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.16)",
-                background: "rgba(255,255,255,0.05)",
-                color: "#fff",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 700,
-              }}
-            >
-              Shortcuts (?)
-            </button>
+          <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Workspace View</div>
+          <button
+            type="button"
+            onClick={() => setShowAdvancedWorkspaceTools((prev) => !prev)}
+            style={{
+              width: "100%",
+              padding: "8px 10px",
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.16)",
+              background: "rgba(255,255,255,0.05)",
+              color: "#fff",
+              cursor: "pointer",
+              fontWeight: 700,
+              fontSize: 12,
+            }}
+          >
+            {showAdvancedWorkspaceTools ? "Hide Advanced Tools" : "Show Advanced Tools"}
+          </button>
+          <div style={{ fontSize: 11, opacity: 0.72, marginTop: 6, lineHeight: 1.35 }}>
+            Advanced mode reveals beta and power-user controls.
           </div>
         </div>
+
+        {showAdvancedWorkspaceTools ? (
+          <div
+            style={{
+              padding: 10,
+              border: "1px solid rgba(255,255,255,0.10)",
+              borderRadius: 12,
+              marginBottom: 12,
+            }}
+          >
+            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Quick Actions</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowShortcutHelp(false);
+                  setShowCommandPalette(true);
+                }}
+                style={{
+                  padding: "7px 8px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontSize: 11,
+                  fontWeight: 700,
+                }}
+              >
+                Command (⌘K)
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowVersionHistory(true)}
+                style={{
+                  padding: "7px 8px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontSize: 11,
+                  fontWeight: 700,
+                }}
+              >
+                Version History
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowShortcutHelp(true)}
+                style={{
+                  padding: "7px 8px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontSize: 11,
+                  fontWeight: 700,
+                }}
+              >
+                Shortcuts (?)
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         {activeOperations.length > 0 ? (
           <div
@@ -12084,16 +12087,6 @@ export default function App() {
           </div>
         ) : null}
 
-        <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 10 }}>
-          MapTiler key: {keyStatus.maptiler ? "LOADED ✅" : "MISSING ❌"}
-          <br />
-          Mapbox token: {keyStatus.mapbox ? "LOADED ✅" : "MISSING ❌"}
-          <br />
-          Azure key: {keyStatus.azure ? "LOADED ✅" : "MISSING ❌"}
-          <br />
-          Google Maps key: {keyStatus.google ? "LOADED ✅" : "MISSING ❌"}
-        </div>
-
         {/* Basemap */}
         {workflowMode !== WORKFLOW_MODE_PDF ? (
           <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
@@ -12124,43 +12117,6 @@ export default function App() {
               </option>
             </select>
 
-            <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
-              <input
-                type="checkbox"
-                checked={azureHybridLabels}
-                onChange={(e) => setAzureHybridLabels(e.target.checked)}
-                disabled={baseMap !== "azure"}
-              />
-              <span style={{ fontSize: 13 }}>Azure: labels/roads overlay</span>
-            </label>
-
-            <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
-              <input
-                type="checkbox"
-                checked={review3d}
-                onChange={(e) => setReview3d(e.target.checked)}
-              />
-              <span style={{ fontSize: 13 }}>3D Review Mode (tilt)</span>
-            </label>
-
-            <button
-              type="button"
-              onClick={openTrue3DViewer}
-              style={{
-                width: "100%",
-                marginTop: 8,
-                padding: "8px 10px",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: "rgba(255,255,255,0.06)",
-                color: "#fff",
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
-            >
-              Open True 3D Viewer
-            </button>
-
             <div style={{ fontSize: 12, opacity: 0.75, marginTop: 8, lineHeight: 1.35 }}>
               Note: Azure aerial is raster and can go blank if zoomed beyond tile max.
               This clamps Azure to zoom ≤ 19. True terrain and 3D objects are temporarily disabled.
@@ -12176,6 +12132,28 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {showAdvancedWorkspaceTools && workflowMode !== WORKFLOW_MODE_PDF ? (
+          <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Advanced Tools</div>
+            <button
+              type="button"
+              onClick={openTrue3DViewer}
+              style={{
+                width: "100%",
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: "rgba(255,255,255,0.06)",
+                color: "#fff",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Open True 3D Viewer
+            </button>
+          </div>
+        ) : null}
 
         {/* Project name */}
         <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
@@ -13356,111 +13334,115 @@ export default function App() {
             </button>
           )}
 
-          <label
-            style={{
-              display: "block",
-              textAlign: "center",
-              padding: "9px 10px",
-              borderRadius: 12,
-              cursor: "pointer",
-              border: "1px solid rgba(255,255,255,0.12)",
-              background: "rgba(255,255,255,0.06)",
-              color: "#fff",
-              fontWeight: 700,
-              marginBottom: 8,
-            }}
-          >
-            {pdfConverting
-              ? "Converting PDF page 1..."
-              : measurementImageFile
-              ? `Image: ${measurementImageFile.name}`
-              : "Upload Image or PDF"}
-            <input
-              type="file"
-              accept="image/*,.pdf,application/pdf"
-              onChange={handleMeasurementMediaUpload}
-              style={{ display: "none" }}
-              aria-label="Upload measurement image or pdf"
-            />
-          </label>
-          <div style={{ fontSize: 12, opacity: 0.72, marginTop: -4, marginBottom: 8 }}>
-            PDF uploads convert page 1 to PNG and overlay it on the map.
-          </div>
+          {workflowMode === WORKFLOW_MODE_PDF ? (
+            <>
+              <label
+                style={{
+                  display: "block",
+                  textAlign: "center",
+                  padding: "9px 10px",
+                  borderRadius: 12,
+                  cursor: "pointer",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  fontWeight: 700,
+                  marginBottom: 8,
+                }}
+              >
+                {pdfConverting
+                  ? "Converting PDF page 1..."
+                  : measurementImageFile
+                  ? `Image: ${measurementImageFile.name}`
+                  : "Upload Image or PDF"}
+                <input
+                  type="file"
+                  accept="image/*,.pdf,application/pdf"
+                  onChange={handleMeasurementMediaUpload}
+                  style={{ display: "none" }}
+                  aria-label="Upload measurement image or pdf"
+                />
+              </label>
+              <div style={{ fontSize: 12, opacity: 0.72, marginTop: -4, marginBottom: 8 }}>
+                PDF uploads convert page 1 to PNG and overlay it on the map.
+              </div>
 
-          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-            <input
-              type="checkbox"
-              checked={planOverlayEnabled}
-              disabled={!planOverlay}
-              onChange={(e) => setPlanOverlayEnabled(e.target.checked)}
-            />
-            <span style={{ fontSize: 13, opacity: planOverlay ? 1 : 0.6 }}>
-              Show uploaded plan on map
-            </span>
-          </label>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={planOverlayEnabled}
+                  disabled={!planOverlay}
+                  onChange={(e) => setPlanOverlayEnabled(e.target.checked)}
+                />
+                <span style={{ fontSize: 13, opacity: planOverlay ? 1 : 0.6 }}>
+                  Show uploaded plan on map
+                </span>
+              </label>
 
-          <div style={{ marginTop: 2, marginBottom: 8 }}>
-            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 4 }}>
-              Plan Overlay Opacity: {Math.round(Number(planOverlayOpacity) * 100)}%
-            </div>
-            <input
-              type="range"
-              min="0.15"
-              max="1"
-              step="0.01"
-              value={planOverlayOpacity}
-              onChange={(e) => setPlanOverlayOpacity(Number(e.target.value))}
-              disabled={!planOverlayEnabled}
-              style={{
-                width: "100%",
-                accentColor: "#6dd6ff",
-                opacity: planOverlayEnabled ? 1 : 0.45,
-              }}
-              aria-label="Plan overlay opacity"
-            />
-          </div>
+              <div style={{ marginTop: 2, marginBottom: 8 }}>
+                <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 4 }}>
+                  Plan Overlay Opacity: {Math.round(Number(planOverlayOpacity) * 100)}%
+                </div>
+                <input
+                  type="range"
+                  min="0.15"
+                  max="1"
+                  step="0.01"
+                  value={planOverlayOpacity}
+                  onChange={(e) => setPlanOverlayOpacity(Number(e.target.value))}
+                  disabled={!planOverlayEnabled}
+                  style={{
+                    width: "100%",
+                    accentColor: "#6dd6ff",
+                    opacity: planOverlayEnabled ? 1 : 0.45,
+                  }}
+                  aria-label="Plan overlay opacity"
+                />
+              </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
-            <button
-              type="button"
-              onClick={reanchorPlanOverlay}
-              disabled={!planOverlay}
-              style={{
-                padding: "8px 9px",
-                borderRadius: 10,
-                cursor: planOverlay ? "pointer" : "not-allowed",
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: planOverlay ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.03)",
-                color: "#fff",
-                opacity: planOverlay ? 1 : 0.6,
-                fontWeight: 700,
-                fontSize: 12,
-              }}
-            >
-              Re-anchor Plan
-            </button>
-            <button
-              type="button"
-              onClick={() => clearUploadedPlanOverlay(true)}
-              disabled={!planOverlay && !measurementImageFile}
-              style={{
-                padding: "8px 9px",
-                borderRadius: 10,
-                cursor: planOverlay || measurementImageFile ? "pointer" : "not-allowed",
-                border: "1px solid rgba(255,255,255,0.12)",
-                background:
-                  planOverlay || measurementImageFile
-                    ? "rgba(255,255,255,0.05)"
-                    : "rgba(255,255,255,0.03)",
-                color: "#fff",
-                opacity: planOverlay || measurementImageFile ? 1 : 0.6,
-                fontWeight: 700,
-                fontSize: 12,
-              }}
-            >
-              Clear Plan
-            </button>
-          </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+                <button
+                  type="button"
+                  onClick={reanchorPlanOverlay}
+                  disabled={!planOverlay}
+                  style={{
+                    padding: "8px 9px",
+                    borderRadius: 10,
+                    cursor: planOverlay ? "pointer" : "not-allowed",
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background: planOverlay ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.03)",
+                    color: "#fff",
+                    opacity: planOverlay ? 1 : 0.6,
+                    fontWeight: 700,
+                    fontSize: 12,
+                  }}
+                >
+                  Re-anchor Plan
+                </button>
+                <button
+                  type="button"
+                  onClick={() => clearUploadedPlanOverlay(true)}
+                  disabled={!planOverlay && !measurementImageFile}
+                  style={{
+                    padding: "8px 9px",
+                    borderRadius: 10,
+                    cursor: planOverlay || measurementImageFile ? "pointer" : "not-allowed",
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background:
+                      planOverlay || measurementImageFile
+                        ? "rgba(255,255,255,0.05)"
+                        : "rgba(255,255,255,0.03)",
+                    color: "#fff",
+                    opacity: planOverlay || measurementImageFile ? 1 : 0.6,
+                    fontWeight: 700,
+                    fontSize: 12,
+                  }}
+                >
+                  Clear Plan
+                </button>
+              </div>
+            </>
+          ) : null}
 
           {workflowMode === WORKFLOW_MODE_PDF ? (
             <div style={{ fontSize: 12, opacity: 0.78, lineHeight: 1.35 }}>
@@ -13523,47 +13505,15 @@ export default function App() {
                   : "Run AI Measurement"}
               </button>
 
-              <button
-                onClick={runSegmentationMeasurement}
-                disabled={segmentingImage || pdfConverting || (!measurementImageFile && !boundary)}
-                style={{
-                  width: "100%",
-                  padding: "9px 10px",
-                  borderRadius: 12,
-                  cursor:
-                    segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
-                      ? "not-allowed"
-                      : "pointer",
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  background:
-                    segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
-                      ? "rgba(255,255,255,0.03)"
-                      : "rgba(255,255,255,0.06)",
-                  color: "#fff",
-                  opacity: segmentingImage || pdfConverting || (!measurementImageFile && !boundary) ? 0.6 : 1,
-                  fontWeight: 700,
-                  marginBottom: 8,
-                }}
-              >
-                {pdfConverting ? "Converting PDF..." : segmentingImage ? "Running Segmentation..." : "Run CV Segmentation (Beta)"}
-              </button>
-
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
-                  gap: 6,
-                  marginBottom: 8,
-                }}
-              >
-                {LAYER_KEYS.map((key) => (
+              {showAdvancedWorkspaceTools ? (
+                <>
                   <button
-                    key={`seg-class-${key}`}
-                    onClick={() => runSegmentationMeasurement([key])}
+                    onClick={runSegmentationMeasurement}
                     disabled={segmentingImage || pdfConverting || (!measurementImageFile && !boundary)}
                     style={{
-                      padding: "8px 9px",
-                      borderRadius: 10,
+                      width: "100%",
+                      padding: "9px 10px",
+                      borderRadius: 12,
                       cursor:
                         segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
                           ? "not-allowed"
@@ -13572,17 +13522,57 @@ export default function App() {
                       background:
                         segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
                           ? "rgba(255,255,255,0.03)"
-                          : "rgba(255,255,255,0.05)",
+                          : "rgba(255,255,255,0.06)",
                       color: "#fff",
                       opacity: segmentingImage || pdfConverting || (!measurementImageFile && !boundary) ? 0.6 : 1,
                       fontWeight: 700,
-                      fontSize: 12,
+                      marginBottom: 8,
                     }}
                   >
-                    {pdfConverting ? "Converting..." : segmentingImage ? "Running..." : `CV ${LAYER_META[key].name}`}
+                    {pdfConverting ? "Converting PDF..." : segmentingImage ? "Running Segmentation..." : "Run CV Segmentation (Beta)"}
                   </button>
-                ))}
-              </div>
+
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr",
+                      gap: 6,
+                      marginBottom: 8,
+                    }}
+                  >
+                    {LAYER_KEYS.map((key) => (
+                      <button
+                        key={`seg-class-${key}`}
+                        onClick={() => runSegmentationMeasurement([key])}
+                        disabled={segmentingImage || pdfConverting || (!measurementImageFile && !boundary)}
+                        style={{
+                          padding: "8px 9px",
+                          borderRadius: 10,
+                          cursor:
+                            segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
+                              ? "not-allowed"
+                              : "pointer",
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          background:
+                            segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
+                              ? "rgba(255,255,255,0.03)"
+                              : "rgba(255,255,255,0.05)",
+                          color: "#fff",
+                          opacity: segmentingImage || pdfConverting || (!measurementImageFile && !boundary) ? 0.6 : 1,
+                          fontWeight: 700,
+                          fontSize: 12,
+                        }}
+                      >
+                        {pdfConverting ? "Converting..." : segmentingImage ? "Running..." : `CV ${LAYER_META[key].name}`}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 11, opacity: 0.72, marginBottom: 8, lineHeight: 1.35 }}>
+                  CV segmentation controls are hidden. Turn on “Advanced Tools” above to access them.
+                </div>
+              )}
 
               <button
                 onClick={refreshMeasurementHistory}
@@ -13660,7 +13650,7 @@ export default function App() {
                 {boundary?.geometry
                   ? "KML boundary loaded: measuring directly from property geometry. "
                   : !measurementImageFile
-                  ? "No image uploaded: using current map view screenshot. "
+                  ? "Using current map view screenshot. "
                   : ""}
                 {measurementHistory.length > 0
                   ? `Recent jobs: ${measurementHistory
