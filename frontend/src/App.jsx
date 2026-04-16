@@ -6253,7 +6253,10 @@ export default function App() {
       pushToast("No project selected for version history clear.", "warn", 3200);
       return;
     }
-    if (!currentProjectVersions.length) {
+    const versionsForProject = Array.isArray(projectVersionHistory?.[targetId])
+      ? projectVersionHistory[targetId]
+      : [];
+    if (!versionsForProject.length) {
       pushToast("No saved snapshots exist for this project.", "info", 2800);
       return;
     }
@@ -6279,7 +6282,7 @@ export default function App() {
   }, [
     askConfirm,
     currentProjectLibraryId,
-    currentProjectVersions.length,
+    projectVersionHistory,
     pushToast,
   ]);
 
