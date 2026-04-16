@@ -13505,15 +13505,47 @@ export default function App() {
                   : "Run AI Measurement"}
               </button>
 
-              {showAdvancedWorkspaceTools ? (
-                <>
+              <button
+                onClick={runSegmentationMeasurement}
+                disabled={segmentingImage || pdfConverting || (!measurementImageFile && !boundary)}
+                style={{
+                  width: "100%",
+                  padding: "9px 10px",
+                  borderRadius: 12,
+                  cursor:
+                    segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
+                      ? "not-allowed"
+                      : "pointer",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background:
+                    segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
+                      ? "rgba(255,255,255,0.03)"
+                      : "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  opacity: segmentingImage || pdfConverting || (!measurementImageFile && !boundary) ? 0.6 : 1,
+                  fontWeight: 700,
+                  marginBottom: 8,
+                }}
+              >
+                {pdfConverting ? "Converting PDF..." : segmentingImage ? "Running Segmentation..." : "Run CV Segmentation (Beta)"}
+              </button>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 6,
+                  marginBottom: 8,
+                }}
+              >
+                {LAYER_KEYS.map((key) => (
                   <button
-                    onClick={runSegmentationMeasurement}
+                    key={`seg-class-${key}`}
+                    onClick={() => runSegmentationMeasurement([key])}
                     disabled={segmentingImage || pdfConverting || (!measurementImageFile && !boundary)}
                     style={{
-                      width: "100%",
-                      padding: "9px 10px",
-                      borderRadius: 12,
+                      padding: "8px 9px",
+                      borderRadius: 10,
                       cursor:
                         segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
                           ? "not-allowed"
@@ -13522,57 +13554,17 @@ export default function App() {
                       background:
                         segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
                           ? "rgba(255,255,255,0.03)"
-                          : "rgba(255,255,255,0.06)",
+                          : "rgba(255,255,255,0.05)",
                       color: "#fff",
                       opacity: segmentingImage || pdfConverting || (!measurementImageFile && !boundary) ? 0.6 : 1,
                       fontWeight: 700,
-                      marginBottom: 8,
+                      fontSize: 12,
                     }}
                   >
-                    {pdfConverting ? "Converting PDF..." : segmentingImage ? "Running Segmentation..." : "Run CV Segmentation (Beta)"}
+                    {pdfConverting ? "Converting..." : segmentingImage ? "Running..." : `CV ${LAYER_META[key].name}`}
                   </button>
-
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "1fr 1fr",
-                      gap: 6,
-                      marginBottom: 8,
-                    }}
-                  >
-                    {LAYER_KEYS.map((key) => (
-                      <button
-                        key={`seg-class-${key}`}
-                        onClick={() => runSegmentationMeasurement([key])}
-                        disabled={segmentingImage || pdfConverting || (!measurementImageFile && !boundary)}
-                        style={{
-                          padding: "8px 9px",
-                          borderRadius: 10,
-                          cursor:
-                            segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
-                              ? "not-allowed"
-                              : "pointer",
-                          border: "1px solid rgba(255,255,255,0.12)",
-                          background:
-                            segmentingImage || pdfConverting || (!measurementImageFile && !boundary)
-                              ? "rgba(255,255,255,0.03)"
-                              : "rgba(255,255,255,0.05)",
-                          color: "#fff",
-                          opacity: segmentingImage || pdfConverting || (!measurementImageFile && !boundary) ? 0.6 : 1,
-                          fontWeight: 700,
-                          fontSize: 12,
-                        }}
-                      >
-                        {pdfConverting ? "Converting..." : segmentingImage ? "Running..." : `CV ${LAYER_META[key].name}`}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <div style={{ fontSize: 11, opacity: 0.72, marginBottom: 8, lineHeight: 1.35 }}>
-                  CV segmentation controls are hidden. Turn on “Advanced Tools” above to access them.
-                </div>
-              )}
+                ))}
+              </div>
 
               <button
                 onClick={refreshMeasurementHistory}
