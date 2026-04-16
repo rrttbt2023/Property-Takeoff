@@ -12133,27 +12133,25 @@ export default function App() {
           </div>
         )}
 
-        {showAdvancedWorkspaceTools && workflowMode !== WORKFLOW_MODE_PDF ? (
-          <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
-            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Advanced Tools</div>
-            <button
-              type="button"
-              onClick={openTrue3DViewer}
-              style={{
-                width: "100%",
-                padding: "8px 10px",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: "rgba(255,255,255,0.06)",
-                color: "#fff",
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
-            >
-              Open True 3D Viewer
-            </button>
-          </div>
-        ) : null}
+        <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
+          <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>3D Viewer</div>
+          <button
+            type="button"
+            onClick={openTrue3DViewer}
+            style={{
+              width: "100%",
+              padding: "8px 10px",
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.12)",
+              background: "rgba(255,255,255,0.06)",
+              color: "#fff",
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            Open True 3D Viewer
+          </button>
+        </div>
 
         {/* Project name */}
         <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
