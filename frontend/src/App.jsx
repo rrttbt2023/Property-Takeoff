@@ -6227,7 +6227,12 @@ export default function App() {
 
   const restoreVersionSnapshot = useCallback(
     (versionId) => {
-      const target = (currentProjectVersions || []).find(
+      const targetId = String(currentProjectLibraryId || "").trim();
+      const versionsForProject =
+        targetId && Array.isArray(projectVersionHistory?.[targetId])
+          ? projectVersionHistory[targetId]
+          : [];
+      const target = versionsForProject.find(
         (version) => String(version?.id || "") === String(versionId || "")
       );
       if (!target?.payload || !isValidProjectPayload(target.payload)) {
@@ -6244,7 +6249,13 @@ export default function App() {
       setVersionCompareId(String(target.id || ""));
       setShowVersionHistory(false);
     },
-    [applyProjectPayload, currentProjectVersions, projectName, pushToast]
+    [
+      applyProjectPayload,
+      currentProjectLibraryId,
+      projectName,
+      projectVersionHistory,
+      pushToast,
+    ]
   );
 
   const clearCurrentProjectVersionHistory = useCallback(() => {
