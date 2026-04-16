@@ -48,6 +48,15 @@ def _parse_saved_at(value: str | None, fallback: str) -> str:
         return fallback
 
 
+def _parse_iso_strict(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 def _project_path(project_id: str) -> Path:
     safe_id = _normalize_project_id(project_id)
     return PROJECTS_DIR / f"{safe_id}.json"
@@ -215,7 +224,32 @@ def upsert_shared_project(
     now_iso = _now_iso()
     saved_at = _parse_saved_at(body.saved_at, now_iso)
     saved_by = str(session.get("username") or "").strip() or "unknown"
-    existing = _read_record(_project_path(normalized_id)) or {}
+    path = _project_path(normalized_id)
+    existing = _read_record(path) or {}
+    existing_summary = _to_summary(existing, normalized_id) if existing else None
+    base_last_edited_at: str | None = None
+    try:
+        base_last_edited_at = _parse_iso_strict(body.base_last_edited_at)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="base_last_edited_at must be a valid ISO timestamp.",
+        )
+
+    if (
+        existing_summary
+        and base_last_edited_at
+        and not body.force_overwrite
+        and base_last_edited_at != str(existing_summary.last_edited_at or "")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Shared project changed since you opened it.",
+                "conflict": existing_summary.model_dump(),
+            },
+        )
+
     polygon_count = (
         int(body.polygon_count)
         if isinstance(body.polygon_count, int)
@@ -243,7 +277,6 @@ def upsert_shared_project(
         "payload": body.payload,
     }
 
-    path = _project_path(normalized_id)
     temp_path = path.with_suffix(".json.tmp")
     temp_path.write_text(json.dumps(record, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
     temp_path.replace(path)

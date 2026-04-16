@@ -103,9 +103,11 @@ const PLAN_OVERLAY_LAYER_ID = "uploaded-plan-overlay-layer";
 const WORKFLOW_MODE_STORAGE_KEY = "takeoff-workflow-mode-v1";
 const ESTIMATE_TEMPLATES_STORAGE_KEY = "takeoff-estimate-templates-v1";
 const PROJECT_LIBRARY_STORAGE_KEY = "takeoff-project-library-v1";
+const PROJECT_VERSION_HISTORY_STORAGE_KEY = "takeoff-project-version-history-v1";
 const SHARED_PROJECT_QUEUE_STORAGE_KEY = "takeoff-shared-project-queue-v1";
 const SHARED_AUTH_STORAGE_KEY = "takeoff-shared-auth-v1";
 const PROJECT_LIBRARY_MAX_ENTRIES = 30;
+const PROJECT_VERSION_HISTORY_MAX_PER_PROJECT = 16;
 const WORKFLOW_MODE_LOCATION = "location";
 const WORKFLOW_MODE_PDF = "pdf";
 const APP_SCREEN_HOME = "home";
@@ -1356,6 +1358,32 @@ function countProjectPayloadPolygons(payload) {
   return count;
 }
 
+function summarizePayloadMetrics(payload) {
+  const summary = {
+    polygons: 0,
+    byLayer: {
+      plowable: { polygons: 0, sqft: 0 },
+      sidewalks: { polygons: 0, sqft: 0 },
+      turf: { polygons: 0, sqft: 0 },
+      mulch: { polygons: 0, sqft: 0 },
+    },
+  };
+  if (!payload || typeof payload !== "object") return summary;
+  for (const layer of LAYER_KEYS) {
+    const features = Array.isArray(payload?.layerFeatures?.[layer])
+      ? payload.layerFeatures[layer]
+      : [];
+    summary.byLayer[layer].polygons = features.length;
+    summary.polygons += features.length;
+    let sqft = 0;
+    for (const feature of features) {
+      sqft += featureSqft(feature);
+    }
+    summary.byLayer[layer].sqft = sqft;
+  }
+  return summary;
+}
+
 function readStoredProjectLibrary() {
   if (typeof window === "undefined") return [];
   try {
@@ -1386,6 +1414,58 @@ function readStoredProjectLibrary() {
     return out;
   } catch {
     return [];
+  }
+}
+
+function buildProjectPayloadSignature(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  try {
+    const stable = { ...payload };
+    delete stable.savedAt;
+    delete stable.autosavedAt;
+    return JSON.stringify(stable);
+  } catch {
+    return "";
+  }
+}
+
+function readStoredProjectVersionHistory() {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(PROJECT_VERSION_HISTORY_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const out = {};
+    for (const [projectId, versions] of Object.entries(parsed)) {
+      if (!Array.isArray(versions) || !String(projectId || "").trim()) continue;
+      const normalized = [];
+      for (const version of versions) {
+        if (!isValidProjectPayload(version?.payload)) continue;
+        const savedAt = String(
+          version?.savedAt || version?.payload?.savedAt || new Date().toISOString()
+        ).trim();
+        const source = String(version?.source || "local").trim() || "local";
+        const savedBy = String(version?.savedBy || "").trim();
+        const id = String(version?.id || "").trim() || `${savedAt}-${Math.random().toString(36).slice(2, 8)}`;
+        const payload = version.payload;
+        normalized.push({
+          id,
+          savedAt,
+          source,
+          savedBy,
+          polygonCount: countProjectPayloadPolygons(payload),
+          hasBoundary: !!payload?.boundary,
+          signature: buildProjectPayloadSignature(payload),
+          payload,
+        });
+        if (normalized.length >= PROJECT_VERSION_HISTORY_MAX_PER_PROJECT) break;
+      }
+      if (normalized.length) out[projectId] = normalized;
+    }
+    return out;
+  } catch {
+    return {};
   }
 }
 
@@ -2232,6 +2312,21 @@ export default function App() {
   const [workflowMode, setWorkflowMode] = useState(
     () => readStoredWorkflowMode() || WORKFLOW_MODE_LOCATION
   );
+  const [saveInProgress, setSaveInProgress] = useState(false);
+  const [lastManualSaveAt, setLastManualSaveAt] = useState("");
+  const [savedProjectSignature, setSavedProjectSignature] = useState("");
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const [versionCompareId, setVersionCompareId] = useState("");
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
+  const [commandPaletteIndex, setCommandPaletteIndex] = useState(0);
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
+  const [activeSharedProjectMeta, setActiveSharedProjectMeta] = useState({
+    id: "",
+    lastEditedAt: "",
+    savedBy: "",
+  });
+  const [remoteSharedUpdateNotice, setRemoteSharedUpdateNotice] = useState(null);
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(
     () => !readStoredWorkflowMode()
   );
@@ -2249,10 +2344,14 @@ export default function App() {
   const true3DSelectedFeatureIdRef = useRef("");
   const true3DDraggingRef = useRef(false);
   const pdfUploadPromptInputRef = useRef(null);
+  const commandPaletteInputRef = useRef(null);
 
   // Project name
   const [projectName, setProjectName] = useState("");
   const [projectLibrary, setProjectLibrary] = useState(() => readStoredProjectLibrary());
+  const [projectVersionHistory, setProjectVersionHistory] = useState(() =>
+    readStoredProjectVersionHistory()
+  );
   const [sharedProjectQueue, setSharedProjectQueue] = useState(() =>
     readStoredSharedProjectQueue()
   );
@@ -2403,6 +2502,18 @@ export default function App() {
       /* intentionally ignore localStorage errors */
     }
   }, [projectLibrary]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        PROJECT_VERSION_HISTORY_STORAGE_KEY,
+        JSON.stringify(projectVersionHistory || {})
+      );
+    } catch {
+      /* intentionally ignore localStorage errors */
+    }
+  }, [projectVersionHistory]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2715,9 +2826,65 @@ export default function App() {
   }, [appScreen, refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedAuthChecking]);
 
   useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+    if (appScreen === APP_SCREEN_HOME) return;
+    const projectId = String(activeSharedProjectMeta?.id || "").trim();
+    if (!projectId) return;
+    let canceled = false;
+    const pollForRemoteChanges = async () => {
+      try {
+        const shared = await listSharedProjects(PROJECT_LIBRARY_MAX_ENTRIES);
+        if (canceled) return;
+        const match = (Array.isArray(shared) ? shared : []).find(
+          (entry) => String(entry?.id || "").trim() === projectId
+        );
+        if (!match) return;
+        const remoteEditedAt = String(
+          match?.last_edited_at || match?.lastEditedAt || match?.saved_at || match?.savedAt || ""
+        ).trim();
+        if (!remoteEditedAt) return;
+        const localMeta = activeSharedProjectMetaRef.current || {};
+        const localEditedAt = String(localMeta?.lastEditedAt || "").trim();
+        if (localEditedAt && remoteEditedAt === localEditedAt) return;
+        const remoteSavedBy = String(match?.saved_by || match?.savedBy || "").trim();
+        const currentUser = String(sharedAuth?.username || "").trim();
+        if (remoteSavedBy && currentUser && remoteSavedBy === currentUser) {
+          setActiveSharedProjectMeta((prev) => ({
+            ...prev,
+            lastEditedAt: remoteEditedAt,
+            savedBy: remoteSavedBy,
+          }));
+          return;
+        }
+        setRemoteSharedUpdateNotice({
+          id: projectId,
+          savedBy: remoteSavedBy || "another user",
+          lastEditedAt: remoteEditedAt,
+        });
+      } catch {
+        /* intentionally ignore non-critical map/draw errors */
+      }
+    };
+
+    pollForRemoteChanges();
+    const timer = setInterval(pollForRemoteChanges, 20000);
+    return () => {
+      canceled = true;
+      clearInterval(timer);
+    };
+  }, [
+    activeSharedProjectMeta?.id,
+    appScreen,
+    sharedAccessAuthenticated,
+    sharedAuth?.username,
+    sharedAuthChecking,
+  ]);
+
+  useEffect(() => {
     if (!sharedAccessAuthenticated) {
       setSecurityAuditEvents([]);
       setSecurityAuditSyncing(false);
+      setRemoteSharedUpdateNotice(null);
     }
   }, [sharedAccessAuthenticated]);
 
@@ -3178,10 +3345,12 @@ export default function App() {
   const historySuspendedRef = useRef(false);
   const historyPrevSignatureRef = useRef(layerFeaturesSignature(layerFeatures));
   const historyPrevFeaturesRef = useRef(cloneLayerFeatures(layerFeatures));
+  const initialSaveBaselineSetRef = useRef(false);
   const propertyLookupAbortRef = useRef(null);
   const propertyLookupRequestRef = useRef(0);
   const sharedProjectQueueRef = useRef(sharedProjectQueue);
   const sharedProjectQueueSyncingRef = useRef(false);
+  const activeSharedProjectMetaRef = useRef(activeSharedProjectMeta);
   const googleTileSessionRef = useRef(null);
   const googleTileSessionExpiryRef = useRef(0);
   const googleTileSessionPromiseRef = useRef(null);
@@ -3217,6 +3386,14 @@ export default function App() {
       ? sharedProjectQueue
       : [];
   }, [sharedProjectQueue]);
+
+  useEffect(() => {
+    activeSharedProjectMetaRef.current = activeSharedProjectMeta || {
+      id: "",
+      lastEditedAt: "",
+      savedBy: "",
+    };
+  }, [activeSharedProjectMeta]);
 
   useEffect(() => {
     baseMapRef.current = baseMap;
@@ -5208,6 +5385,12 @@ export default function App() {
     []
   );
 
+  const cycleActiveLayer = useCallback(() => {
+    const idx = LAYER_KEYS.indexOf(activeLayerRef.current);
+    const next = LAYER_KEYS[(idx + 1) % LAYER_KEYS.length];
+    switchActiveLayer(next);
+  }, [switchActiveLayer]);
+
   const switchToPanMode = useCallback(() => {
     const draw = drawRef.current;
     drawingBoundaryRef.current = false;
@@ -5463,12 +5646,78 @@ export default function App() {
     warnOutsideBoundary,
   ]);
 
+  const currentProjectLibraryId = useMemo(
+    () => buildProjectLibraryId(projectName || "Untitled Project"),
+    [projectName]
+  );
+
+  const markProjectSavedBaseline = useCallback((payload, savedAtOverride = "") => {
+    const signature = buildProjectPayloadSignature(payload);
+    if (signature) {
+      setSavedProjectSignature(signature);
+    }
+    const ts = String(savedAtOverride || payload?.savedAt || new Date().toISOString()).trim();
+    if (ts) {
+      setLastManualSaveAt(ts);
+    }
+  }, []);
+
+  const appendProjectVersionSnapshot = useCallback(
+    (projectId, payload, { source = "local", savedBy = "" } = {}) => {
+      const targetId = String(projectId || "").trim();
+      if (!targetId || !isValidProjectPayload(payload)) return;
+      const savedAt = String(payload?.savedAt || new Date().toISOString()).trim();
+      const signature = buildProjectPayloadSignature(payload);
+      const nextVersion = {
+        id: `${savedAt}-${Math.random().toString(36).slice(2, 8)}`,
+        savedAt,
+        source: String(source || "local").trim() || "local",
+        savedBy: String(savedBy || "").trim(),
+        polygonCount: countProjectPayloadPolygons(payload),
+        hasBoundary: !!payload?.boundary,
+        signature,
+        payload,
+      };
+      setProjectVersionHistory((prev) => {
+        const prevMap = prev && typeof prev === "object" ? prev : {};
+        const existing = Array.isArray(prevMap[targetId]) ? prevMap[targetId] : [];
+        if (existing.length && existing[0]?.signature && existing[0].signature === signature) {
+          return prevMap;
+        }
+        return {
+          ...prevMap,
+          [targetId]: [nextVersion, ...existing].slice(0, PROJECT_VERSION_HISTORY_MAX_PER_PROJECT),
+        };
+      });
+    },
+    []
+  );
+
   // Save/load project
-  const saveProject = useCallback(async ({ downloadFile = true } = {}) => {
+  const saveProject = useCallback(async ({ downloadFile = true, forceOverwrite = false } = {}) => {
+    setSaveInProgress(true);
     const payload = buildProjectPayload();
     const localEntry = buildProjectLibraryEntryFromPayload(payload);
+    const projectIdForHistory = String(localEntry?.id || currentProjectLibraryId || "").trim();
+    const baseLastEditedAt =
+      activeSharedProjectMetaRef.current?.id &&
+      activeSharedProjectMetaRef.current?.id === localEntry?.id
+        ? String(activeSharedProjectMetaRef.current?.lastEditedAt || "").trim()
+        : String(
+            (projectLibrary || []).find((entry) => entry?.id === localEntry?.id)?.lastEditedAt ||
+              ""
+          ).trim();
+
     setLayerFeatures(payload.layerFeatures);
     setProjectLibrary((prev) => upsertProjectLibraryEntries(prev, payload));
+    if (projectIdForHistory) {
+      appendProjectVersionSnapshot(projectIdForHistory, payload, {
+        source: "local",
+        savedBy: String(sharedAuth?.username || "").trim(),
+      });
+    }
+    markProjectSavedBaseline(payload, payload.savedAt);
+    setRemoteSharedUpdateNotice(null);
 
     if (downloadFile) {
       const fname = `${safeFilename(payload.projectName)}.json`;
@@ -5482,35 +5731,107 @@ export default function App() {
         "info",
         5200
       );
+      setSaveInProgress(false);
       return;
     }
     try {
       if (localEntry?.id) {
-        await saveSharedProject({
+        const sharedSummary = await saveSharedProject({
           id: localEntry.id,
           projectName: localEntry.projectName,
           savedAt: localEntry.savedAt,
           polygonCount: localEntry.polygonCount,
           hasBoundary: localEntry.hasBoundary,
+          baseLastEditedAt,
+          forceOverwrite,
           payload,
         });
+        const sharedSavedAt = String(
+          sharedSummary?.last_edited_at || sharedSummary?.saved_at || payload.savedAt || ""
+        ).trim();
         setSharedProjectQueue((prev) =>
           (Array.isArray(prev) ? prev : []).filter(
             (op) => String(op?.id) !== String(localEntry.id)
           )
         );
         setSharedProjectLibraryStatus("connected");
+        setActiveSharedProjectMeta({
+          id: String(sharedSummary?.id || localEntry.id || "").trim(),
+          lastEditedAt: sharedSavedAt,
+          savedBy: String(
+            sharedSummary?.saved_by || sharedSummary?.savedBy || sharedAuth?.username || ""
+          ).trim(),
+        });
+        if (sharedSavedAt) {
+          markProjectSavedBaseline(
+            {
+              ...payload,
+              savedAt: sharedSavedAt,
+            },
+            sharedSavedAt
+          );
+        }
+        if (projectIdForHistory) {
+          appendProjectVersionSnapshot(
+            projectIdForHistory,
+            {
+              ...payload,
+              savedAt: sharedSavedAt || payload.savedAt,
+            },
+            {
+              source: "shared",
+              savedBy: String(
+                sharedSummary?.saved_by || sharedSummary?.savedBy || sharedAuth?.username || ""
+              ).trim(),
+            }
+          );
+        }
         refreshSharedProjectLibrary({ quiet: true });
         pushToast(
-          downloadFile
+          forceOverwrite
+            ? "Shared conflict resolved: your version overwrote the remote project."
+            : downloadFile
             ? "Project saved (JSON) and synced to shared Home projects."
             : "Project synced to shared Home projects (no JSON download).",
           "info",
-          4200
+          4600
         );
+        setSaveInProgress(false);
         return;
       }
     } catch (error) {
+      const conflict =
+        Number(error?.status) === 409
+          ? error?.payload?.detail?.conflict || error?.payload?.conflict || null
+          : null;
+      if (conflict && localEntry?.id && !forceOverwrite) {
+        const who = String(conflict?.saved_by || conflict?.savedBy || "another user").trim();
+        const when = String(conflict?.last_edited_at || conflict?.lastEditedAt || "").trim();
+        if (when) {
+          setRemoteSharedUpdateNotice({
+            id: String(conflict?.id || localEntry.id || "").trim(),
+            savedBy: who,
+            lastEditedAt: when,
+          });
+        }
+        askConfirm({
+          title: "Shared Save Conflict",
+          message: `${localEntry.projectName || "This project"} was updated by ${who || "another user"} at ${
+            when ? new Date(when).toLocaleString() : "an unknown time"
+          }. Overwrite shared version with your local edits?`,
+          confirmText: "Overwrite Shared",
+          cancelText: "Keep Local",
+          danger: true,
+          onConfirm: async () => {
+            setConfirm(null);
+            await saveProject({ downloadFile: false, forceOverwrite: true });
+          },
+        });
+        pushToast("Shared conflict detected. Review and choose overwrite if needed.", "warn", 6500);
+        setSaveInProgress(false);
+        return;
+      }
+
       if (isAuthError(error)) {
         setSharedAuth((prev) => ({
           token: "",
@@ -5539,6 +5860,7 @@ export default function App() {
         "warn",
         6200
       );
+      setSaveInProgress(false);
       return;
     }
     pushToast(
@@ -5547,11 +5869,18 @@ export default function App() {
         : "Project saved in browser and added to Home recent projects.",
       "info"
     );
+    setSaveInProgress(false);
   }, [
+    appendProjectVersionSnapshot,
+    askConfirm,
     buildProjectPayload,
+    currentProjectLibraryId,
+    markProjectSavedBaseline,
+    projectLibrary,
     pushToast,
     refreshSharedProjectLibrary,
     sharedAccessAuthenticated,
+    sharedAuth?.username,
     sharedLoginUsername,
   ]);
 
@@ -5583,6 +5912,7 @@ export default function App() {
         switchToWorkspace = true,
         markAutosaveAvailable = false,
         storeInLibrary = true,
+        sharedMeta = null,
       } = {}
     ) => {
       if (!isValidProjectPayload(data)) {
@@ -5725,6 +6055,28 @@ export default function App() {
         );
       }
 
+      const nextSharedMeta = {
+        id: String(
+          sharedMeta?.id || data?.id || buildProjectLibraryId(resolvedProjectName)
+        ).trim(),
+        lastEditedAt: String(
+          sharedMeta?.lastEditedAt ||
+            data?.lastEditedAt ||
+            data?.last_edited_at ||
+            payloadForLibrary.savedAt ||
+            ""
+        ).trim(),
+        savedBy: String(
+          sharedMeta?.savedBy || data?.savedBy || data?.saved_by || ""
+        ).trim(),
+      };
+      setActiveSharedProjectMeta(nextSharedMeta);
+      setRemoteSharedUpdateNotice(null);
+      markProjectSavedBaseline(
+        payloadForLibrary,
+        nextSharedMeta.lastEditedAt || payloadForLibrary.savedAt
+      );
+
       if (markAutosaveAvailable) setAutosaveDraftAvailable(true);
       if (switchToWorkspace) {
         setAppScreen(
@@ -5744,6 +6096,7 @@ export default function App() {
       pushToast,
       reloadDrawForActiveLayer,
       resetUndoRedoHistory,
+      markProjectSavedBaseline,
     ]
   );
 
@@ -5771,6 +6124,11 @@ export default function App() {
       setPdfAnnotations([]);
       setPdfAnnotationTool("select");
       clearUploadedPlanOverlay(true);
+      setActiveSharedProjectMeta({ id: "", lastEditedAt: "", savedBy: "" });
+      setRemoteSharedUpdateNotice(null);
+      setSavedProjectSignature("");
+      setLastManualSaveAt("");
+      initialSaveBaselineSetRef.current = false;
       reloadDrawForActiveLayer(empty, layerVisibleRef.current);
       resetUndoRedoHistory(empty);
       setAppScreen(
@@ -5867,6 +6225,64 @@ export default function App() {
     }
   }, [pushToast]);
 
+  const restoreVersionSnapshot = useCallback(
+    (versionId) => {
+      const target = (currentProjectVersions || []).find(
+        (version) => String(version?.id || "") === String(versionId || "")
+      );
+      if (!target?.payload || !isValidProjectPayload(target.payload)) {
+        pushToast("That snapshot is unavailable or invalid.", "error", 5200);
+        return;
+      }
+      applyProjectPayload(target.payload, {
+        fallbackProjectName: projectName || "Recovered Project",
+        successToast: "Version restored from history.",
+        switchToWorkspace: true,
+        markAutosaveAvailable: true,
+        storeInLibrary: true,
+      });
+      setVersionCompareId(String(target.id || ""));
+      setShowVersionHistory(false);
+    },
+    [applyProjectPayload, currentProjectVersions, projectName, pushToast]
+  );
+
+  const clearCurrentProjectVersionHistory = useCallback(() => {
+    const targetId = String(currentProjectLibraryId || "").trim();
+    if (!targetId) {
+      pushToast("No project selected for version history clear.", "warn", 3200);
+      return;
+    }
+    if (!currentProjectVersions.length) {
+      pushToast("No saved snapshots exist for this project.", "info", 2800);
+      return;
+    }
+    askConfirm({
+      title: "Clear Version History",
+      message:
+        "Remove all saved snapshots for this project? Current map data stays unchanged.",
+      confirmText: "Clear History",
+      cancelText: "Cancel",
+      danger: true,
+      onConfirm: () => {
+        setProjectVersionHistory((prev) => {
+          const next = { ...(prev && typeof prev === "object" ? prev : {}) };
+          delete next[targetId];
+          return next;
+        });
+        setVersionCompareId("");
+        setShowVersionHistory(false);
+        setConfirm(null);
+        pushToast("Version history cleared for this project.", "info", 3500);
+      },
+    });
+  }, [
+    askConfirm,
+    currentProjectLibraryId,
+    currentProjectVersions.length,
+    pushToast,
+  ]);
+
   const removeProjectFromLibrary = useCallback(
     async (id) => {
       setProjectLibrary((prev) => (prev || []).filter((entry) => entry?.id !== id));
@@ -5925,6 +6341,11 @@ export default function App() {
             switchToWorkspace: true,
             markAutosaveAvailable: false,
             storeInLibrary: true,
+            sharedMeta: {
+              id: String(entry.id || "").trim(),
+              lastEditedAt: String(entry.lastEditedAt || entry.savedAt || "").trim(),
+              savedBy: String(entry.savedBy || "").trim(),
+            },
           });
           return;
         } catch {
@@ -5950,6 +6371,13 @@ export default function App() {
           switchToWorkspace: true,
           markAutosaveAvailable: false,
           storeInLibrary: true,
+          sharedMeta: {
+            id: String(remoteProject.id || entry?.id || "").trim(),
+            lastEditedAt: String(
+              remoteProject.last_edited_at || remoteProject.saved_at || ""
+            ).trim(),
+            savedBy: String(remoteProject.saved_by || "").trim(),
+          },
         });
         setProjectLibrary((prev) =>
           upsertProjectLibraryEntries(
@@ -5994,11 +6422,114 @@ export default function App() {
     return !!String(projectName || "").trim();
   }, [boundary, layerFeatures, pdfAnnotations, projectName]);
 
+  const currentProjectSignature = useMemo(
+    () => buildProjectPayloadSignature(buildProjectPayload()),
+    [buildProjectPayload]
+  );
+
+  useEffect(() => {
+    if (initialSaveBaselineSetRef.current) return;
+    if (!currentProjectSignature) return;
+    setSavedProjectSignature(currentProjectSignature);
+    initialSaveBaselineSetRef.current = true;
+  }, [currentProjectSignature]);
+
+  const hasUnsavedChanges = useMemo(() => {
+    if (!savedProjectSignature) return !!hasCurrentProjectData;
+    return savedProjectSignature !== currentProjectSignature;
+  }, [currentProjectSignature, hasCurrentProjectData, savedProjectSignature]);
+
+  const saveStatusLabel = useMemo(() => {
+    if (saveInProgress) return "Saving...";
+    if (hasUnsavedChanges) return "Unsaved changes";
+    if (lastManualSaveAt) {
+      return `Saved ${new Date(lastManualSaveAt).toLocaleTimeString()}`;
+    }
+    return "Saved";
+  }, [hasUnsavedChanges, lastManualSaveAt, saveInProgress]);
+
   const visibleProjectLibrary = useMemo(() => {
     const entries = Array.isArray(projectLibrary) ? projectLibrary : [];
     if (!sharedAccessAuthenticated) return [];
     return entries;
   }, [projectLibrary, sharedAccessAuthenticated]);
+
+  const currentProjectVersions = useMemo(() => {
+    const all = projectVersionHistory && typeof projectVersionHistory === "object"
+      ? projectVersionHistory
+      : {};
+    const byId = Array.isArray(all[currentProjectLibraryId]) ? all[currentProjectLibraryId] : [];
+    return byId;
+  }, [currentProjectLibraryId, projectVersionHistory]);
+
+  const selectedVersionForCompare = useMemo(
+    () =>
+      (currentProjectVersions || []).find(
+        (version) => String(version?.id || "") === String(versionCompareId || "")
+      ) || null,
+    [currentProjectVersions, versionCompareId]
+  );
+
+  const currentProjectMetrics = useMemo(
+    () => summarizePayloadMetrics(buildProjectPayload()),
+    [buildProjectPayload]
+  );
+
+  const selectedVersionMetrics = useMemo(
+    () => summarizePayloadMetrics(selectedVersionForCompare?.payload || null),
+    [selectedVersionForCompare]
+  );
+
+  const activeOperations = useMemo(() => {
+    const ops = [];
+    if (saveInProgress) {
+      ops.push({ id: "save", label: "Saving project", detail: "Writing local/shared project files." });
+    }
+    if (propertyLookupLoading) {
+      ops.push({
+        id: "lookup",
+        label: "Property lookup",
+        detail: "Searching address and boundary.",
+        canCancel: true,
+      });
+    }
+    if (propertyLookupSuggestLoading) {
+      ops.push({ id: "suggestions", label: "Address suggestions", detail: "Loading autocomplete." });
+    }
+    if (backendSubmitting) {
+      ops.push({ id: "ai-measure", label: "AI takeoff", detail: "Computing measurements." });
+    }
+    if (segmentingImage) {
+      ops.push({ id: "segment", label: "CV segmentation", detail: "Generating polygons by class." });
+    }
+    if (capturingMapImage) {
+      ops.push({ id: "capture", label: "Capturing map image", detail: "Preparing backend input image." });
+    }
+    if (trainingExporting) {
+      ops.push({ id: "training-export", label: "Training export", detail: "Building correction sample ZIP." });
+    }
+    if (pdfConverting) {
+      ops.push({ id: "pdf-convert", label: "PDF convert", detail: "Rendering page image for markup." });
+    }
+    if (sharedProjectQueueSyncing) {
+      ops.push({ id: "shared-sync", label: "Shared sync", detail: "Uploading queued shared updates." });
+    }
+    if (sharedProjectLibrarySyncing) {
+      ops.push({ id: "library-refresh", label: "Refreshing shared library", detail: "Fetching latest project list." });
+    }
+    return ops;
+  }, [
+    backendSubmitting,
+    capturingMapImage,
+    pdfConverting,
+    propertyLookupLoading,
+    propertyLookupSuggestLoading,
+    saveInProgress,
+    segmentingImage,
+    sharedProjectLibrarySyncing,
+    sharedProjectQueueSyncing,
+    trainingExporting,
+  ]);
 
   const sharedStatusUi = useMemo(() => {
     if (sharedAuthChecking || sharedProjectLibraryStatus === "connecting") {
@@ -7156,6 +7687,29 @@ export default function App() {
     pushToast,
     resolveGoogleLookupFeature,
   ]);
+
+  const cancelPropertyLookup = useCallback(() => {
+    propertyLookupRequestRef.current += 1;
+    try {
+      propertyLookupAbortRef.current?.abort();
+    } catch {
+      /* intentionally ignore non-critical map/draw errors */
+    }
+    setPropertyLookupLoading(false);
+    setPropertyLookupSuggestLoading(false);
+    setPropertyLookupSuggestOpen(false);
+    setPropertyLookupSuggestIndex(-1);
+    pushToast("Property lookup cancelled.", "info", 2600);
+  }, [pushToast]);
+
+  const cancelOperationById = useCallback(
+    (operationId) => {
+      if (String(operationId) === "lookup") {
+        cancelPropertyLookup();
+      }
+    },
+    [cancelPropertyLookup]
+  );
 
   useEffect(() => {
     const q = propertyLookupQuery.trim();
@@ -8404,22 +8958,64 @@ export default function App() {
 
   // Write an autosave snapshot when tab/window closes.
   useEffect(() => {
-    const onBeforeUnload = () => {
+    const onBeforeUnload = (event) => {
       try {
         const payload = { ...buildProjectPayload(), autosavedAt: new Date().toISOString() };
         localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
       } catch {
         /* intentionally ignore non-critical map/draw errors */
       }
+      if (!hasUnsavedChanges) return;
+      event.preventDefault();
+      event.returnValue = "";
+      return "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [buildProjectPayload]);
+  }, [buildProjectPayload, hasUnsavedChanges]);
 
   // Keyboard shortcuts:
   // P = draw polygon, Esc = select mode, Delete/Backspace = delete selected, 1-4 = switch layer
   useEffect(() => {
     const onKeyDown = (e) => {
+      const cmdOrCtrl = e.metaKey || e.ctrlKey;
+      const shiftedQuestion = e.key === "?" || (e.key === "/" && e.shiftKey);
+      if (
+        isWorkspaceScreen &&
+        cmdOrCtrl &&
+        !e.altKey &&
+        !e.shiftKey &&
+        (e.key === "k" || e.key === "K")
+      ) {
+        e.preventDefault();
+        setShowShortcutHelp(false);
+        setShowCommandPalette(true);
+        return;
+      }
+      if (
+        isWorkspaceScreen &&
+        !cmdOrCtrl &&
+        !e.altKey &&
+        shiftedQuestion
+      ) {
+        e.preventDefault();
+        setShowCommandPalette(false);
+        setShowShortcutHelp((prev) => !prev);
+        return;
+      }
+      if (showCommandPalette && e.key === "Escape") {
+        e.preventDefault();
+        setShowCommandPalette(false);
+        setCommandPaletteQuery("");
+        setCommandPaletteIndex(0);
+        return;
+      }
+      if (showShortcutHelp && e.key === "Escape") {
+        e.preventDefault();
+        setShowShortcutHelp(false);
+        return;
+      }
+
       const target = e.target;
       const tag = target?.tagName?.toLowerCase?.();
       const typing =
@@ -8430,8 +9026,6 @@ export default function App() {
 
       const d = drawRef.current;
       if (!d) return;
-
-      const cmdOrCtrl = e.metaKey || e.ctrlKey;
       if (
         cmdOrCtrl &&
         !e.altKey &&
@@ -8504,9 +9098,12 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     deleteSelectedFeatures,
+    isWorkspaceScreen,
     redoLayerEdit,
     saveProject,
     switchActiveLayer,
+    showCommandPalette,
+    showShortcutHelp,
     undoLayerEdit,
   ]);
 
@@ -9703,6 +10300,279 @@ export default function App() {
     [azureMapsKey, googleMapsKey, mapboxToken, maptilerKey]
   );
 
+  const commandActions = useMemo(
+    () => [
+      {
+        id: "save-json",
+        label: "Save Project (JSON)",
+        detail: "Download JSON and sync shared project when logged in.",
+        shortcut: "Cmd/Ctrl+S",
+        keywords: "save json download project",
+        disabled: saveInProgress,
+        run: () => saveProject({ downloadFile: true }),
+      },
+      {
+        id: "save-shared",
+        label: "Save Project (Shared Only)",
+        detail: "Store in browser/shared files without downloading JSON.",
+        keywords: "save shared sync cloud",
+        disabled: saveInProgress,
+        run: () => saveProject({ downloadFile: false }),
+      },
+      {
+        id: "version-history",
+        label: "Open Version History",
+        detail: "Compare snapshots and restore previous versions.",
+        keywords: "history version compare restore",
+        run: () => setShowVersionHistory(true),
+      },
+      {
+        id: "refresh-shared-library",
+        label: "Refresh Shared Library",
+        detail: "Fetch latest Home projects from backend.",
+        keywords: "refresh shared library projects",
+        disabled: !sharedAccessAuthenticated || sharedProjectLibrarySyncing || sharedAuthChecking,
+        run: () => refreshSharedProjectLibrary({ quiet: false }),
+      },
+      {
+        id: "sync-shared-queue",
+        label: "Sync Shared Queue",
+        detail: "Upload queued project changes to shared storage.",
+        keywords: "sync queue shared offline",
+        disabled:
+          !sharedAccessAuthenticated ||
+          sharedProjectQueueSyncing ||
+          sharedAuthChecking ||
+          sharedProjectQueue.length === 0,
+        run: () => syncSharedProjectQueue({ quiet: false }),
+      },
+      {
+        id: "ai-takeoff",
+        label: "Run AI Takeoff (Stable)",
+        detail: "Generate polygons with backend takeoff.",
+        keywords: "ai takeoff measure stable",
+        disabled:
+          !aiEnabled ||
+          workflowMode === WORKFLOW_MODE_PDF ||
+          !boundary ||
+          autoMeasuring ||
+          pdfConverting,
+        run: autoMeasureExperimental,
+      },
+      {
+        id: "cv-segment",
+        label: "Run CV Segmentation (All Classes)",
+        detail: "Run backend segmentation for all layers.",
+        keywords: "cv segmentation polygons",
+        disabled:
+          !aiEnabled ||
+          workflowMode === WORKFLOW_MODE_PDF ||
+          segmentingImage ||
+          pdfConverting ||
+          (!measurementImageFile && !boundary),
+        run: () => runSegmentationMeasurement(),
+      },
+      {
+        id: "lookup-property",
+        label: "Lookup Property by Address",
+        detail: "Run boundary/address lookup using selected provider.",
+        keywords: "lookup address boundary geocode",
+        disabled:
+          workflowMode === WORKFLOW_MODE_PDF ||
+          propertyLookupLoading ||
+          !propertyLookupQuery.trim(),
+        run: () => lookupPropertyByAddress(),
+      },
+      {
+        id: "draw-mode",
+        label: "Switch to Draw Mode",
+        detail: "Enable polygon drawing.",
+        shortcut: "P",
+        keywords: "draw polygon mode",
+        run: switchToDrawMode,
+      },
+      {
+        id: "pan-mode",
+        label: "Switch to Pan/Select Mode",
+        detail: "Pan map and select existing features.",
+        shortcut: "Esc",
+        keywords: "pan select mode",
+        run: switchToPanMode,
+      },
+      {
+        id: "delete-selected",
+        label: "Delete Selected Features",
+        detail: "Remove currently selected polygons.",
+        shortcut: "Delete",
+        keywords: "delete selected features",
+        run: deleteSelectedFeatures,
+      },
+      {
+        id: "undo",
+        label: "Undo",
+        detail: "Undo latest edit.",
+        shortcut: "Cmd/Ctrl+Z",
+        keywords: "undo edit",
+        disabled: !canUndo,
+        run: undoLayerEdit,
+      },
+      {
+        id: "redo",
+        label: "Redo",
+        detail: "Redo last undone edit.",
+        shortcut: "Cmd/Ctrl+Shift+Z",
+        keywords: "redo edit",
+        disabled: !canRedo,
+        run: redoLayerEdit,
+      },
+      {
+        id: "next-layer",
+        label: "Cycle Active Layer",
+        detail: "Move to the next layer: plowable, sidewalks, turf, mulch.",
+        keywords: "layer cycle active",
+        run: cycleActiveLayer,
+      },
+      {
+        id: "open-3d",
+        label: "Open True 3D Viewer",
+        detail: "Open photorealistic 3D viewer with edit handles.",
+        keywords: "3d viewer cesium terrain",
+        disabled: workflowMode === WORKFLOW_MODE_PDF,
+        run: openTrue3DViewer,
+      },
+      {
+        id: "restore-autosave",
+        label: "Restore Autosave Draft",
+        detail: "Load latest autosave snapshot.",
+        keywords: "autosave restore recover",
+        disabled: !autosaveDraftAvailable,
+        run: restoreAutosave,
+      },
+      {
+        id: "clear-active",
+        label: `Clear Active Layer (${LAYER_META[activeLayer]?.name || activeLayer})`,
+        detail: "Remove polygons only from the current layer.",
+        keywords: "clear active layer polygons",
+        run: clearActiveLayer,
+      },
+      {
+        id: "clear-all",
+        label: "Clear All Layers",
+        detail: "Remove polygons from all layers.",
+        keywords: "clear all layers polygons",
+        run: clearAllLayers,
+      },
+      {
+        id: "open-home",
+        label: "Go to Home Page",
+        detail: "Open shared project home page.",
+        keywords: "home projects page",
+        run: () => setAppScreen(APP_SCREEN_HOME),
+      },
+      {
+        id: "new-location",
+        label: "Start New Location Project",
+        detail: "Reset workspace and open location mode.",
+        keywords: "new project location",
+        run: () => startNewProject(WORKFLOW_MODE_LOCATION),
+      },
+      {
+        id: "new-pdf",
+        label: "Start New PDF/Image Project",
+        detail: "Reset workspace and open PDF mode.",
+        keywords: "new project pdf image",
+        run: () => startNewProject(WORKFLOW_MODE_PDF),
+      },
+      {
+        id: "open-page-picker",
+        label: "Open Page Picker",
+        detail: "Switch between location and PDF measuring pages.",
+        keywords: "page picker workflow",
+        run: () => setShowWorkflowPicker(true),
+      },
+    ],
+    [
+      activeLayer,
+      aiEnabled,
+      autoMeasureExperimental,
+      autoMeasuring,
+      autosaveDraftAvailable,
+      boundary,
+      canRedo,
+      canUndo,
+      clearActiveLayer,
+      clearAllLayers,
+      cycleActiveLayer,
+      deleteSelectedFeatures,
+      lookupPropertyByAddress,
+      measurementImageFile,
+      openTrue3DViewer,
+      pdfConverting,
+      propertyLookupLoading,
+      propertyLookupQuery,
+      redoLayerEdit,
+      refreshSharedProjectLibrary,
+      restoreAutosave,
+      runSegmentationMeasurement,
+      saveInProgress,
+      saveProject,
+      segmentingImage,
+      sharedAccessAuthenticated,
+      sharedAuthChecking,
+      sharedProjectLibrarySyncing,
+      sharedProjectQueue.length,
+      sharedProjectQueueSyncing,
+      startNewProject,
+      switchToDrawMode,
+      switchToPanMode,
+      syncSharedProjectQueue,
+      undoLayerEdit,
+      workflowMode,
+    ]
+  );
+
+  const filteredCommandActions = useMemo(() => {
+    const q = String(commandPaletteQuery || "").trim().toLowerCase();
+    if (!q) return commandActions;
+    return commandActions.filter((action) =>
+      `${action.label} ${action.detail || ""} ${action.keywords || ""}`
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [commandActions, commandPaletteQuery]);
+
+  const runCommandPaletteAction = useCallback((action) => {
+    if (!action || action.disabled) return;
+    try {
+      action.run?.();
+    } catch {
+      /* intentionally ignore non-critical map/draw errors */
+    }
+    setShowCommandPalette(false);
+    setCommandPaletteQuery("");
+    setCommandPaletteIndex(0);
+  }, []);
+
+  useEffect(() => {
+    if (!showCommandPalette) return;
+    setCommandPaletteIndex(0);
+    requestAnimationFrame(() => {
+      commandPaletteInputRef.current?.focus?.();
+      commandPaletteInputRef.current?.select?.();
+    });
+  }, [showCommandPalette]);
+
+  useEffect(() => {
+    if (!showCommandPalette) return;
+    if (!filteredCommandActions.length) {
+      if (commandPaletteIndex !== 0) setCommandPaletteIndex(0);
+      return;
+    }
+    if (commandPaletteIndex >= filteredCommandActions.length) {
+      setCommandPaletteIndex(filteredCommandActions.length - 1);
+    }
+  }, [commandPaletteIndex, filteredCommandActions.length, showCommandPalette]);
+
   // ---------- Render ----------
   if (appScreen === APP_SCREEN_HOME) {
     return (
@@ -10372,6 +11242,448 @@ export default function App() {
         onConfirm={() => confirm?.onConfirm?.()}
       />
 
+      {showVersionHistory && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 10002,
+            background: "rgba(0,0,0,0.66)",
+            display: "grid",
+            placeItems: "center",
+            padding: 16,
+          }}
+        >
+          <div
+            style={{
+              width: "min(980px, 100%)",
+              maxHeight: "86vh",
+              overflow: "auto",
+              background: "#0f0f0f",
+              border: "1px solid rgba(255,255,255,0.16)",
+              borderRadius: 16,
+              boxShadow: "0 30px 80px rgba(0,0,0,0.6)",
+              padding: 14,
+              color: "#fff",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+                marginBottom: 10,
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>Version History</div>
+                <div style={{ fontSize: 12, opacity: 0.72 }}>
+                  {projectName || "Untitled Project"} • {currentProjectVersions.length} snapshot
+                  {currentProjectVersions.length === 1 ? "" : "s"}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button
+                  type="button"
+                  onClick={clearCurrentProjectVersionHistory}
+                  disabled={!currentProjectVersions.length}
+                  style={{
+                    padding: "7px 10px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(255,125,125,0.45)",
+                    background: "rgba(180,58,58,0.20)",
+                    color: "#fff",
+                    cursor: currentProjectVersions.length ? "pointer" : "not-allowed",
+                    opacity: currentProjectVersions.length ? 1 : 0.6,
+                    fontWeight: 700,
+                    fontSize: 12,
+                  }}
+                >
+                  Clear History
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowVersionHistory(false)}
+                  style={{
+                    padding: "7px 10px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(255,255,255,0.20)",
+                    background: "rgba(255,255,255,0.08)",
+                    color: "#fff",
+                    cursor: "pointer",
+                    fontWeight: 700,
+                    fontSize: 12,
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1.15fr 1fr",
+                gap: 12,
+              }}
+            >
+              <div
+                style={{
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: 12,
+                  background: "rgba(255,255,255,0.03)",
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ fontSize: 12, opacity: 0.8, padding: "8px 10px", borderBottom: "1px solid rgba(255,255,255,0.10)" }}>
+                  Snapshots (newest first)
+                </div>
+                {!currentProjectVersions.length ? (
+                  <div style={{ padding: 12, fontSize: 12, opacity: 0.75, lineHeight: 1.35 }}>
+                    No snapshots yet. Save your project to create restorable versions.
+                  </div>
+                ) : (
+                  <div style={{ maxHeight: 430, overflow: "auto" }}>
+                    {currentProjectVersions.map((version) => {
+                      const selected = String(versionCompareId || "") === String(version.id || "");
+                      return (
+                        <div
+                          key={version.id}
+                          style={{
+                            padding: "9px 10px",
+                            borderBottom: "1px solid rgba(255,255,255,0.08)",
+                            background: selected ? "rgba(0,140,255,0.16)" : "transparent",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                            <div style={{ fontSize: 12, fontWeight: 700 }}>
+                              {version.savedAt
+                                ? new Date(version.savedAt).toLocaleString()
+                                : "Unknown time"}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                padding: "2px 6px",
+                                borderRadius: 999,
+                                border: "1px solid rgba(255,255,255,0.18)",
+                                background: "rgba(255,255,255,0.07)",
+                                opacity: 0.9,
+                              }}
+                            >
+                              {version.source || "local"}
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 11, opacity: 0.75, marginTop: 3 }}>
+                            {Number(version.polygonCount || 0).toLocaleString()} polygons
+                            {version.savedBy ? ` • by ${version.savedBy}` : ""}
+                          </div>
+                          <div style={{ display: "flex", gap: 6, marginTop: 7 }}>
+                            <button
+                              type="button"
+                              onClick={() => setVersionCompareId(String(version.id || ""))}
+                              style={{
+                                padding: "6px 8px",
+                                borderRadius: 8,
+                                border: "1px solid rgba(255,255,255,0.16)",
+                                background: selected ? "rgba(0,140,255,0.20)" : "rgba(255,255,255,0.06)",
+                                color: "#fff",
+                                cursor: "pointer",
+                                fontWeight: 700,
+                                fontSize: 11,
+                              }}
+                            >
+                              {selected ? "Selected" : "Compare"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => restoreVersionSnapshot(version.id)}
+                              style={{
+                                padding: "6px 8px",
+                                borderRadius: 8,
+                                border: "1px solid rgba(124,214,255,0.45)",
+                                background: "rgba(0,140,255,0.20)",
+                                color: "#fff",
+                                cursor: "pointer",
+                                fontWeight: 700,
+                                fontSize: 11,
+                              }}
+                            >
+                              Restore
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div
+                style={{
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: 12,
+                  background: "rgba(255,255,255,0.03)",
+                  padding: 10,
+                }}
+              >
+                <div style={{ fontSize: 12, opacity: 0.84, marginBottom: 8 }}>
+                  {selectedVersionForCompare
+                    ? "Comparison (selected snapshot vs current)"
+                    : "Select a snapshot to compare."}
+                </div>
+                {selectedVersionForCompare ? (
+                  <div style={{ fontSize: 12 }}>
+                    <div style={{ marginBottom: 8, opacity: 0.78 }}>
+                      Snapshot:{" "}
+                      {selectedVersionForCompare.savedAt
+                        ? new Date(selectedVersionForCompare.savedAt).toLocaleString()
+                        : "Unknown"}
+                    </div>
+                    {LAYER_KEYS.map((layerKey) => {
+                      const currentLayer = currentProjectMetrics.byLayer[layerKey] || {
+                        polygons: 0,
+                        sqft: 0,
+                      };
+                      const snapLayer = selectedVersionMetrics.byLayer[layerKey] || {
+                        polygons: 0,
+                        sqft: 0,
+                      };
+                      const polyDelta = currentLayer.polygons - snapLayer.polygons;
+                      const sqftDelta = currentLayer.sqft - snapLayer.sqft;
+                      return (
+                        <div
+                          key={`version-layer-${layerKey}`}
+                          style={{
+                            padding: "6px 0",
+                            borderBottom: "1px dashed rgba(255,255,255,0.10)",
+                          }}
+                        >
+                          <div style={{ fontWeight: 700 }}>{LAYER_META[layerKey].name}</div>
+                          <div style={{ opacity: 0.8 }}>
+                            Polygons: {snapLayer.polygons} → {currentLayer.polygons} (
+                            {polyDelta >= 0 ? "+" : ""}
+                            {polyDelta})
+                          </div>
+                          <div style={{ opacity: 0.8 }}>
+                            Sqft: {Math.round(snapLayer.sqft).toLocaleString()} →{" "}
+                            {Math.round(currentLayer.sqft).toLocaleString()} (
+                            {sqftDelta >= 0 ? "+" : ""}
+                            {Math.round(sqftDelta).toLocaleString()})
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div style={{ marginTop: 8, fontWeight: 800 }}>
+                      Total polygons: {selectedVersionMetrics.polygons} → {currentProjectMetrics.polygons}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, opacity: 0.72 }}>
+                    Tip: click <b>Compare</b> on a snapshot to inspect what changed by layer.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCommandPalette && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => {
+            setShowCommandPalette(false);
+            setCommandPaletteQuery("");
+            setCommandPaletteIndex(0);
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 10003,
+            background: "rgba(0,0,0,0.64)",
+            display: "grid",
+            placeItems: "start center",
+            padding: "7vh 16px 16px",
+          }}
+        >
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: "min(760px, 100%)",
+              background: "#0d1016",
+              border: "1px solid rgba(255,255,255,0.18)",
+              borderRadius: 14,
+              boxShadow: "0 28px 70px rgba(0,0,0,0.6)",
+              overflow: "hidden",
+            }}
+          >
+            <input
+              ref={commandPaletteInputRef}
+              value={commandPaletteQuery}
+              onChange={(event) => setCommandPaletteQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setShowCommandPalette(false);
+                  setCommandPaletteQuery("");
+                  setCommandPaletteIndex(0);
+                  return;
+                }
+                if (!filteredCommandActions.length) return;
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setCommandPaletteIndex((prev) => (prev + 1) % filteredCommandActions.length);
+                  return;
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setCommandPaletteIndex((prev) =>
+                    (prev - 1 + filteredCommandActions.length) % filteredCommandActions.length
+                  );
+                  return;
+                }
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  const action =
+                    filteredCommandActions[Math.max(0, Math.min(commandPaletteIndex, filteredCommandActions.length - 1))];
+                  runCommandPaletteAction(action);
+                }
+              }}
+              placeholder="Type a command (save, history, ai, segmentation, home...)"
+              style={{
+                width: "100%",
+                padding: "14px 14px",
+                border: "none",
+                borderBottom: "1px solid rgba(255,255,255,0.12)",
+                background: "rgba(255,255,255,0.02)",
+                color: "#fff",
+                fontSize: 15,
+                outline: "none",
+              }}
+            />
+            <div style={{ maxHeight: "58vh", overflow: "auto" }}>
+              {!filteredCommandActions.length ? (
+                <div style={{ padding: "14px 14px", fontSize: 12, opacity: 0.72 }}>
+                  No matching commands.
+                </div>
+              ) : (
+                filteredCommandActions.map((action, idx) => {
+                  const selected = idx === commandPaletteIndex;
+                  return (
+                    <button
+                      key={action.id}
+                      type="button"
+                      onClick={() => runCommandPaletteAction(action)}
+                      disabled={!!action.disabled}
+                      style={{
+                        width: "100%",
+                        textAlign: "left",
+                        border: "none",
+                        borderBottom: "1px solid rgba(255,255,255,0.08)",
+                        background: selected ? "rgba(0,140,255,0.20)" : "transparent",
+                        color: action.disabled ? "rgba(255,255,255,0.45)" : "#fff",
+                        cursor: action.disabled ? "not-allowed" : "pointer",
+                        padding: "10px 14px",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                        <div style={{ fontWeight: 800, fontSize: 13 }}>{action.label}</div>
+                        {action.shortcut ? (
+                          <div style={{ fontSize: 11, opacity: 0.75 }}>{action.shortcut}</div>
+                        ) : null}
+                      </div>
+                      {action.detail ? (
+                        <div style={{ fontSize: 11, opacity: 0.72, marginTop: 2 }}>{action.detail}</div>
+                      ) : null}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showShortcutHelp && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 10001,
+            background: "rgba(0,0,0,0.60)",
+            display: "grid",
+            placeItems: "center",
+            padding: 16,
+          }}
+          onClick={() => setShowShortcutHelp(false)}
+        >
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: "min(620px, 100%)",
+              background: "#0f0f0f",
+              border: "1px solid rgba(255,255,255,0.16)",
+              borderRadius: 14,
+              boxShadow: "0 24px 70px rgba(0,0,0,0.55)",
+              padding: 14,
+              color: "#fff",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontSize: 18, fontWeight: 900 }}>Keyboard Shortcuts</div>
+              <button
+                type="button"
+                onClick={() => setShowShortcutHelp(false)}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  background: "rgba(255,255,255,0.08)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                }}
+              >
+                Close
+              </button>
+            </div>
+            {[
+              ["Cmd/Ctrl + K", "Open command palette"],
+              ["Shift + ?", "Open shortcut help"],
+              ["Cmd/Ctrl + S", "Save project JSON + shared sync"],
+              ["Cmd/Ctrl + Z", "Undo edit"],
+              ["Cmd/Ctrl + Shift + Z", "Redo edit"],
+              ["P", "Draw polygon mode"],
+              ["Esc", "Select/pan mode"],
+              ["Delete / Backspace", "Delete selected features"],
+              ["1 / 2 / 3 / 4", "Switch active layer"],
+            ].map(([combo, desc]) => (
+              <div
+                key={`shortcut-${combo}`}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "170px 1fr",
+                  gap: 10,
+                  padding: "7px 0",
+                  borderBottom: "1px dashed rgba(255,255,255,0.10)",
+                  fontSize: 12,
+                }}
+              >
+                <div style={{ fontWeight: 800 }}>{combo}</div>
+                <div style={{ opacity: 0.82 }}>{desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {showWorkflowPicker && (
         <div
           role="dialog"
@@ -10513,6 +11825,250 @@ export default function App() {
             Back to Home
           </button>
         </div>
+
+        <div
+          style={{
+            padding: 10,
+            border: "1px solid rgba(255,255,255,0.10)",
+            borderRadius: 12,
+            marginBottom: 12,
+            background: "rgba(255,255,255,0.03)",
+          }}
+        >
+          <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>Workspace Status</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <div
+              style={{
+                fontSize: 12,
+                padding: "3px 8px",
+                borderRadius: 999,
+                border: hasUnsavedChanges
+                  ? "1px solid rgba(255,160,110,0.55)"
+                  : "1px solid rgba(96,220,154,0.55)",
+                background: hasUnsavedChanges
+                  ? "rgba(182,110,46,0.24)"
+                  : "rgba(26,154,92,0.20)",
+                fontWeight: 700,
+              }}
+            >
+              {saveStatusLabel}
+            </div>
+            <div
+              style={{
+                fontSize: 12,
+                padding: "3px 8px",
+                borderRadius: 999,
+                border: sharedStatusUi.border,
+                background: sharedStatusUi.background,
+                fontWeight: 700,
+              }}
+            >
+              {sharedStatusUi.label}
+            </div>
+          </div>
+          {activeSharedProjectMeta?.id ? (
+            <div style={{ fontSize: 11, opacity: 0.72, marginTop: 7, lineHeight: 1.35 }}>
+              Shared file: {activeSharedProjectMeta.id}
+              {activeSharedProjectMeta.savedBy ? ` • by ${activeSharedProjectMeta.savedBy}` : ""}
+              {activeSharedProjectMeta.lastEditedAt
+                ? ` • ${new Date(activeSharedProjectMeta.lastEditedAt).toLocaleString()}`
+                : ""}
+            </div>
+          ) : null}
+        </div>
+
+        {remoteSharedUpdateNotice ? (
+          <div
+            style={{
+              padding: 10,
+              border: "1px solid rgba(255,170,96,0.6)",
+              borderRadius: 12,
+              marginBottom: 12,
+              background: "rgba(190,105,34,0.24)",
+            }}
+          >
+            <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 4 }}>
+              Shared Update Detected
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.88, lineHeight: 1.35 }}>
+              {remoteSharedUpdateNotice.savedBy || "Another user"} edited this project{" "}
+              {remoteSharedUpdateNotice.lastEditedAt
+                ? `at ${new Date(remoteSharedUpdateNotice.lastEditedAt).toLocaleString()}.`
+                : "recently."}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={() => loadProjectFromLibrary(remoteSharedUpdateNotice.id)}
+                style={{
+                  padding: "7px 8px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.24)",
+                  background: "rgba(255,255,255,0.08)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                  fontSize: 12,
+                }}
+              >
+                Reload Shared
+              </button>
+              <button
+                type="button"
+                onClick={() => saveProject({ downloadFile: false, forceOverwrite: true })}
+                disabled={saveInProgress}
+                style={{
+                  padding: "7px 8px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.24)",
+                  background: "rgba(0,140,255,0.16)",
+                  color: "#fff",
+                  cursor: saveInProgress ? "not-allowed" : "pointer",
+                  opacity: saveInProgress ? 0.6 : 1,
+                  fontWeight: 700,
+                  fontSize: 12,
+                }}
+              >
+                Overwrite Shared
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRemoteSharedUpdateNotice(null)}
+              style={{
+                width: "100%",
+                marginTop: 6,
+                padding: "6px 8px",
+                borderRadius: 9,
+                border: "1px solid rgba(255,255,255,0.20)",
+                background: "rgba(255,255,255,0.06)",
+                color: "#fff",
+                cursor: "pointer",
+                fontWeight: 700,
+                fontSize: 11,
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+
+        <div
+          style={{
+            padding: 10,
+            border: "1px solid rgba(255,255,255,0.10)",
+            borderRadius: 12,
+            marginBottom: 12,
+          }}
+        >
+          <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Quick Actions</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+            <button
+              type="button"
+              onClick={() => {
+                setShowShortcutHelp(false);
+                setShowCommandPalette(true);
+              }}
+              style={{
+                padding: "7px 8px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "rgba(255,255,255,0.05)",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 11,
+                fontWeight: 700,
+              }}
+            >
+              Command (⌘K)
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowVersionHistory(true)}
+              style={{
+                padding: "7px 8px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "rgba(255,255,255,0.05)",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 11,
+                fontWeight: 700,
+              }}
+            >
+              Version History
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowShortcutHelp(true)}
+              style={{
+                padding: "7px 8px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "rgba(255,255,255,0.05)",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 11,
+                fontWeight: 700,
+              }}
+            >
+              Shortcuts (?)
+            </button>
+          </div>
+        </div>
+
+        {activeOperations.length > 0 ? (
+          <div
+            style={{
+              padding: 10,
+              border: "1px solid rgba(255,255,255,0.10)",
+              borderRadius: 12,
+              marginBottom: 12,
+              background: "rgba(255,255,255,0.03)",
+            }}
+          >
+            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
+              Active Operations ({activeOperations.length})
+            </div>
+            {activeOperations.map((operation) => (
+              <div
+                key={`op-${operation.id}`}
+                style={{
+                  padding: "7px 0",
+                  borderBottom: "1px dashed rgba(255,255,255,0.10)",
+                  fontSize: 12,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ fontWeight: 700 }}>{operation.label}</span>
+                  {operation.canCancel ? (
+                    <button
+                      type="button"
+                      onClick={() => cancelOperationById(operation.id)}
+                      style={{
+                        padding: "3px 7px",
+                        borderRadius: 999,
+                        border: "1px solid rgba(255,170,96,0.5)",
+                        background: "rgba(165,90,28,0.22)",
+                        color: "#fff",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                        fontSize: 11,
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  ) : null}
+                </div>
+                {operation.detail ? (
+                  <div style={{ opacity: 0.72, marginTop: 2, lineHeight: 1.3 }}>
+                    {operation.detail}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
 
         <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 10 }}>
           MapTiler key: {keyStatus.maptiler ? "LOADED ✅" : "MISSING ❌"}
@@ -10895,6 +12451,32 @@ export default function App() {
             {propertyLookupLoading ? "Looking Up Property..." : "Lookup Property"}
           </button>
           <button
+            type="button"
+            onClick={cancelPropertyLookup}
+            disabled={!propertyLookupLoading && !propertyLookupSuggestLoading}
+            style={{
+              width: "100%",
+              padding: "8px 10px",
+              borderRadius: 10,
+              marginTop: 8,
+              cursor:
+                !propertyLookupLoading && !propertyLookupSuggestLoading
+                  ? "not-allowed"
+                  : "pointer",
+              border: "1px solid rgba(255,170,96,0.5)",
+              background:
+                !propertyLookupLoading && !propertyLookupSuggestLoading
+                  ? "rgba(255,255,255,0.03)"
+                  : "rgba(165,90,28,0.2)",
+              color: "#fff",
+              fontWeight: 700,
+              opacity:
+                !propertyLookupLoading && !propertyLookupSuggestLoading ? 0.55 : 1,
+            }}
+          >
+            Cancel Lookup
+          </button>
+          <button
             onClick={toggleBoundaryDraw}
             style={{
               width: "100%",
@@ -11109,7 +12691,8 @@ export default function App() {
           </div>
 
           <div style={{ fontSize: 12, opacity: 0.68, marginTop: 6 }}>
-            Shortcuts: `P` draw, `Esc` select, `Delete` remove selected, `Cmd/Ctrl+Z` undo.
+            Shortcuts: `P` draw, `Esc` select, `Delete` remove selected, `Cmd/Ctrl+Z` undo,
+            `Cmd/Ctrl+K` command palette, `Shift+?` shortcut help.
           </div>
         </div>
 
@@ -12132,6 +13715,17 @@ export default function App() {
         {/* Project files */}
         <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
           <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Project Files</div>
+          <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
+            Status:{" "}
+            <span
+              style={{
+                color: hasUnsavedChanges ? "#ffd39d" : "rgba(180,255,210,0.95)",
+                fontWeight: 700,
+              }}
+            >
+              {saveStatusLabel}
+            </span>
+          </div>
 
           <button
             onClick={() => setAppScreen(APP_SCREEN_HOME)}
@@ -12152,36 +13746,78 @@ export default function App() {
 
           <button
             onClick={() => saveProject({ downloadFile: true })}
+            disabled={saveInProgress}
             style={{
               width: "100%",
               padding: "9px 10px",
               borderRadius: 12,
-              cursor: "pointer",
+              cursor: saveInProgress ? "not-allowed" : "pointer",
               border: "1px solid rgba(255,255,255,0.12)",
               background: "rgba(255,255,255,0.06)",
               color: "#fff",
               fontWeight: 700,
+              opacity: saveInProgress ? 0.65 : 1,
             }}
           >
-            Save Project (JSON)
+            {saveInProgress ? "Saving..." : "Save Project (JSON)"}
           </button>
 
           <button
             onClick={() => saveProject({ downloadFile: false })}
+            disabled={saveInProgress}
             style={{
               width: "100%",
               marginTop: 8,
               padding: "9px 10px",
               borderRadius: 12,
-              cursor: "pointer",
+              cursor: saveInProgress ? "not-allowed" : "pointer",
               border: "1px solid rgba(124,214,255,0.35)",
               background: "rgba(0,140,255,0.12)",
               color: "#fff",
               fontWeight: 700,
+              opacity: saveInProgress ? 0.65 : 1,
             }}
           >
             Save Project (Shared Only)
           </button>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={() => setShowVersionHistory(true)}
+              style={{
+                padding: "8px 9px",
+                borderRadius: 10,
+                cursor: "pointer",
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: "rgba(255,255,255,0.05)",
+                color: "#fff",
+                fontWeight: 700,
+                fontSize: 12,
+              }}
+            >
+              Version History
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowShortcutHelp(false);
+                setShowCommandPalette(true);
+              }}
+              style={{
+                padding: "8px 9px",
+                borderRadius: 10,
+                cursor: "pointer",
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: "rgba(255,255,255,0.05)",
+                color: "#fff",
+                fontWeight: 700,
+                fontSize: 12,
+              }}
+            >
+              Command Palette
+            </button>
+          </div>
 
           <label
             style={{
@@ -12674,6 +14310,63 @@ export default function App() {
           }}
         />
 
+        {activeOperations.length > 0 && !showTrue3DViewer && (
+          <div
+            style={{
+              position: "absolute",
+              top: 10,
+              right: 10,
+              zIndex: 9,
+              width: "min(340px, calc(100% - 20px))",
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,0.16)",
+              background: "rgba(10,12,18,0.88)",
+              color: "#fff",
+              backdropFilter: "blur(2px)",
+              padding: "8px 10px",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+            }}
+          >
+            <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>
+              Working ({activeOperations.length})
+            </div>
+            {activeOperations.slice(0, 3).map((operation) => (
+              <div
+                key={`map-op-${operation.id}`}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 11,
+                  padding: "4px 0",
+                  borderBottom: "1px dashed rgba(255,255,255,0.08)",
+                }}
+              >
+                <span style={{ opacity: 0.9 }}>{operation.label}</span>
+                {operation.canCancel ? (
+                  <button
+                    type="button"
+                    onClick={() => cancelOperationById(operation.id)}
+                    style={{
+                      padding: "2px 6px",
+                      borderRadius: 999,
+                      border: "1px solid rgba(255,170,96,0.55)",
+                      background: "rgba(170,90,30,0.24)",
+                      color: "#fff",
+                      cursor: "pointer",
+                      fontWeight: 700,
+                      fontSize: 10,
+                    }}
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+
         {workflowMode === WORKFLOW_MODE_PDF &&
           (!measurementImageFile || !planOverlay?.url) && (
             <div
@@ -13018,6 +14711,7 @@ export default function App() {
               display: "grid",
               gap: 8,
               pointerEvents: "none",
+              paddingBottom: "max(env(safe-area-inset-bottom, 0px), 6px)",
             }}
           >
             <div
@@ -13035,7 +14729,7 @@ export default function App() {
               <button
                 onClick={switchToDrawMode}
                 style={{
-                  padding: "8px 6px",
+                  padding: "10px 6px",
                   borderRadius: 10,
                   border:
                     drawMode === "draw_polygon"
@@ -13055,7 +14749,7 @@ export default function App() {
               <button
                 onClick={switchToPanMode}
                 style={{
-                  padding: "8px 6px",
+                  padding: "10px 6px",
                   borderRadius: 10,
                   border:
                     drawMode === "simple_select"
@@ -13076,7 +14770,7 @@ export default function App() {
                 onClick={undoLayerEdit}
                 disabled={!canUndo}
                 style={{
-                  padding: "8px 6px",
+                  padding: "10px 6px",
                   borderRadius: 10,
                   border: "1px solid rgba(255,255,255,0.14)",
                   background: "rgba(255,255,255,0.05)",
@@ -13092,7 +14786,7 @@ export default function App() {
                 onClick={redoLayerEdit}
                 disabled={!canRedo}
                 style={{
-                  padding: "8px 6px",
+                  padding: "10px 6px",
                   borderRadius: 10,
                   border: "1px solid rgba(255,255,255,0.14)",
                   background: "rgba(255,255,255,0.05)",
@@ -13125,7 +14819,7 @@ export default function App() {
                     key={`compact-layer-${k}`}
                     onClick={() => switchActiveLayer(k)}
                     style={{
-                      padding: "8px 4px",
+                      padding: "9px 4px",
                       borderRadius: 10,
                       border: active
                         ? "1px solid rgba(255,255,255,0.35)"
@@ -13140,6 +14834,82 @@ export default function App() {
                   </button>
                 );
               })}
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                gap: 6,
+                background: "rgba(12,12,12,0.92)",
+                border: "1px solid rgba(255,255,255,0.14)",
+                borderRadius: 12,
+                padding: 6,
+                pointerEvents: "auto",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => saveProject({ downloadFile: false })}
+                disabled={saveInProgress}
+                style={{
+                  padding: "10px 4px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(0,140,255,0.18)",
+                  color: "#fff",
+                  fontWeight: 800,
+                  fontSize: 11,
+                  opacity: saveInProgress ? 0.6 : 1,
+                }}
+              >
+                {saveInProgress ? "Saving" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={deleteSelectedFeatures}
+                style={{
+                  padding: "10px 4px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "#fff",
+                  fontWeight: 800,
+                  fontSize: 11,
+                }}
+              >
+                Delete
+              </button>
+              <button
+                type="button"
+                onClick={cycleActiveLayer}
+                style={{
+                  padding: "10px 4px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "#fff",
+                  fontWeight: 800,
+                  fontSize: 11,
+                }}
+              >
+                Next Layer
+              </button>
+              <button
+                type="button"
+                onClick={() => setAppScreen(APP_SCREEN_HOME)}
+                style={{
+                  padding: "10px 4px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "#fff",
+                  fontWeight: 800,
+                  fontSize: 11,
+                }}
+              >
+                Home
+              </button>
             </div>
           </div>
         )}

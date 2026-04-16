@@ -125,6 +125,8 @@ class SharedProjectUpsertRequest(BaseModel):
     saved_at: str | None = None
     polygon_count: int | None = Field(None, ge=0)
     has_boundary: bool | None = None
+    base_last_edited_at: str | None = None
+    force_overwrite: bool = False
     payload: dict[str, Any]
 
 

@@ -31,22 +31,35 @@ function buildApiCandidates(path) {
   return [...new Set(candidates)];
 }
 
-async function readErrorMessage(response) {
-  try {
-    const payload = await response.json();
-    if (typeof payload?.detail === "string" && payload.detail.trim()) {
-      return payload.detail;
-    }
-    if (Array.isArray(payload?.detail)) {
-      return payload.detail
-        .map((item) => item?.msg || JSON.stringify(item))
-        .filter(Boolean)
-        .join(", ");
-    }
-  } catch {
-    // fall back to generic status text
+function extractErrorMessage(payload, fallback = "Request failed") {
+  if (typeof payload?.detail === "string" && payload.detail.trim()) {
+    return payload.detail;
   }
-  return response.statusText || "Request failed";
+  if (Array.isArray(payload?.detail)) {
+    const joined = payload.detail
+      .map((item) => item?.msg || JSON.stringify(item))
+      .filter(Boolean)
+      .join(", ");
+    if (joined) return joined;
+  }
+  if (payload?.detail && typeof payload.detail === "object") {
+    const nested = payload.detail;
+    if (typeof nested?.message === "string" && nested.message.trim()) {
+      return nested.message;
+    }
+  }
+  if (typeof payload?.message === "string" && payload.message.trim()) {
+    return payload.message;
+  }
+  return fallback;
+}
+
+async function readErrorPayload(response) {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
 }
 
 async function request(path, options = {}) {
@@ -64,8 +77,12 @@ async function request(path, options = {}) {
         ) {
           continue;
         }
-        const message = await readErrorMessage(response);
-        throw new Error(`${response.status}: ${message}`);
+        const payload = await readErrorPayload(response);
+        const message = extractErrorMessage(payload, response.statusText || "Request failed");
+        const error = new Error(`${response.status}: ${message}`);
+        error.status = response.status;
+        error.payload = payload;
+        throw error;
       }
       return response.json();
     } catch (error) {
@@ -203,6 +220,8 @@ export function saveSharedProject({
   savedAt,
   polygonCount,
   hasBoundary,
+  baseLastEditedAt,
+  forceOverwrite = false,
   payload,
 }) {
   return request(`/api/projects/${encodeURIComponent(id)}`, {
@@ -217,6 +236,8 @@ export function saveSharedProject({
       saved_at: savedAt || null,
       polygon_count: Number.isFinite(Number(polygonCount)) ? Number(polygonCount) : null,
       has_boundary: typeof hasBoundary === "boolean" ? hasBoundary : null,
+      base_last_edited_at: String(baseLastEditedAt || "").trim() || null,
+      force_overwrite: !!forceOverwrite,
       payload,
     }),
   });
