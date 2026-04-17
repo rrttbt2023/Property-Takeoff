@@ -141,6 +141,22 @@ const ESTIMATE_STOP_ROW_HINTS = [
   "weed control",
   "total #",
 ];
+const ESTIMATE_TEMPLATE_MAP_FIELDS = {
+  snow: [
+    { token: "PROJECT_NAME", label: "Project Name" },
+    { token: "DATE_LOCAL", label: "Date Measured" },
+    { token: "PLOWABLE_SQFT_RAW", label: "Plowable Sq Ft" },
+    { token: "SIDEWALKS_SQFT_RAW", label: "Sidewalks Sq Ft" },
+    { token: "SNOW_TOTAL_SQFT_RAW", label: "Snow Total Sq Ft" },
+  ],
+  landscaping: [
+    { token: "PROJECT_NAME", label: "Project Name" },
+    { token: "DATE_LOCAL", label: "Date Measured" },
+    { token: "TURF_SQFT_RAW", label: "Turf Sq Ft" },
+    { token: "MULCH_SQFT_RAW", label: "Mulch Sq Ft" },
+    { token: "LANDSCAPING_TOTAL_SQFT_RAW", label: "Landscaping Total Sq Ft" },
+  ],
+};
 const PROPERTY_LOOKUP_PROVIDER_MAPTILER = "maptiler";
 const PROPERTY_LOOKUP_PROVIDER_GOOGLE = "google";
 const CESIUM_JS_URL = "https://unpkg.com/cesium@1.127.0/Build/Cesium/Cesium.js";
@@ -1650,6 +1666,10 @@ function createEmptyEstimateTemplates() {
       format: "text",
       binaryBase64: "",
       binaryExt: "",
+      sheetNames: [],
+      selectedSheetName: "",
+      mappedSheetName: "",
+      cellMap: {},
     },
     landscaping: {
       name: "",
@@ -1658,6 +1678,10 @@ function createEmptyEstimateTemplates() {
       format: "text",
       binaryBase64: "",
       binaryExt: "",
+      sheetNames: [],
+      selectedSheetName: "",
+      mappedSheetName: "",
+      cellMap: {},
     },
   };
 }
@@ -1680,6 +1704,27 @@ function readStoredEstimateTemplates() {
       }
       if (typeof entry.binaryBase64 === "string") next[key].binaryBase64 = entry.binaryBase64;
       if (typeof entry.binaryExt === "string") next[key].binaryExt = entry.binaryExt;
+      if (Array.isArray(entry.sheetNames)) {
+        next[key].sheetNames = entry.sheetNames
+          .map((name) => String(name || "").trim())
+          .filter(Boolean)
+          .slice(0, 120);
+      }
+      if (typeof entry.selectedSheetName === "string") {
+        next[key].selectedSheetName = entry.selectedSheetName;
+      }
+      if (typeof entry.mappedSheetName === "string") {
+        next[key].mappedSheetName = entry.mappedSheetName;
+      }
+      if (entry.cellMap && typeof entry.cellMap === "object") {
+        const normalizedMap = {};
+        for (const [rawToken, rawCell] of Object.entries(entry.cellMap)) {
+          const token = normalizeEstimateTemplateToken(rawToken);
+          if (!token) continue;
+          normalizedMap[token] = String(rawCell || "");
+        }
+        next[key].cellMap = normalizedMap;
+      }
     }
     return next;
   } catch {
@@ -1778,6 +1823,45 @@ function applyEstimateTemplateText(templateText, tokens) {
   return String(templateText || "")
     .replace(/\{\{\s*([^{}\n]+?)\s*\}\}/g, replacer)
     .replace(/\[\[\s*([^\n]+?)\s*\]\]/g, replacer);
+}
+
+function normalizeEstimateTemplateCellAddress(value) {
+  const out = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\$/g, "");
+  if (!/^[A-Z]{1,4}[1-9][0-9]{0,6}$/u.test(out)) return "";
+  return out;
+}
+
+function getEstimateTemplateMapFields(templateKind) {
+  return String(templateKind || "").toLowerCase() === "snow"
+    ? ESTIMATE_TEMPLATE_MAP_FIELDS.snow
+    : ESTIMATE_TEMPLATE_MAP_FIELDS.landscaping;
+}
+
+function hasEstimateTemplateCellMap(templateKind, cellMap) {
+  const fields = getEstimateTemplateMapFields(templateKind);
+  return fields.some(({ token }) => !!normalizeEstimateTemplateCellAddress(cellMap?.[token]));
+}
+
+function applyEstimateTemplateCellMap(XLSX, sheet, cellMap, tokens, templateKind) {
+  if (!sheet || !XLSX?.utils) return 0;
+  const fields = getEstimateTemplateMapFields(templateKind);
+  let appliedCount = 0;
+  for (const { token } of fields) {
+    const cellAddress = normalizeEstimateTemplateCellAddress(cellMap?.[token]);
+    if (!cellAddress) continue;
+    const rawValue = tokens?.[token];
+    if (rawValue == null) continue;
+    const textValue = String(rawValue);
+    const numericValue = parseNumberLikeText(textValue);
+    const finalValue =
+      token.endsWith("_RAW") && numericValue !== null ? numericValue : textValue;
+    XLSX.utils.sheet_add_aoa(sheet, [[finalValue]], { origin: cellAddress });
+    appliedCount += 1;
+  }
+  return appliedCount;
 }
 
 function isBinarySpreadsheetTemplateFile(file) {
@@ -2130,8 +2214,9 @@ function applyLabeledTotalsToSheetRows(rows, sectionItems) {
   }
 }
 
-function fillEstimateWorkbookSheet(XLSX, sheet, tokens, sectionItems) {
+function fillEstimateWorkbookSheet(XLSX, sheet, tokens, sectionItems, options = {}) {
   if (!sheet || !XLSX?.utils) return;
+  const skipHeuristics = !!options?.skipHeuristics;
   const originalRows = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,
@@ -2150,9 +2235,11 @@ function fillEstimateWorkbookSheet(XLSX, sheet, tokens, sectionItems) {
     row.map((cell) => applyEstimateTemplateText(String(cell ?? ""), tokens))
   );
 
-  fillTemplateHeaderRows(rows, tokens);
-  applySectionRowsToSheetRows(rows, sectionItems);
-  applyLabeledTotalsToSheetRows(rows, sectionItems);
+  if (!skipHeuristics) {
+    fillTemplateHeaderRows(rows, tokens);
+    applySectionRowsToSheetRows(rows, sectionItems);
+    applyLabeledTotalsToSheetRows(rows, sectionItems);
+  }
 
   XLSX.utils.sheet_add_aoa(sheet, rows, { origin: "A1" });
 }
@@ -2244,6 +2331,7 @@ async function readEstimateTemplateUpload(file, templateKind) {
     binaryExt,
     convertedFromSpreadsheet: true,
     selectedSheetName,
+    sheetNames,
     hasTemplatePlaceholders,
     sheetCount: sheetNames.length,
     templateKind: templateKind === "snow" ? "snow" : "landscaping",
@@ -9885,6 +9973,14 @@ export default function App() {
             format: parsedTemplate.format === "workbook" ? "workbook" : "text",
             binaryBase64: String(parsedTemplate.binaryBase64 || ""),
             binaryExt: String(parsedTemplate.binaryExt || ""),
+            sheetNames: Array.isArray(parsedTemplate.sheetNames)
+              ? parsedTemplate.sheetNames
+                  .map((name) => String(name || "").trim())
+                  .filter(Boolean)
+              : [],
+            selectedSheetName: String(parsedTemplate.selectedSheetName || ""),
+            mappedSheetName: String(parsedTemplate.selectedSheetName || ""),
+            cellMap: {},
           },
         }));
         if (parsedTemplate.convertedFromSpreadsheet) {
@@ -9935,10 +10031,64 @@ export default function App() {
         format: "text",
         binaryBase64: "",
         binaryExt: "",
+        sheetNames: [],
+        selectedSheetName: "",
+        mappedSheetName: "",
+        cellMap: {},
       },
     }));
     pushToast(`${kindLabel} template cleared.`, "info");
   }, [pushToast]);
+
+  const updateEstimateTemplateMappedSheet = useCallback((templateKind, sheetName) => {
+    const kind = templateKind === "snow" ? "snow" : "landscaping";
+    setEstimateTemplates((prev) => ({
+      ...prev,
+      [kind]: {
+        ...(prev?.[kind] || createEmptyEstimateTemplates()[kind]),
+        mappedSheetName: String(sheetName || ""),
+      },
+    }));
+  }, []);
+
+  const updateEstimateTemplateCellMap = useCallback((templateKind, token, cellAddress) => {
+    const kind = templateKind === "snow" ? "snow" : "landscaping";
+    const normalizedToken = normalizeEstimateTemplateToken(token);
+    if (!normalizedToken) return;
+    setEstimateTemplates((prev) => {
+      const current = prev?.[kind] || createEmptyEstimateTemplates()[kind];
+      const nextCellMap = {
+        ...(current.cellMap && typeof current.cellMap === "object" ? current.cellMap : {}),
+        [normalizedToken]: String(cellAddress || ""),
+      };
+      return {
+        ...prev,
+        [kind]: {
+          ...current,
+          cellMap: nextCellMap,
+        },
+      };
+    });
+  }, []);
+
+  const clearEstimateTemplateCellMap = useCallback(
+    (templateKind) => {
+      const kind = templateKind === "snow" ? "snow" : "landscaping";
+      const kindLabel = kind === "snow" ? "Snow" : "Landscaping";
+      setEstimateTemplates((prev) => {
+        const current = prev?.[kind] || createEmptyEstimateTemplates()[kind];
+        return {
+          ...prev,
+          [kind]: {
+            ...current,
+            cellMap: {},
+          },
+        };
+      });
+      pushToast(`${kindLabel} exact-cell mapping cleared.`, "info", 4200);
+    },
+    [pushToast]
+  );
 
   const exportEstimateFromTemplate = useCallback(
     async (templateKind) => {
@@ -9965,10 +10115,41 @@ export default function App() {
             numbers: xlsxZahl,
           });
           const sectionItems = buildEstimateSectionLineItems(layerFeatures);
+          const hasExactCellMap = hasEstimateTemplateCellMap(kind, template?.cellMap);
           for (const sheetName of workbook.SheetNames || []) {
             const sheet = workbook.Sheets?.[sheetName];
             if (!sheet) continue;
-            fillEstimateWorkbookSheet(XLSX, sheet, estimateTemplateTokens, sectionItems);
+            fillEstimateWorkbookSheet(XLSX, sheet, estimateTemplateTokens, sectionItems, {
+              skipHeuristics: hasExactCellMap,
+            });
+          }
+          if (hasExactCellMap) {
+            const mappedSheetName = String(
+              template?.mappedSheetName ||
+                template?.selectedSheetName ||
+                workbook?.SheetNames?.[0] ||
+                ""
+            ).trim();
+            const mappedSheet = workbook.Sheets?.[mappedSheetName];
+            if (!mappedSheet) {
+              throw new Error(
+                `Mapped sheet "${mappedSheetName || "(blank)"}" was not found in the workbook.`
+              );
+            }
+            const appliedCount = applyEstimateTemplateCellMap(
+              XLSX,
+              mappedSheet,
+              template?.cellMap,
+              estimateTemplateTokens,
+              kind
+            );
+            if (appliedCount <= 0) {
+              pushToast(
+                `${kindLabel} exact-cell mapping is enabled but no valid cell addresses were found.`,
+                "warn",
+                5200
+              );
+            }
           }
           const outputBytes = XLSX.write(workbook, {
             type: "array",
@@ -9983,7 +10164,9 @@ export default function App() {
             })
           );
           pushToast(
-            `${kindLabel} estimate exported (.xlsx) with all pages and polygon values.`,
+            `${kindLabel} estimate exported (.xlsx) with all pages and polygon values${
+              hasExactCellMap ? " using exact-cell mapping." : "."
+            }`,
             "info",
             4600
           );
@@ -14165,107 +14348,6 @@ export default function App() {
           >
             {trainingExporting ? "Exporting Training Sample..." : "One-Click Training Export"}
           </button>
-
-          <div
-            style={{
-              marginTop: 12,
-              paddingTop: 10,
-              borderTop: "1px solid rgba(255,255,255,0.10)",
-            }}
-          >
-            <div style={{ fontSize: 12, opacity: 0.86, marginBottom: 8 }}>
-              Estimate Templates (Snow + Landscaping)
-            </div>
-            <div style={{ fontSize: 11, opacity: 0.72, marginBottom: 8, lineHeight: 1.35 }}>
-              Upload text templates (`.txt`, `.csv`, `.md`, `.json`, `.xml`, `.html`) or spreadsheet
-              templates (`.numbers`, `.xlsx`, `.xls`, `.ods`). Spreadsheet exports preserve all
-              sheets/pages and output a filled `.xlsx`.
-            </div>
-
-            <div style={{ marginBottom: 10, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Snow Template</div>
-              <input
-                type="file"
-                accept=".txt,.csv,.md,.json,.xml,.html,.tsv,.numbers,.xlsx,.xlsm,.xlsb,.xls,.ods,.fods"
-                onChange={(e) => uploadEstimateTemplate("snow", e)}
-                style={{ width: "100%", fontSize: 12, marginBottom: 6 }}
-              />
-              <div style={{ fontSize: 11, opacity: 0.72, marginBottom: 6 }}>
-                {estimateTemplates?.snow?.name
-                  ? `Loaded: ${estimateTemplates.snow.name}`
-                  : "No snow template uploaded yet."}
-              </div>
-              <button
-                onClick={() => exportEstimateFromTemplate("snow")}
-                disabled={!estimateTemplateHasData(estimateTemplates?.snow)}
-                style={{
-                  ...btnStyleFull(),
-                  marginBottom: 6,
-                  cursor: estimateTemplateHasData(estimateTemplates?.snow)
-                    ? "pointer"
-                    : "not-allowed",
-                  opacity: estimateTemplateHasData(estimateTemplates?.snow) ? 1 : 0.6,
-                }}
-              >
-                Export Filled Snow Estimate
-              </button>
-              <button
-                onClick={() => clearEstimateTemplate("snow")}
-                disabled={!estimateTemplateHasData(estimateTemplates?.snow)}
-                style={{
-                  ...btnStyleFull(),
-                  cursor: estimateTemplateHasData(estimateTemplates?.snow)
-                    ? "pointer"
-                    : "not-allowed",
-                  opacity: estimateTemplateHasData(estimateTemplates?.snow) ? 1 : 0.6,
-                }}
-              >
-                Clear Snow Template
-              </button>
-            </div>
-
-            <div style={{ marginBottom: 4, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Landscaping Template</div>
-              <input
-                type="file"
-                accept=".txt,.csv,.md,.json,.xml,.html,.tsv,.numbers,.xlsx,.xlsm,.xlsb,.xls,.ods,.fods"
-                onChange={(e) => uploadEstimateTemplate("landscaping", e)}
-                style={{ width: "100%", fontSize: 12, marginBottom: 6 }}
-              />
-              <div style={{ fontSize: 11, opacity: 0.72, marginBottom: 6 }}>
-                {estimateTemplates?.landscaping?.name
-                  ? `Loaded: ${estimateTemplates.landscaping.name}`
-                  : "No landscaping template uploaded yet."}
-              </div>
-              <button
-                onClick={() => exportEstimateFromTemplate("landscaping")}
-                disabled={!estimateTemplateHasData(estimateTemplates?.landscaping)}
-                style={{
-                  ...btnStyleFull(),
-                  marginBottom: 6,
-                  cursor: estimateTemplateHasData(estimateTemplates?.landscaping)
-                    ? "pointer"
-                    : "not-allowed",
-                  opacity: estimateTemplateHasData(estimateTemplates?.landscaping) ? 1 : 0.6,
-                }}
-              >
-                Export Filled Landscaping Estimate
-              </button>
-              <button
-                onClick={() => clearEstimateTemplate("landscaping")}
-                disabled={!estimateTemplateHasData(estimateTemplates?.landscaping)}
-                style={{
-                  ...btnStyleFull(),
-                  cursor: estimateTemplateHasData(estimateTemplates?.landscaping)
-                    ? "pointer"
-                    : "not-allowed",
-                  opacity: estimateTemplateHasData(estimateTemplates?.landscaping) ? 1 : 0.6,
-                }}
-              >
-                Clear Landscaping Template
-              </button>
-            </div>
-          </div>
 
           <button
             onClick={clearActiveLayer}
