@@ -730,6 +730,71 @@ function to2DFeature(feature) {
   };
 }
 
+function coordinateDistanceSq(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return 0;
+  const dx = Number(a[0]) - Number(b[0]);
+  const dy = Number(a[1]) - Number(b[1]);
+  return dx * dx + dy * dy;
+}
+
+function pointToSegmentDistanceSq(point, start, end) {
+  if (!Array.isArray(point) || !Array.isArray(start) || !Array.isArray(end)) return 0;
+  const px = Number(point[0]);
+  const py = Number(point[1]);
+  const x1 = Number(start[0]);
+  const y1 = Number(start[1]);
+  const x2 = Number(end[0]);
+  const y2 = Number(end[1]);
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  if (dx === 0 && dy === 0) return coordinateDistanceSq(point, start);
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
+  const projX = x1 + t * dx;
+  const projY = y1 + t * dy;
+  const ddx = px - projX;
+  const ddy = py - projY;
+  return ddx * ddx + ddy * ddy;
+}
+
+function simplifyLineStringCoordinates(coords, tolerance = 0) {
+  const points = (Array.isArray(coords) ? coords : [])
+    .map((pos) => to2DPosition(pos))
+    .filter(
+      (pos) =>
+        Array.isArray(pos) &&
+        pos.length >= 2 &&
+        Number.isFinite(Number(pos[0])) &&
+        Number.isFinite(Number(pos[1]))
+    );
+  if (points.length <= 2) return points;
+  const tol = Number(tolerance);
+  if (!Number.isFinite(tol) || tol <= 0) return points;
+  const tolSq = tol * tol;
+  const keep = new Array(points.length).fill(false);
+  keep[0] = true;
+  keep[points.length - 1] = true;
+  const stack = [[0, points.length - 1]];
+  while (stack.length > 0) {
+    const [startIdx, endIdx] = stack.pop();
+    let maxDistSq = 0;
+    let splitIdx = -1;
+    for (let idx = startIdx + 1; idx < endIdx; idx += 1) {
+      const distSq = pointToSegmentDistanceSq(points[idx], points[startIdx], points[endIdx]);
+      if (distSq > maxDistSq) {
+        maxDistSq = distSq;
+        splitIdx = idx;
+      }
+    }
+    if (splitIdx > -1 && maxDistSq > tolSq) {
+      keep[splitIdx] = true;
+      stack.push([startIdx, splitIdx], [splitIdx, endIdx]);
+    }
+  }
+  const simplified = points.filter((_, idx) => keep[idx]);
+  if (simplified.length >= 2) return simplified;
+  return [points[0], points[points.length - 1]];
+}
+
 function isPolygonLike(f) {
   const t = f?.geometry?.type;
   return t === "Polygon" || t === "MultiPolygon";
@@ -852,6 +917,15 @@ function normalizeHexColor(value, fallback = PDF_ANNOT_DEFAULT_COLOR) {
   return fallback;
 }
 
+function buildFileSourceKey(file) {
+  if (!file) return "";
+  const name = String(file.name || "").trim();
+  const size = Number(file.size) || 0;
+  const lastModified = Number(file.lastModified) || 0;
+  if (!name && !size && !lastModified) return "";
+  return `${name}|${size}|${lastModified}`;
+}
+
 function createPdfAnnotationFeatureCollection(features = []) {
   return {
     type: "FeatureCollection",
@@ -891,22 +965,32 @@ function normalizePdfAnnotationFeature(feature, idx = 0) {
     : kind === "shape"
     ? 0.2
     : 0;
+  const pdfSourceKey =
+    typeof feature.properties?.pdfSourceKey === "string"
+      ? feature.properties.pdfSourceKey.trim()
+      : "";
+  const pdfPageRaw = Number(feature.properties?.pdfPageNumber);
+  const pdfPageNumber =
+    Number.isFinite(pdfPageRaw) && pdfPageRaw > 0 ? Math.round(pdfPageRaw) : null;
   const label =
     typeof feature.properties?.label === "string" ? feature.properties.label : "";
+  const nextProps = {
+    kind,
+    color,
+    fillColor: normalizeHexColor(feature.properties?.fillColor, color),
+    width,
+    opacity,
+    fillOpacity,
+    label,
+  };
+  if (pdfSourceKey) nextProps.pdfSourceKey = pdfSourceKey;
+  if (pdfPageNumber) nextProps.pdfPageNumber = pdfPageNumber;
   return {
     type: "Feature",
     id:
       feature.id ||
       `pdf-annot-${Date.now()}-${idx + 1}-${Math.round(Math.random() * 100000)}`,
-    properties: {
-      kind,
-      color,
-      fillColor: normalizeHexColor(feature.properties?.fillColor, color),
-      width,
-      opacity,
-      fillOpacity,
-      label,
-    },
+    properties: nextProps,
     geometry,
   };
 }
@@ -1144,7 +1228,11 @@ async function renderPdfPageToImageFile(pdfFile, options = {}) {
     await page.render({ canvasContext: ctx, viewport }).promise;
     const pngBlob = await mapCanvasToPngBlob(canvas);
     const baseName = safeFilename(String(pdfFile.name || "pdf-plan").replace(/\.pdf$/i, ""));
-    return new File([pngBlob], `${baseName}-p${pageNumber}.png`, { type: "image/png" });
+    return {
+      imageFile: new File([pngBlob], `${baseName}-p${pageNumber}.png`, { type: "image/png" }),
+      pageNumber,
+      pageCount: pdfDoc.numPages,
+    };
   } finally {
     try {
       pdfDoc?.cleanup?.();
@@ -2515,12 +2603,17 @@ export default function App() {
   const [knownDistancePixelsInput, setKnownDistancePixelsInput] = useState("100");
   const [pdfScaleInchesInput, setPdfScaleInchesInput] = useState("1");
   const [pdfScaleFeetPerInchInput, setPdfScaleFeetPerInchInput] = useState("20");
-  const [pdfAnnotationTool, setPdfAnnotationTool] = useState("select"); // select | pen | marker | shape | text
+  const [pdfAnnotationTool, setPdfAnnotationTool] = useState("select"); // select | hand | pen | marker | shape | text
   const [pdfAnnotationColor, setPdfAnnotationColor] = useState(PDF_ANNOT_DEFAULT_COLOR);
   const [pdfAnnotationWidth, setPdfAnnotationWidth] = useState(4);
   const [pdfAnnotationTextDraft, setPdfAnnotationTextDraft] = useState("Note");
   const [pdfAnnotations, setPdfAnnotations] = useState([]);
   const [measurementImageFile, setMeasurementImageFile] = useState(null);
+  const [pdfSourceFile, setPdfSourceFile] = useState(null);
+  const [pdfSourceName, setPdfSourceName] = useState("");
+  const [pdfPageCount, setPdfPageCount] = useState(0);
+  const [pdfPageNumber, setPdfPageNumber] = useState(1);
+  const [pdfPageJumpInput, setPdfPageJumpInput] = useState("1");
   const [pdfConverting, setPdfConverting] = useState(false);
   const [planOverlay, setPlanOverlay] = useState(null);
   const [planOverlayEnabled, setPlanOverlayEnabled] = useState(false);
@@ -2555,6 +2648,17 @@ export default function App() {
   }, []);
   const closeToast = useCallback((id) => {
     setToasts((p) => p.filter((t) => t.id !== id));
+  }, []);
+
+  const changeDrawModeSafely = useCallback((mode) => {
+    const draw = drawRef.current;
+    if (!draw || typeof draw.changeMode !== "function") return false;
+    try {
+      draw.changeMode(mode);
+      return true;
+    } catch {
+      return false;
+    }
   }, []);
 
   useEffect(() => {
@@ -3189,17 +3293,77 @@ export default function App() {
     );
   }, [measureResult, pushToast]);
 
+  const currentPdfSourceKey = useMemo(() => {
+    if (pdfSourceFile && isPdfFile(pdfSourceFile)) {
+      return buildFileSourceKey(pdfSourceFile);
+    }
+    return buildFileSourceKey(measurementImageFile);
+  }, [measurementImageFile, pdfSourceFile]);
+
+  const currentPdfContext = useMemo(() => {
+    const normalizedPage = Math.max(1, Math.round(Number(pdfPageNumber) || 1));
+    return {
+      sourceKey: String(currentPdfSourceKey || "").trim(),
+      pageNumber: normalizedPage,
+    };
+  }, [currentPdfSourceKey, pdfPageNumber]);
+
+  const annotationMatchesPdfContext = useCallback(
+    (feature, context) => {
+      if (!feature || feature.type !== "Feature") return false;
+      const props = feature.properties || {};
+      const featureSourceKey = String(props.pdfSourceKey || "").trim();
+      const featurePageRaw = Number(props.pdfPageNumber);
+      const featurePageNumber =
+        Number.isFinite(featurePageRaw) && featurePageRaw > 0
+          ? Math.round(featurePageRaw)
+          : null;
+      const contextSourceKey = String(context?.sourceKey || "").trim();
+      const contextPageNumber = Math.max(
+        1,
+        Math.round(Number(context?.pageNumber) || 1)
+      );
+
+      // Legacy annotations (before page/source tagging) remain visible.
+      if (!featureSourceKey && !featurePageNumber) return true;
+      if (featureSourceKey && !contextSourceKey) return false;
+      if (featureSourceKey && featureSourceKey !== contextSourceKey) return false;
+      if (featurePageNumber && featurePageNumber !== contextPageNumber) return false;
+      return true;
+    },
+    []
+  );
+
+  const currentPdfAnnotationCount = useMemo(
+    () =>
+      (Array.isArray(pdfAnnotations) ? pdfAnnotations : []).filter((feature) =>
+        annotationMatchesPdfContext(feature, currentPdfContext)
+      ).length,
+    [annotationMatchesPdfContext, currentPdfContext, pdfAnnotations]
+  );
+  const hasCurrentPdfMarkup = currentPdfAnnotationCount > 0;
+
   const refreshPdfAnnotationsSource = useCallback((features = pdfAnnotationsRef.current) => {
     const map = mapRef.current;
     if (!map || !map.getSource(PDF_ANNOTATIONS_SOURCE_ID)) return;
     try {
+      const context = {
+        sourceKey: String(currentPdfSourceKeyRef.current || "").trim(),
+        pageNumber: Math.max(
+          1,
+          Math.round(Number(pdfPageNumberRef.current) || 1)
+        ),
+      };
+      const visibleFeatures = (Array.isArray(features) ? features : []).filter((feature) =>
+        annotationMatchesPdfContext(feature, context)
+      );
       map.getSource(PDF_ANNOTATIONS_SOURCE_ID).setData(
-        createPdfAnnotationFeatureCollection(features)
+        createPdfAnnotationFeatureCollection(visibleFeatures)
       );
     } catch {
       /* intentionally ignore non-critical map/draw errors */
     }
-  }, []);
+  }, [annotationMatchesPdfContext]);
 
   const ensurePdfAnnotationLayers = useCallback(
     (map = mapRef.current) => {
@@ -3314,6 +3478,10 @@ export default function App() {
         pdfAnnotationColorRef.current,
         PDF_ANNOT_DEFAULT_COLOR
       );
+      const pageNumber = Math.max(
+        1,
+        Math.round(Number(pdfPageNumberRef.current) || 1)
+      );
       const feature = {
         type: "Feature",
         id: `pdf-annot-text-${Date.now()}-${Math.round(Math.random() * 100000)}`,
@@ -3325,6 +3493,8 @@ export default function App() {
           opacity: 1,
           fillOpacity: 0,
           fillColor: color,
+          pdfSourceKey: String(currentPdfSourceKeyRef.current || "").trim(),
+          pdfPageNumber: pageNumber,
         },
         geometry: {
           type: "Point",
@@ -3338,42 +3508,51 @@ export default function App() {
   );
 
   const clearPdfAnnotations = useCallback(() => {
-    setPdfAnnotations([]);
-    pushToast("Cleared all PDF annotations.", "info", 3500);
-  }, [pushToast]);
+    const context = currentPdfContext;
+    setPdfAnnotations((prev) =>
+      (Array.isArray(prev) ? prev : []).filter(
+        (feature) => !annotationMatchesPdfContext(feature, context)
+      )
+    );
+    pushToast("Cleared annotations for this page.", "info", 3500);
+  }, [annotationMatchesPdfContext, currentPdfContext, pushToast]);
 
   const removeLastPdfAnnotation = useCallback(() => {
+    const context = currentPdfContext;
     setPdfAnnotations((prev) => {
-      if (!Array.isArray(prev) || prev.length === 0) return [];
-      return prev.slice(0, -1);
+      const list = Array.isArray(prev) ? prev : [];
+      if (list.length === 0) return [];
+      let removeIdx = -1;
+      for (let idx = list.length - 1; idx >= 0; idx -= 1) {
+        if (annotationMatchesPdfContext(list[idx], context)) {
+          removeIdx = idx;
+          break;
+        }
+      }
+      if (removeIdx < 0) return list;
+      return list.filter((_, idx) => idx !== removeIdx);
     });
-    pushToast("Removed last PDF annotation.", "info", 2500);
-  }, [pushToast]);
+    pushToast("Removed last annotation on this page.", "info", 2500);
+  }, [annotationMatchesPdfContext, currentPdfContext, pushToast]);
 
   const activatePdfAnnotationTool = useCallback(
     (nextTool) => {
-      const allowed = ["select", "pen", "marker", "shape", "text"];
+      const allowed = ["select", "hand", "pen", "marker", "shape", "text"];
       const tool = allowed.includes(nextTool) ? nextTool : "select";
       setPdfAnnotationTool(tool);
       if (tool !== "select" && measureModeRef.current) {
         setMeasureMode(false);
       }
       if (workflowMode !== WORKFLOW_MODE_PDF) return;
-      const draw = drawRef.current;
-      if (!draw) return;
-      try {
-        if (tool === "pen" || tool === "marker") {
-          draw.changeMode("draw_line_string");
-        } else if (tool === "shape") {
-          draw.changeMode("draw_polygon");
-        } else {
-          draw.changeMode("simple_select");
-        }
-      } catch {
-        /* intentionally ignore non-critical map/draw errors */
+      if (tool === "pen" || tool === "marker") {
+        changeDrawModeSafely("draw_line_string");
+      } else if (tool === "shape") {
+        changeDrawModeSafely("draw_polygon");
+      } else {
+        changeDrawModeSafely("simple_select");
       }
     },
-    [workflowMode]
+    [changeDrawModeSafely, workflowMode]
   );
 
   // Confirm modal
@@ -3455,6 +3634,12 @@ export default function App() {
   const pdfAnnotationWidthRef = useRef(pdfAnnotationWidth);
   const pdfAnnotationTextDraftRef = useRef(pdfAnnotationTextDraft);
   const pdfAnnotationsRef = useRef(pdfAnnotations);
+  const pdfSourceFileRef = useRef(null);
+  const measurementImageFileRef = useRef(null);
+  const pdfPageNumberRef = useRef(pdfPageNumber);
+  const currentPdfSourceKeyRef = useRef(currentPdfSourceKey);
+  const pdfPageCacheRef = useRef(new Map());
+  const pdfRenderRequestRef = useRef(0);
 
   const layerFeaturesRef = useRef(layerFeatures);
   useEffect(() => {
@@ -3544,6 +3729,22 @@ export default function App() {
   useEffect(() => {
     pdfAnnotationsRef.current = pdfAnnotations;
   }, [pdfAnnotations]);
+
+  useEffect(() => {
+    pdfSourceFileRef.current = pdfSourceFile;
+  }, [pdfSourceFile]);
+
+  useEffect(() => {
+    measurementImageFileRef.current = measurementImageFile;
+  }, [measurementImageFile]);
+
+  useEffect(() => {
+    pdfPageNumberRef.current = Math.max(1, Math.round(Number(pdfPageNumber) || 1));
+  }, [pdfPageNumber]);
+
+  useEffect(() => {
+    currentPdfSourceKeyRef.current = String(currentPdfSourceKey || "").trim();
+  }, [currentPdfSourceKey]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -3795,12 +3996,7 @@ export default function App() {
         ) {
           setPdfAnnotationTool("select");
         }
-        const d = drawRef.current;
-        try {
-          d?.changeMode?.("simple_select");
-        } catch {
-          /* intentionally ignore non-critical map/draw errors */
-        }
+        changeDrawModeSafely("simple_select");
         setMeasurePoints([]);
         setMeasureResult(null);
         updateMeasureOverlay([]);
@@ -3816,7 +4012,7 @@ export default function App() {
       }
       return next;
     });
-  }, [clearMeasure, pushToast, updateMeasureOverlay]);
+  }, [changeDrawModeSafely, clearMeasure, pushToast, updateMeasureOverlay]);
 
   const refreshMeasurementHistory = useCallback(async () => {
     if (!aiEnabled) {
@@ -3972,7 +4168,120 @@ export default function App() {
     if (announce) pushToast("Plan overlay loaded on map.", "info", 4500);
   }, [pushToast]);
 
-  const clearUploadedPlanOverlay = useCallback((clearFile = false) => {
+  const resetPdfSourceState = useCallback((clearImage = false) => {
+    pdfRenderRequestRef.current += 1;
+    pdfPageCacheRef.current = new Map();
+    setPdfSourceFile(null);
+    setPdfSourceName("");
+    setPdfPageCount(0);
+    setPdfPageNumber(1);
+    setPdfPageJumpInput("1");
+    if (clearImage) setMeasurementImageFile(null);
+  }, []);
+
+  const buildPdfPageCacheKey = useCallback((sourceFile, pageNumber, maxDimension = 2400) => {
+    if (!sourceFile) return "";
+    const page = Math.max(1, Math.round(Number(pageNumber) || 1));
+    const dim = Math.max(900, Math.round(Number(maxDimension) || 2400));
+    return [
+      String(sourceFile.name || ""),
+      Number(sourceFile.size) || 0,
+      Number(sourceFile.lastModified) || 0,
+      page,
+      dim,
+    ].join("|");
+  }, []);
+
+  const loadPdfPageFromSource = useCallback(
+    async (targetPage, options = {}) => {
+      const sourceFile = options.sourceFile || pdfSourceFileRef.current;
+      if (!sourceFile || !isPdfFile(sourceFile)) {
+        if (options.showMissingWarning) pushToast("Upload a PDF first.", "warn", 4200);
+        return false;
+      }
+
+      const maxDimension = Math.max(900, Number(options.maxDimension) || 2400);
+      const parsedTarget = Number(targetPage);
+      const roundedTarget = Number.isFinite(parsedTarget) ? Math.round(parsedTarget) : 1;
+      const boundedTarget = Math.max(
+        1,
+        pdfPageCount > 0 ? Math.min(pdfPageCount, roundedTarget) : roundedTarget
+      );
+
+      const requestId = ++pdfRenderRequestRef.current;
+      setPdfConverting(true);
+      try {
+        const cacheKey = buildPdfPageCacheKey(sourceFile, boundedTarget, maxDimension);
+        let rendered = cacheKey ? pdfPageCacheRef.current.get(cacheKey) : null;
+        if (!rendered) {
+          rendered = await renderPdfPageToImageFile(sourceFile, {
+            pageNumber: boundedTarget,
+            maxDimension,
+          });
+          if (cacheKey) pdfPageCacheRef.current.set(cacheKey, rendered);
+        }
+
+        if (requestId !== pdfRenderRequestRef.current) return false;
+        const nextPage = Math.max(1, Math.round(Number(rendered?.pageNumber) || boundedTarget));
+        const nextCount = Math.max(nextPage, Math.round(Number(rendered?.pageCount) || nextPage));
+        const nextImageFile = rendered?.imageFile;
+        if (!nextImageFile) throw new Error("Could not render selected PDF page.");
+
+        setPdfSourceFile(sourceFile);
+        setPdfSourceName(String(sourceFile.name || "uploaded-plan.pdf"));
+        setPdfPageCount(nextCount);
+        setPdfPageNumber(nextPage);
+        setPdfPageJumpInput(String(nextPage));
+        setMeasurementImageFile(nextImageFile);
+        applyUploadedPlanOverlay(nextImageFile, false);
+
+        if (options.announce !== false) {
+          const msg =
+            typeof options.announceMessage === "string" && options.announceMessage.trim()
+              ? options.announceMessage
+              : `PDF page ${nextPage} of ${nextCount} loaded.`;
+          pushToast(msg, "info", 5200);
+        }
+        return true;
+      } catch (error) {
+        if (requestId !== pdfRenderRequestRef.current) return false;
+        console.error("PDF page render failed:", error);
+        if (options.toastOnError !== false) {
+          const msg =
+            typeof options.errorMessage === "string" && options.errorMessage.trim()
+              ? options.errorMessage
+              : `PDF render failed: ${error?.message || "could not render page."}`;
+          pushToast(msg, "error", 6500);
+        }
+        return false;
+      } finally {
+        if (requestId === pdfRenderRequestRef.current) setPdfConverting(false);
+      }
+    },
+    [applyUploadedPlanOverlay, buildPdfPageCacheKey, pdfPageCount, pushToast]
+  );
+
+  const jumpToPdfPage = useCallback(
+    async (targetPage, opts = {}) => {
+      const parsedTarget = Number(targetPage);
+      if (!Number.isFinite(parsedTarget)) {
+        pushToast("Enter a valid page number first.", "warn", 4200);
+        return false;
+      }
+      const roundedTarget = Math.max(1, Math.round(parsedTarget));
+      const clampedTarget = pdfPageCount > 0 ? Math.min(pdfPageCount, roundedTarget) : roundedTarget;
+      return loadPdfPageFromSource(clampedTarget, {
+        showMissingWarning: true,
+        announce: opts.announce ?? true,
+      });
+    },
+    [loadPdfPageFromSource, pdfPageCount, pushToast]
+  );
+
+  const clearUploadedPlanOverlay = useCallback((clearFile = false, options = {}) => {
+    const resetPdfState = options.resetPdfState ?? clearFile;
+    pdfRenderRequestRef.current += 1;
+    setPdfConverting(false);
     setPlanOverlayEnabled(false);
     setPlanOverlay(null);
     const prevUrl = planOverlayObjectUrlRef.current;
@@ -3985,7 +4294,8 @@ export default function App() {
       planOverlayObjectUrlRef.current = null;
     }
     if (clearFile) setMeasurementImageFile(null);
-  }, []);
+    if (resetPdfState) resetPdfSourceState(false);
+  }, [resetPdfSourceState]);
 
   const reanchorPlanOverlay = useCallback(() => {
     const map = mapRef.current;
@@ -3999,11 +4309,7 @@ export default function App() {
   const handleMeasurementMediaUpload = useCallback(async (e) => {
     const file = e.target.files?.[0] || null;
     e.target.value = "";
-    if (!file) {
-      setMeasurementImageFile(null);
-      clearUploadedPlanOverlay(false);
-      return;
-    }
+    if (!file) return;
     if (workflowModeRef.current !== WORKFLOW_MODE_PDF || appScreen !== APP_SCREEN_PDF) {
       setWorkflowMode(WORKFLOW_MODE_PDF);
       setAppScreen(APP_SCREEN_PDF);
@@ -4012,27 +4318,19 @@ export default function App() {
       setObjects3d(false);
     }
     if (!isPdfFile(file)) {
+      resetPdfSourceState(false);
       setMeasurementImageFile(file);
       applyUploadedPlanOverlay(file, false);
       pushToast("Image loaded in PDF/Image measuring page.", "info", 4200);
       return;
     }
 
-    setPdfConverting(true);
-    try {
-      const convertedImage = await renderPdfPageToImageFile(file, { pageNumber: 1, maxDimension: 2400 });
-      setMeasurementImageFile(convertedImage);
-      applyUploadedPlanOverlay(convertedImage, false);
-      pushToast(`PDF converted to image (page 1): ${convertedImage.name}`, "info", 5500);
-    } catch (error) {
-      console.error("PDF conversion failed:", error);
-      setMeasurementImageFile(null);
-      clearUploadedPlanOverlay(false);
-      pushToast(`PDF conversion failed: ${error?.message || "could not render page 1."}`, "error", 6500);
-    } finally {
-      setPdfConverting(false);
-    }
-  }, [appScreen, applyUploadedPlanOverlay, clearUploadedPlanOverlay, pushToast]);
+    await loadPdfPageFromSource(1, {
+      sourceFile: file,
+      announceMessage: `PDF loaded: ${file.name} (page 1).`,
+      errorMessage: "PDF conversion failed: could not render page 1.",
+    });
+  }, [appScreen, applyUploadedPlanOverlay, loadPdfPageFromSource, pushToast, resetPdfSourceState]);
 
   const runBackendMeasurement = useCallback(async () => {
     if (!aiEnabled) {
@@ -8561,7 +8859,23 @@ export default function App() {
           (feature) => feature?.geometry?.type === expectedGeometry
         );
         if (drawnFeature) {
-          const drawnGeometry = to2DFeature(drawnFeature)?.geometry || null;
+          const rawDrawnGeometry = to2DFeature(drawnFeature)?.geometry || null;
+          let drawnGeometry = rawDrawnGeometry;
+          if (
+            (pdfTool === "pen" || pdfTool === "marker") &&
+            rawDrawnGeometry?.type === "LineString"
+          ) {
+            const simplifiedLine = simplifyLineStringCoordinates(
+              rawDrawnGeometry.coordinates,
+              0.0000012
+            );
+            if (Array.isArray(simplifiedLine) && simplifiedLine.length >= 2) {
+              drawnGeometry = {
+                ...rawDrawnGeometry,
+                coordinates: simplifiedLine,
+              };
+            }
+          }
           const lineCoords =
             drawnGeometry?.type === "LineString" ? drawnGeometry.coordinates : null;
           const polygonRings =
@@ -8587,6 +8901,11 @@ export default function App() {
             ? Math.max(1, Math.min(30, baseWidthRaw))
             : 4;
           const annotationWidth = pdfTool === "marker" ? Math.max(8, baseWidth * 2) : baseWidth;
+          const sourceKey = String(currentPdfSourceKeyRef.current || "").trim();
+          const pageNumber = Math.max(
+            1,
+            Math.round(Number(pdfPageNumberRef.current) || 1)
+          );
           const annotationFeature = normalizePdfAnnotationFeature(
             {
               type: "Feature",
@@ -8597,6 +8916,8 @@ export default function App() {
                 width: annotationWidth,
                 opacity: pdfTool === "marker" ? 0.35 : 1,
                 fillOpacity: pdfTool === "shape" ? 0.2 : 0,
+                pdfSourceKey: sourceKey,
+                pdfPageNumber: pageNumber,
               },
               geometry: drawnGeometry,
             },
@@ -8613,13 +8934,7 @@ export default function App() {
           } catch {
             /* intentionally ignore non-critical map/draw errors */
           }
-          try {
-            draw.changeMode(
-              pdfTool === "shape" ? "draw_polygon" : "draw_line_string"
-            );
-          } catch {
-            /* intentionally ignore non-critical map/draw errors */
-          }
+          changeDrawModeSafely(pdfTool === "shape" ? "draw_polygon" : "draw_line_string");
           return;
         }
       }
@@ -9213,14 +9528,46 @@ export default function App() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
+
+    const inPdfMode = workflowMode === WORKFLOW_MODE_PDF;
+    const allowPdfNavigation = inPdfMode && pdfAnnotationTool === "hand";
+    const lockMapNavigation = inPdfMode && !allowPdfNavigation;
+
+    try {
+      if (lockMapNavigation) {
+        map.dragPan?.disable?.();
+        map.scrollZoom?.disable?.();
+        map.boxZoom?.disable?.();
+        map.doubleClickZoom?.disable?.();
+        map.keyboard?.disable?.();
+        map.dragRotate?.disable?.();
+        map.touchZoomRotate?.disable?.();
+      } else {
+        map.dragPan?.enable?.();
+        map.scrollZoom?.enable?.();
+        map.boxZoom?.enable?.();
+        map.doubleClickZoom?.enable?.();
+        map.keyboard?.enable?.();
+        map.touchZoomRotate?.enable?.();
+        if (allowPdfNavigation) {
+          map.dragRotate?.disable?.();
+          map.touchZoomRotate?.disableRotation?.();
+        } else {
+          map.dragRotate?.enable?.();
+          map.touchZoomRotate?.enableRotation?.();
+        }
+      }
+    } catch {
+      /* intentionally ignore non-critical map/draw errors */
+    }
+
     const canvasContainer = map.getCanvasContainer?.();
     if (!canvasContainer) return;
-    if (isCompactTouchUi && drawMode === "simple_select") {
-      canvasContainer.style.touchAction = "pan-x pan-y pinch-zoom";
-    } else {
-      canvasContainer.style.touchAction = "none";
-    }
-  }, [drawMode, isCompactTouchUi]);
+    const canPanTouch = inPdfMode
+      ? allowPdfNavigation
+      : isCompactTouchUi && drawMode === "simple_select";
+    canvasContainer.style.touchAction = canPanTouch ? "pan-x pan-y pinch-zoom" : "none";
+  }, [drawMode, isCompactTouchUi, pdfAnnotationTool, workflowMode]);
 
   // Keep draw in sync when switching layers/visibility.
   useEffect(() => {
@@ -13059,9 +13406,10 @@ export default function App() {
               PDF Expert Annotation Toolbar
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 6 }}>
               {[
                 { key: "select", label: "Select" },
+                { key: "hand", label: "Hand" },
                 { key: "pen", label: "Pen" },
                 { key: "marker", label: "Marker" },
                 { key: "shape", label: "Shape" },
@@ -13156,22 +13504,16 @@ export default function App() {
               <button
                 type="button"
                 onClick={removeLastPdfAnnotation}
-                disabled={!Array.isArray(pdfAnnotations) || pdfAnnotations.length === 0}
+                disabled={!hasCurrentPdfMarkup}
                 style={{
                   padding: "8px 9px",
                   borderRadius: 10,
-                  cursor:
-                    Array.isArray(pdfAnnotations) && pdfAnnotations.length > 0
-                      ? "pointer"
-                      : "not-allowed",
+                  cursor: hasCurrentPdfMarkup ? "pointer" : "not-allowed",
                   border: "1px solid rgba(255,255,255,0.12)",
                   background:
-                    Array.isArray(pdfAnnotations) && pdfAnnotations.length > 0
-                      ? "rgba(255,255,255,0.05)"
-                      : "rgba(255,255,255,0.03)",
+                    hasCurrentPdfMarkup ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.03)",
                   color: "#fff",
-                  opacity:
-                    Array.isArray(pdfAnnotations) && pdfAnnotations.length > 0 ? 1 : 0.6,
+                  opacity: hasCurrentPdfMarkup ? 1 : 0.6,
                   fontWeight: 700,
                   fontSize: 12,
                 }}
@@ -13181,22 +13523,16 @@ export default function App() {
               <button
                 type="button"
                 onClick={clearPdfAnnotations}
-                disabled={!Array.isArray(pdfAnnotations) || pdfAnnotations.length === 0}
+                disabled={!hasCurrentPdfMarkup}
                 style={{
                   padding: "8px 9px",
                   borderRadius: 10,
-                  cursor:
-                    Array.isArray(pdfAnnotations) && pdfAnnotations.length > 0
-                      ? "pointer"
-                      : "not-allowed",
+                  cursor: hasCurrentPdfMarkup ? "pointer" : "not-allowed",
                   border: "1px solid rgba(255,255,255,0.12)",
                   background:
-                    Array.isArray(pdfAnnotations) && pdfAnnotations.length > 0
-                      ? "rgba(255,255,255,0.05)"
-                      : "rgba(255,255,255,0.03)",
+                    hasCurrentPdfMarkup ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.03)",
                   color: "#fff",
-                  opacity:
-                    Array.isArray(pdfAnnotations) && pdfAnnotations.length > 0 ? 1 : 0.6,
+                  opacity: hasCurrentPdfMarkup ? 1 : 0.6,
                   fontWeight: 700,
                   fontSize: 12,
                 }}
@@ -13532,7 +13868,9 @@ export default function App() {
                 }}
               >
                 {pdfConverting
-                  ? "Converting PDF page 1..."
+                  ? "Rendering PDF page..."
+                  : pdfSourceFile
+                  ? `PDF: ${pdfSourceName || pdfSourceFile.name} (Page ${pdfPageNumber}/${pdfPageCount || "?"})`
                   : measurementImageFile
                   ? `Image: ${measurementImageFile.name}`
                   : "Upload Image or PDF"}
@@ -13545,8 +13883,116 @@ export default function App() {
                 />
               </label>
               <div style={{ fontSize: 12, opacity: 0.72, marginTop: -4, marginBottom: 8 }}>
-                PDF uploads convert page 1 to PNG and overlay it on the map.
+                PDF uploads convert selected pages to PNG and overlay them on the map.
               </div>
+
+              {pdfSourceFile ? (
+                <div
+                  style={{
+                    border: "1px solid rgba(255,255,255,0.10)",
+                    borderRadius: 10,
+                    padding: 8,
+                    marginBottom: 8,
+                    background: "rgba(255,255,255,0.03)",
+                  }}
+                >
+                  <div style={{ fontSize: 12, opacity: 0.86, marginBottom: 6 }}>
+                    PDF Page {pdfPageNumber} of {pdfPageCount || "?"}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => jumpToPdfPage(pdfPageNumber - 1)}
+                      disabled={pdfConverting || pdfPageNumber <= 1}
+                      style={{
+                        padding: "8px 9px",
+                        borderRadius: 10,
+                        cursor: pdfConverting || pdfPageNumber <= 1 ? "not-allowed" : "pointer",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background:
+                          pdfConverting || pdfPageNumber <= 1
+                            ? "rgba(255,255,255,0.03)"
+                            : "rgba(255,255,255,0.05)",
+                        color: "#fff",
+                        opacity: pdfConverting || pdfPageNumber <= 1 ? 0.55 : 1,
+                        fontWeight: 700,
+                        fontSize: 12,
+                      }}
+                    >
+                      Previous Page
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => jumpToPdfPage(pdfPageNumber + 1)}
+                      disabled={pdfConverting || (pdfPageCount > 0 && pdfPageNumber >= pdfPageCount)}
+                      style={{
+                        padding: "8px 9px",
+                        borderRadius: 10,
+                        cursor:
+                          pdfConverting || (pdfPageCount > 0 && pdfPageNumber >= pdfPageCount)
+                            ? "not-allowed"
+                            : "pointer",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background:
+                          pdfConverting || (pdfPageCount > 0 && pdfPageNumber >= pdfPageCount)
+                            ? "rgba(255,255,255,0.03)"
+                            : "rgba(255,255,255,0.05)",
+                        color: "#fff",
+                        opacity:
+                          pdfConverting || (pdfPageCount > 0 && pdfPageNumber >= pdfPageCount)
+                            ? 0.55
+                            : 1,
+                        fontWeight: 700,
+                        fontSize: 12,
+                      }}
+                    >
+                      Next Page
+                    </button>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 6, marginTop: 6 }}>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={pdfPageJumpInput}
+                      onChange={(e) => setPdfPageJumpInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+                        jumpToPdfPage(pdfPageJumpInput);
+                      }}
+                      placeholder="Page number"
+                      style={{
+                        width: "100%",
+                        padding: 8,
+                        borderRadius: 10,
+                        border: "1px solid rgba(255,255,255,0.14)",
+                        background: "#111",
+                        color: "#fff",
+                      }}
+                      aria-label="Jump to PDF page"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => jumpToPdfPage(pdfPageJumpInput)}
+                      disabled={pdfConverting}
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: 10,
+                        cursor: pdfConverting ? "not-allowed" : "pointer",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: pdfConverting ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.05)",
+                        color: "#fff",
+                        opacity: pdfConverting ? 0.55 : 1,
+                        fontWeight: 700,
+                        fontSize: 12,
+                      }}
+                    >
+                      Go
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
                 <input
@@ -14380,7 +14826,11 @@ export default function App() {
             position: "absolute",
             inset: 0,
             touchAction:
-              isCompactTouchUi && drawMode === "simple_select"
+              workflowMode === WORKFLOW_MODE_PDF
+                ? pdfAnnotationTool === "hand"
+                  ? "pan-x pan-y pinch-zoom"
+                  : "none"
+                : isCompactTouchUi && drawMode === "simple_select"
                 ? "pan-x pan-y pinch-zoom"
                 : "none",
           }}
