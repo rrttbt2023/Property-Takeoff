@@ -10582,7 +10582,7 @@ export default function App() {
     }
   }, [pushToast, totals]);
 
-  const uploadEstimateTemplate = useCallback(
+  const _uploadEstimateTemplate = useCallback(
     async (templateKind, e) => {
       const file = e?.target?.files?.[0];
       if (!file) return;
@@ -10650,7 +10650,7 @@ export default function App() {
     [pushToast]
   );
 
-  const clearEstimateTemplate = useCallback((templateKind) => {
+  const _clearEstimateTemplate = useCallback((templateKind) => {
     const kind = templateKind === "snow" ? "snow" : "landscaping";
     const kindLabel = kind === "snow" ? "Snow" : "Landscaping";
     setEstimateTemplates((prev) => ({
@@ -10671,7 +10671,7 @@ export default function App() {
     pushToast(`${kindLabel} template cleared.`, "info");
   }, [pushToast]);
 
-  const updateEstimateTemplateMappedSheet = useCallback((templateKind, sheetName) => {
+  const _updateEstimateTemplateMappedSheet = useCallback((templateKind, sheetName) => {
     const kind = templateKind === "snow" ? "snow" : "landscaping";
     setEstimateTemplates((prev) => ({
       ...prev,
@@ -10682,7 +10682,7 @@ export default function App() {
     }));
   }, []);
 
-  const updateEstimateTemplateCellMap = useCallback((templateKind, token, cellAddress) => {
+  const _updateEstimateTemplateCellMap = useCallback((templateKind, token, cellAddress) => {
     const kind = templateKind === "snow" ? "snow" : "landscaping";
     const normalizedToken = normalizeEstimateTemplateToken(token);
     if (!normalizedToken) return;
@@ -10702,7 +10702,7 @@ export default function App() {
     });
   }, []);
 
-  const clearEstimateTemplateCellMap = useCallback(
+  const _clearEstimateTemplateCellMap = useCallback(
     (templateKind) => {
       const kind = templateKind === "snow" ? "snow" : "landscaping";
       const kindLabel = kind === "snow" ? "Snow" : "Landscaping";
@@ -10721,7 +10721,7 @@ export default function App() {
     [pushToast]
   );
 
-  const exportEstimateFromTemplate = useCallback(
+  const _exportEstimateFromTemplate = useCallback(
     async (templateKind) => {
       const kind = templateKind === "snow" ? "snow" : "landscaping";
       const kindLabel = kind === "snow" ? "Snow" : "Landscaping";
