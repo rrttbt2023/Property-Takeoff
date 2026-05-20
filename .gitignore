@@ -33,3 +33,4 @@ Auto-measure-backend/training/checkpoints/*.pt
 Auto-measure-backend/training/checkpoints/*.ts
 Auto-measure-backend/training/checkpoints_smoke/
 Auto-measure-backend/training/checkpoints_smoke_r50/
+.vercel

@@ -689,6 +689,279 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
   return mode;
 }
 
+// MapboxDraw line mode is tap/click based; this touch-friendly mode allows
+// a single finger/pencil drag to create a stroke and finish on touch end.
+function createTouchDrawLineMode(baseMode, options = {}) {
+  if (!baseMode) return null;
+  const stylusOnlyRef = options?.stylusOnlyRef || null;
+  const allowFingerPanInStylusOnly = options?.allowFingerPanInStylusOnly === true;
+  const addPointDistancePxRaw = Number(options?.addPointDistancePx);
+  const addPointDistancePx = Number.isFinite(addPointDistancePxRaw)
+    ? Math.max(3, addPointDistancePxRaw)
+    : 6;
+
+  const mode = { ...baseMode };
+  const resetState = (state) => {
+    if (!state) return;
+    state.__touchDrawingActive = false;
+    state.__mouseDrawingActive = false;
+    state.__touchLastPoint = null;
+    state.__mouseLastPoint = null;
+    state.__touchPanPoint = null;
+  };
+  const getPointerType = (e) => {
+    const original = e?.originalEvent;
+    if (!original) return "unknown";
+
+    if (typeof original.pointerType === "string" && original.pointerType) {
+      return original.pointerType.toLowerCase();
+    }
+
+    const touch =
+      original.touches?.[0] ||
+      original.changedTouches?.[0] ||
+      original.targetTouches?.[0] ||
+      null;
+    const touchType = String(touch?.touchType || "").toLowerCase();
+    if (touchType === "stylus") return "pen";
+    if (touch) return "touch";
+
+    const type = String(original.type || "").toLowerCase();
+    if (type.startsWith("touch")) return "touch";
+    if (type.startsWith("mouse")) return "mouse";
+    return "unknown";
+  };
+  const isStylusLikeEvent = (e) => {
+    const pointerType = getPointerType(e);
+    return pointerType === "pen" || pointerType === "mouse";
+  };
+  const shouldIgnoreForStylusOnly = (e) =>
+    !!stylusOnlyRef?.current && !isStylusLikeEvent(e);
+  const getPoint = (e) => {
+    if (!e?.point) return null;
+    const x = Number(e.point.x);
+    const y = Number(e.point.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x, y };
+  };
+  const pointDistance = (a, b) => {
+    if (!a || !b) return 0;
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  };
+  const addLinePoint = (ctx, state, e) => {
+    if (typeof baseMode.clickAnywhere === "function") {
+      return baseMode.clickAnywhere.call(ctx, state, e);
+    }
+    if (typeof baseMode.onTap === "function") {
+      return baseMode.onTap.call(ctx, state, e);
+    }
+    if (typeof baseMode.onClick === "function") {
+      return baseMode.onClick.call(ctx, state, e);
+    }
+    return undefined;
+  };
+  const panMapFromTouch = (ctx, state, e) => {
+    const touchEvent = e?.originalEvent;
+    const touchCount = touchEvent?.touches?.length ?? touchEvent?.changedTouches?.length ?? 0;
+    const point = getPoint(e);
+    if (touchCount !== 1 || !point) {
+      state.__touchPanPoint = null;
+      return;
+    }
+    if (!state.__touchPanPoint) {
+      state.__touchPanPoint = point;
+      return;
+    }
+
+    const dx = point.x - state.__touchPanPoint.x;
+    const dy = point.y - state.__touchPanPoint.y;
+    state.__touchPanPoint = point;
+    if (Math.abs(dx) + Math.abs(dy) < 1) return;
+
+    touchEvent?.preventDefault?.();
+    touchEvent?.stopPropagation?.();
+    try {
+      ctx.map.panBy([-dx, -dy], { animate: false });
+    } catch {
+      /* intentionally ignore non-critical map/draw errors */
+    }
+  };
+
+  mode.onSetup = function (...args) {
+    const state = baseMode.onSetup.apply(this, args);
+    resetState(state);
+    return state;
+  };
+
+  mode.onTouchStart = function (state, e) {
+    const point = getPoint(e);
+    state.__touchPanPoint = point;
+    if (shouldIgnoreForStylusOnly(e)) return;
+
+    state.__touchDrawingActive = true;
+    state.__touchLastPoint = point;
+    addLinePoint(this, state, e);
+    if (typeof baseMode.onTouchStart === "function") {
+      baseMode.onTouchStart.call(this, state, e);
+    }
+  };
+
+  mode.onTouchMove = function (state, e) {
+    if (shouldIgnoreForStylusOnly(e)) {
+      if (allowFingerPanInStylusOnly) {
+        panMapFromTouch(this, state, e);
+      }
+      return;
+    }
+
+    const point = getPoint(e);
+    if (typeof baseMode.onTouchMove === "function") {
+      baseMode.onTouchMove.call(this, state, e);
+    } else if (typeof baseMode.onMouseMove === "function") {
+      baseMode.onMouseMove.call(this, state, e);
+    }
+
+    if (!state.__touchDrawingActive || !point) return;
+
+    if (!state.__touchLastPoint) {
+      state.__touchLastPoint = point;
+      return;
+    }
+
+    if (pointDistance(point, state.__touchLastPoint) >= addPointDistancePx) {
+      addLinePoint(this, state, e);
+      state.__touchLastPoint = point;
+    }
+  };
+
+  mode.onMouseDown = function (state, e) {
+    const mouseEvent = e?.originalEvent;
+    if (Number.isFinite(mouseEvent?.button) && mouseEvent.button !== 0) return undefined;
+    if (shouldIgnoreForStylusOnly(e)) return undefined;
+
+    const point = getPoint(e);
+    state.__mouseDrawingActive = true;
+    state.__mouseLastPoint = point;
+    addLinePoint(this, state, e);
+    if (typeof baseMode.onMouseDown === "function") {
+      baseMode.onMouseDown.call(this, state, e);
+    }
+    return undefined;
+  };
+
+  mode.onMouseMove = function (state, e) {
+    if (typeof baseMode.onMouseMove === "function") {
+      baseMode.onMouseMove.call(this, state, e);
+    }
+    if (!state.__mouseDrawingActive || shouldIgnoreForStylusOnly(e)) return undefined;
+
+    const point = getPoint(e);
+    if (!point) return undefined;
+    if (!state.__mouseLastPoint) {
+      state.__mouseLastPoint = point;
+      return undefined;
+    }
+
+    if (pointDistance(point, state.__mouseLastPoint) >= addPointDistancePx) {
+      addLinePoint(this, state, e);
+      state.__mouseLastPoint = point;
+    }
+    return undefined;
+  };
+
+  mode.onMouseUp = function (state, e) {
+    if (state.__mouseDrawingActive && !shouldIgnoreForStylusOnly(e)) {
+      const point = getPoint(e);
+      if (pointDistance(point, state.__mouseLastPoint) >= 1) {
+        addLinePoint(this, state, e);
+      }
+      try {
+        this.changeMode("simple_select", {
+          featureIds: state?.line?.id ? [state.line.id] : [],
+        });
+      } catch {
+        /* intentionally ignore non-critical map/draw errors */
+      }
+      state.__mouseDrawingActive = false;
+      state.__mouseLastPoint = null;
+      return undefined;
+    }
+    if (typeof baseMode.onMouseUp === "function") {
+      return baseMode.onMouseUp.call(this, state, e);
+    }
+    return undefined;
+  };
+
+  mode.onDrag = function () {
+    // Mapbox Draw fires onDrag for pointer-drag gestures; append points here so
+    // marker/pen strokes are truly drag-draw (not click-to-add-points).
+    const state = arguments?.[0];
+    const e = arguments?.[1];
+    if (!state || shouldIgnoreForStylusOnly(e)) return undefined;
+    const point = getPoint(e);
+    if (!point) return undefined;
+
+    if (state.__touchDrawingActive) {
+      if (!state.__touchLastPoint || pointDistance(point, state.__touchLastPoint) >= addPointDistancePx) {
+        addLinePoint(this, state, e);
+        state.__touchLastPoint = point;
+      }
+      return undefined;
+    }
+
+    if (state.__mouseDrawingActive) {
+      if (!state.__mouseLastPoint || pointDistance(point, state.__mouseLastPoint) >= addPointDistancePx) {
+        addLinePoint(this, state, e);
+        state.__mouseLastPoint = point;
+      }
+      return undefined;
+    }
+
+    return undefined;
+  };
+
+  mode.onClick = function (state, e) {
+    // Ignore click finalization while using drag draw. This prevents accidental
+    // post-draw mode transitions/zooms in some browsers after mouseup.
+    if (state?.__mouseDrawingActive) return undefined;
+    if (typeof baseMode.onClick === "function") {
+      return baseMode.onClick.call(this, state, e);
+    }
+    return undefined;
+  };
+
+  mode.onTouchEnd = function (state, e) {
+    const point = getPoint(e);
+    if (!shouldIgnoreForStylusOnly(e) && state.__touchDrawingActive) {
+      if (pointDistance(point, state.__touchLastPoint) >= 1) {
+        addLinePoint(this, state, e);
+      }
+      try {
+        this.changeMode("simple_select", {
+          featureIds: state?.line?.id ? [state.line.id] : [],
+        });
+      } catch {
+        /* intentionally ignore non-critical map/draw errors */
+      }
+    } else if (typeof baseMode.onTouchEnd === "function") {
+      baseMode.onTouchEnd.call(this, state, e);
+    }
+
+    resetState(state);
+    return undefined;
+  };
+
+  mode.onStop = function (state) {
+    resetState(state);
+    if (typeof baseMode.onStop === "function") {
+      return baseMode.onStop.call(this, state);
+    }
+    return undefined;
+  };
+
+  return mode;
+}
+
 // ---------- Geometry helpers ----------
 const SQM_TO_SQFT = 10.7639104167097;
 
@@ -1224,6 +1497,10 @@ async function renderPdfPageToImageFile(pdfFile, options = {}) {
     canvas.height = Math.max(1, Math.round(viewport.height));
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) throw new Error("Could not render PDF page.");
+    ctx.save();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
 
     await page.render({ canvasContext: ctx, viewport }).promise;
     const pngBlob = await mapCanvasToPngBlob(canvas);
@@ -2603,7 +2880,7 @@ export default function App() {
   const [knownDistancePixelsInput, setKnownDistancePixelsInput] = useState("100");
   const [pdfScaleInchesInput, setPdfScaleInchesInput] = useState("1");
   const [pdfScaleFeetPerInchInput, setPdfScaleFeetPerInchInput] = useState("20");
-  const [pdfAnnotationTool, setPdfAnnotationTool] = useState("select"); // select | hand | pen | marker | shape | text
+  const [pdfAnnotationTool, setPdfAnnotationTool] = useState("select"); // select | pen | marker | shape | text
   const [pdfAnnotationColor, setPdfAnnotationColor] = useState(PDF_ANNOT_DEFAULT_COLOR);
   const [pdfAnnotationWidth, setPdfAnnotationWidth] = useState(4);
   const [pdfAnnotationTextDraft, setPdfAnnotationTextDraft] = useState("Note");
@@ -2617,7 +2894,7 @@ export default function App() {
   const [pdfConverting, setPdfConverting] = useState(false);
   const [planOverlay, setPlanOverlay] = useState(null);
   const [planOverlayEnabled, setPlanOverlayEnabled] = useState(false);
-  const [planOverlayOpacity, setPlanOverlayOpacity] = useState(0.95);
+  const [planOverlayOpacity, setPlanOverlayOpacity] = useState(1);
   const [backendMeasurementResult, setBackendMeasurementResult] = useState(null);
   const [segmentationResult, setSegmentationResult] = useState(null);
   const [measurementHistory, setMeasurementHistory] = useState([]);
@@ -3537,7 +3814,7 @@ export default function App() {
 
   const activatePdfAnnotationTool = useCallback(
     (nextTool) => {
-      const allowed = ["select", "hand", "pen", "marker", "shape", "text"];
+      const allowed = ["select", "pen", "marker", "shape", "text"];
       const tool = allowed.includes(nextTool) ? nextTool : "select";
       setPdfAnnotationTool(tool);
       if (tool !== "select" && measureModeRef.current) {
@@ -3627,7 +3904,7 @@ export default function App() {
   const terrainWarnedRef = useRef(false);
   const planOverlayRef = useRef(null);
   const planOverlayEnabledRef = useRef(false);
-  const planOverlayOpacityRef = useRef(0.95);
+  const planOverlayOpacityRef = useRef(1);
   const planOverlayObjectUrlRef = useRef(null);
   const pdfAnnotationToolRef = useRef(pdfAnnotationTool);
   const pdfAnnotationColorRef = useRef(pdfAnnotationColor);
@@ -3767,8 +4044,14 @@ export default function App() {
     const parsed = Number(planOverlayOpacity);
     planOverlayOpacityRef.current = Number.isFinite(parsed)
       ? Math.max(0.15, Math.min(1, parsed))
-      : 0.95;
+      : 1;
   }, [planOverlayOpacity]);
+
+  useEffect(() => {
+    if (workflowMode !== WORKFLOW_MODE_PDF) return;
+    if (planOverlay && !planOverlayEnabled) setPlanOverlayEnabled(true);
+    if (planOverlayOpacity !== 1) setPlanOverlayOpacity(1);
+  }, [planOverlay, planOverlayEnabled, planOverlayOpacity, workflowMode]);
 
   useEffect(() => {
     applePencilModeRef.current = applePencilMode;
@@ -4966,11 +5249,15 @@ export default function App() {
 
   const applyPlanOverlayMode = useCallback((map, enabled, overlay, opacityInput) => {
     if (!map || !map.isStyleLoaded()) return;
-    const opacity = Math.max(0.15, Math.min(1, Number(opacityInput) || 0.95));
+    const isPdfCanvasMode = workflowModeRef.current === WORKFLOW_MODE_PDF;
+    const opacity = isPdfCanvasMode
+      ? 1
+      : Math.max(0.15, Math.min(1, Number(opacityInput) || 0.95));
     const hasOverlay = !!overlay?.url;
     const source = map.getSource(PLAN_OVERLAY_SOURCE_ID);
+    const shouldShow = hasOverlay && (isPdfCanvasMode || !!enabled);
 
-    if (!enabled || !hasOverlay) {
+    if (!shouldShow) {
       if (map.getLayer(PLAN_OVERLAY_LAYER_ID)) {
         try {
           map.setLayoutProperty(PLAN_OVERLAY_LAYER_ID, "visibility", "none");
@@ -8825,9 +9112,14 @@ export default function App() {
     const touchPanDrawPolygonMode = createTouchPanDrawPolygonMode(baseDrawModes.draw_polygon, {
       stylusOnlyRef: applePencilModeRef,
     });
-    const drawModes = touchPanDrawPolygonMode
-      ? { ...baseDrawModes, draw_polygon: touchPanDrawPolygonMode }
-      : baseDrawModes;
+    const touchDrawLineMode = createTouchDrawLineMode(baseDrawModes.draw_line_string, {
+      stylusOnlyRef: applePencilModeRef,
+    });
+    const drawModes = {
+      ...baseDrawModes,
+      ...(touchPanDrawPolygonMode ? { draw_polygon: touchPanDrawPolygonMode } : {}),
+      ...(touchDrawLineMode ? { draw_line_string: touchDrawLineMode } : {}),
+    };
 
     const draw = new MapboxDraw({
       userProperties: true,
@@ -9530,8 +9822,7 @@ export default function App() {
     if (!map) return;
 
     const inPdfMode = workflowMode === WORKFLOW_MODE_PDF;
-    const allowPdfNavigation = inPdfMode && pdfAnnotationTool === "hand";
-    const lockMapNavigation = inPdfMode && !allowPdfNavigation;
+    const lockMapNavigation = inPdfMode;
 
     try {
       if (lockMapNavigation) {
@@ -9549,13 +9840,8 @@ export default function App() {
         map.doubleClickZoom?.enable?.();
         map.keyboard?.enable?.();
         map.touchZoomRotate?.enable?.();
-        if (allowPdfNavigation) {
-          map.dragRotate?.disable?.();
-          map.touchZoomRotate?.disableRotation?.();
-        } else {
-          map.dragRotate?.enable?.();
-          map.touchZoomRotate?.enableRotation?.();
-        }
+        map.dragRotate?.enable?.();
+        map.touchZoomRotate?.enableRotation?.();
       }
     } catch {
       /* intentionally ignore non-critical map/draw errors */
@@ -9563,11 +9849,9 @@ export default function App() {
 
     const canvasContainer = map.getCanvasContainer?.();
     if (!canvasContainer) return;
-    const canPanTouch = inPdfMode
-      ? allowPdfNavigation
-      : isCompactTouchUi && drawMode === "simple_select";
+    const canPanTouch = inPdfMode ? false : isCompactTouchUi && drawMode === "simple_select";
     canvasContainer.style.touchAction = canPanTouch ? "pan-x pan-y pinch-zoom" : "none";
-  }, [drawMode, isCompactTouchUi, pdfAnnotationTool, workflowMode]);
+  }, [drawMode, isCompactTouchUi, workflowMode]);
 
   // Keep draw in sync when switching layers/visibility.
   useEffect(() => {
@@ -13406,10 +13690,9 @@ export default function App() {
               PDF Expert Annotation Toolbar
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 6 }}>
               {[
                 { key: "select", label: "Select" },
-                { key: "hand", label: "Hand" },
                 { key: "pen", label: "Pen" },
                 { key: "marker", label: "Marker" },
                 { key: "shape", label: "Shape" },
@@ -13994,80 +14277,88 @@ export default function App() {
                 </div>
               ) : null}
 
-              <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-                <input
-                  type="checkbox"
-                  checked={planOverlayEnabled}
-                  disabled={!planOverlay}
-                  onChange={(e) => setPlanOverlayEnabled(e.target.checked)}
-                />
-                <span style={{ fontSize: 13, opacity: planOverlay ? 1 : 0.6 }}>
-                  Show uploaded plan on map
-                </span>
-              </label>
+              {workflowMode !== WORKFLOW_MODE_PDF ? (
+                <>
+                  <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={planOverlayEnabled}
+                      disabled={!planOverlay}
+                      onChange={(e) => setPlanOverlayEnabled(e.target.checked)}
+                    />
+                    <span style={{ fontSize: 13, opacity: planOverlay ? 1 : 0.6 }}>
+                      Show uploaded plan on map
+                    </span>
+                  </label>
 
-              <div style={{ marginTop: 2, marginBottom: 8 }}>
-                <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 4 }}>
-                  Plan Overlay Opacity: {Math.round(Number(planOverlayOpacity) * 100)}%
+                  <div style={{ marginTop: 2, marginBottom: 8 }}>
+                    <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 4 }}>
+                      Plan Overlay Opacity: {Math.round(Number(planOverlayOpacity) * 100)}%
+                    </div>
+                    <input
+                      type="range"
+                      min="0.15"
+                      max="1"
+                      step="0.01"
+                      value={planOverlayOpacity}
+                      onChange={(e) => setPlanOverlayOpacity(Number(e.target.value))}
+                      disabled={!planOverlayEnabled}
+                      style={{
+                        width: "100%",
+                        accentColor: "#6dd6ff",
+                        opacity: planOverlayEnabled ? 1 : 0.45,
+                      }}
+                      aria-label="Plan overlay opacity"
+                    />
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+                    <button
+                      type="button"
+                      onClick={reanchorPlanOverlay}
+                      disabled={!planOverlay}
+                      style={{
+                        padding: "8px 9px",
+                        borderRadius: 10,
+                        cursor: planOverlay ? "pointer" : "not-allowed",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: planOverlay ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.03)",
+                        color: "#fff",
+                        opacity: planOverlay ? 1 : 0.6,
+                        fontWeight: 700,
+                        fontSize: 12,
+                      }}
+                    >
+                      Re-anchor Plan
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => clearUploadedPlanOverlay(true)}
+                      disabled={!planOverlay && !measurementImageFile}
+                      style={{
+                        padding: "8px 9px",
+                        borderRadius: 10,
+                        cursor: planOverlay || measurementImageFile ? "pointer" : "not-allowed",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background:
+                          planOverlay || measurementImageFile
+                            ? "rgba(255,255,255,0.05)"
+                            : "rgba(255,255,255,0.03)",
+                        color: "#fff",
+                        opacity: planOverlay || measurementImageFile ? 1 : 0.6,
+                        fontWeight: 700,
+                        fontSize: 12,
+                      }}
+                    >
+                      Clear Plan
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ marginTop: 4, marginBottom: 8, fontSize: 12, opacity: 0.78 }}>
+                  PDF mode is locked to file-only canvas at 100% opacity.
                 </div>
-                <input
-                  type="range"
-                  min="0.15"
-                  max="1"
-                  step="0.01"
-                  value={planOverlayOpacity}
-                  onChange={(e) => setPlanOverlayOpacity(Number(e.target.value))}
-                  disabled={!planOverlayEnabled}
-                  style={{
-                    width: "100%",
-                    accentColor: "#6dd6ff",
-                    opacity: planOverlayEnabled ? 1 : 0.45,
-                  }}
-                  aria-label="Plan overlay opacity"
-                />
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
-                <button
-                  type="button"
-                  onClick={reanchorPlanOverlay}
-                  disabled={!planOverlay}
-                  style={{
-                    padding: "8px 9px",
-                    borderRadius: 10,
-                    cursor: planOverlay ? "pointer" : "not-allowed",
-                    border: "1px solid rgba(255,255,255,0.12)",
-                    background: planOverlay ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.03)",
-                    color: "#fff",
-                    opacity: planOverlay ? 1 : 0.6,
-                    fontWeight: 700,
-                    fontSize: 12,
-                  }}
-                >
-                  Re-anchor Plan
-                </button>
-                <button
-                  type="button"
-                  onClick={() => clearUploadedPlanOverlay(true)}
-                  disabled={!planOverlay && !measurementImageFile}
-                  style={{
-                    padding: "8px 9px",
-                    borderRadius: 10,
-                    cursor: planOverlay || measurementImageFile ? "pointer" : "not-allowed",
-                    border: "1px solid rgba(255,255,255,0.12)",
-                    background:
-                      planOverlay || measurementImageFile
-                        ? "rgba(255,255,255,0.05)"
-                        : "rgba(255,255,255,0.03)",
-                    color: "#fff",
-                    opacity: planOverlay || measurementImageFile ? 1 : 0.6,
-                    fontWeight: 700,
-                    fontSize: 12,
-                  }}
-                >
-                  Clear Plan
-                </button>
-              </div>
+              )}
             </>
           ) : null}
 
@@ -14827,9 +15118,7 @@ export default function App() {
             inset: 0,
             touchAction:
               workflowMode === WORKFLOW_MODE_PDF
-                ? pdfAnnotationTool === "hand"
-                  ? "pan-x pan-y pinch-zoom"
-                  : "none"
+                ? "none"
                 : isCompactTouchUi && drawMode === "simple_select"
                 ? "pan-x pan-y pinch-zoom"
                 : "none",
