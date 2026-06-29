@@ -110,6 +110,10 @@ export function getMeasurementHistory(limit = 20) {
   return request(`/api/measurements/history?limit=${encodeURIComponent(limit)}`);
 }
 
+export function getApiHealth() {
+  return request("/api/health");
+}
+
 export function calculatePixelDistance(pointA, pointB) {
   return request("/api/measurements/calibrate/pixel-distance", {
     method: "POST",

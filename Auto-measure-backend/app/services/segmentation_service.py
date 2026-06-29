@@ -296,8 +296,9 @@ class SegmentationService:
             return text
         return f"{text[:max_len - 3]}..."
 
-    @staticmethod
+    @classmethod
     def _heuristic_masks(
+        cls,
         image_bgr: np.ndarray,
     ) -> tuple[dict[str, np.ndarray], dict[str, float]]:
         hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
@@ -355,26 +356,40 @@ class SegmentationService:
         )
         mulch = mulch_primary | mulch_relaxed
 
-        asphalt_dark = (s <= 95) & (v >= 35) & (v <= 185)
-        asphalt_mid = (s <= 75) & (v > 60) & (v <= 230)
+        asphalt_dark = (s <= 95) & (v >= 28) & (v <= 185)
+        asphalt_mid = (s <= 78) & (v > 58) & (v <= 235)
         blue_gray = (h >= 90) & (h <= 130) & (s <= 130) & (v >= 40) & (v <= 210)
-        paved_surface = asphalt_dark | asphalt_mid | blue_gray
+        stripe_white = (s <= 42) & (v >= 175) & (l >= 160)
+        stripe_yellow = (h >= 18) & (h <= 40) & (s >= 60) & (v >= 120)
+        vehicle_dark = (s <= 110) & (v >= 22) & (v <= 150) & (exg <= 12)
+        vehicle_light = (s <= 68) & (v >= 120) & (l >= 120) & (exg <= 10)
+        paved_surface = asphalt_dark | asphalt_mid | blue_gray | stripe_white | stripe_yellow
+        plowable_support = cls._dilate_mask(paved_surface, kernel_size=9) | cls._dilate_mask(
+            vehicle_dark | vehicle_light,
+            kernel_size=7,
+        )
 
         neutral = (np.abs(a - 128) <= 8) & (np.abs(b - 128) <= 10)
-        sidewalks_seed = (s <= 30) & (v >= 162) & (l >= 140) & neutral
-        sidewalks_support = SegmentationService._dilate_mask(paved_surface, kernel_size=7)
+        sidewalks_seed = (s <= 26) & (v >= 170) & (l >= 145) & neutral
+        sidewalks_support = SegmentationService._dilate_mask(
+            asphalt_dark | asphalt_mid | blue_gray,
+            kernel_size=7,
+        )
         sidewalks = sidewalks_seed & sidewalks_support
 
         # Positive paved-surface detection for plowable instead of "everything else".
-        plowable = paved_surface & ~turf & ~mulch & ~sidewalks
+        plowable = plowable_support & ~turf & ~mulch & ~sidewalks
 
         turf = SegmentationService._clean_mask(turf, kernel_size=3, open_iters=1, close_iters=2)
         sidewalks = SegmentationService._clean_mask(sidewalks, kernel_size=3, open_iters=1, close_iters=1)
+        sidewalks = SegmentationService._filter_sidewalk_components(sidewalks)
         mulch = SegmentationService._clean_mask(mulch, kernel_size=3, open_iters=1, close_iters=1)
-        plowable = SegmentationService._clean_mask(plowable, kernel_size=5, open_iters=1, close_iters=2)
+        plowable = SegmentationService._clean_mask(plowable, kernel_size=7, open_iters=1, close_iters=2)
+        plowable = SegmentationService._dilate_mask(plowable, kernel_size=5)
+        plowable = SegmentationService._clean_mask(plowable, kernel_size=7, open_iters=0, close_iters=2)
         plowable = SegmentationService._fill_small_holes(
             plowable,
-            max_hole_area_px=max(120, int(plowable.size * 0.003)),
+            max_hole_area_px=max(180, int(plowable.size * 0.006)),
         )
 
         masks = SegmentationService._enforce_exclusive_masks(
@@ -386,12 +401,7 @@ class SegmentationService:
             }
         )
 
-        confidences = {
-            "plowable": 0.58,
-            "sidewalks": 0.48,
-            "turf": 0.56,
-            "mulch": 0.44,
-        }
+        confidences = SegmentationService._estimate_mask_confidences(masks, image_bgr)
         return masks, confidences
 
     @staticmethod
@@ -435,18 +445,21 @@ class SegmentationService:
         if int(np.count_nonzero(plowable)) < 50:
             plowable = (s <= 85) & (v >= 38) & ~turf & ~mulch
 
+        rescue_sidewalks = SegmentationService._filter_sidewalk_components(
+            SegmentationService._clean_mask(
+                sidewalks,
+                kernel_size=3,
+                open_iters=0,
+                close_iters=1,
+            )
+        )
         masks = SegmentationService._enforce_exclusive_masks(
             {
                 "plowable": SegmentationService._fill_small_holes(
                     SegmentationService._clean_mask(plowable, kernel_size=3, open_iters=0, close_iters=1),
                     max_hole_area_px=max(60, int(plowable.size * 0.002)),
                 ),
-                "sidewalks": SegmentationService._clean_mask(
-                    sidewalks,
-                    kernel_size=3,
-                    open_iters=0,
-                    close_iters=1,
-                ),
+                "sidewalks": rescue_sidewalks,
                 "turf": SegmentationService._clean_mask(
                     turf,
                     kernel_size=3,
@@ -461,12 +474,16 @@ class SegmentationService:
                 ),
             }
         )
-        confidences = {
-            "plowable": 0.42,
-            "sidewalks": 0.38,
-            "turf": 0.44,
-            "mulch": 0.34,
-        }
+        confidences = SegmentationService._estimate_mask_confidences(
+            masks,
+            image_bgr,
+            base_floor={
+                "plowable": 0.34,
+                "sidewalks": 0.28,
+                "turf": 0.34,
+                "mulch": 0.24,
+            },
+        )
         return masks, confidences
 
     @classmethod
@@ -489,6 +506,12 @@ class SegmentationService:
         )
         cov = cls._coverage_by_class(out)
         heur_cov = cls._coverage_by_class(heuristic_masks)
+
+        vegetation_support = cls._dilate_mask(heuristic_masks["turf"], kernel_size=11)
+        if cov["turf"] > 0.02:
+            out["turf"] = out["turf"] & vegetation_support
+            if notes is not None and np.count_nonzero(out["turf"]) > 0:
+                notes.append("Anchored turf to vegetation support.")
 
         # Turf should be vegetation-like; suppress large turf if heuristic support is tiny.
         if cov["turf"] > 0.40 and heur_cov["turf"] < 0.12:
@@ -536,6 +559,14 @@ class SegmentationService:
                 notes.append(
                     f"Applied sidewalk cap guardrail ({int(sidewalk_cap * 100)}% max coverage target)."
                 )
+
+        cov = cls._coverage_by_class(out)
+        if cov["plowable"] < 0.015 and heur_cov["plowable"] > 0.035:
+            paved_rescue = cls._dilate_mask(heuristic_masks["plowable"], kernel_size=9)
+            paved_rescue = paved_rescue & ~out["sidewalks"] & ~out["turf"] & ~out["mulch"]
+            out["plowable"] = out["plowable"] | paved_rescue
+            if notes is not None:
+                notes.append("Expanded plowable from paved-support rescue.")
 
         # Mulch should be sparse; suppress broad mulch hallucinations.
         if cov["mulch"] > 0.12 and heur_cov["mulch"] < 0.04:
@@ -585,6 +616,100 @@ class SegmentationService:
             out[key] = cls._remove_small_components(out[key], min_area_px=min_area[key])
 
         return cls._enforce_exclusive_masks(out)
+
+    @staticmethod
+    def _estimate_mask_confidences(
+        masks: dict[str, np.ndarray],
+        image_bgr: np.ndarray,
+        base_floor: dict[str, float] | None = None,
+    ) -> dict[str, float]:
+        hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
+        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB).astype(np.int16)
+
+        h = hsv[:, :, 0]
+        s = hsv[:, :, 1]
+        v = hsv[:, :, 2]
+        l = lab[:, :, 0]
+        a = lab[:, :, 1].astype(np.int16)
+        b = lab[:, :, 2].astype(np.int16)
+        r = rgb[:, :, 0]
+        g = rgb[:, :, 1]
+        blue = rgb[:, :, 2]
+        exg = (2 * g) - r - blue
+
+        coverage = SegmentationService._coverage_by_class(masks)
+        floors = {
+            "plowable": 0.40,
+            "sidewalks": 0.34,
+            "turf": 0.40,
+            "mulch": 0.30,
+        }
+        if base_floor:
+            floors.update(base_floor)
+
+        def mask_mean(arr: np.ndarray, mask: np.ndarray, fallback: float = 0.0) -> float:
+            if not np.any(mask):
+                return fallback
+            return float(np.mean(arr[mask]))
+
+        def clamp01(value: float) -> float:
+            return max(0.0, min(1.0, value))
+
+        turf_mask = masks["turf"]
+        turf_green = clamp01((mask_mean(exg, turf_mask, 0.0) - 10.0) / 45.0)
+        turf_penalty = clamp01((coverage["turf"] - 0.35) / 0.35)
+
+        sidewalks_mask = masks["sidewalks"]
+        sidewalks_neutral = clamp01(
+            1.0 - ((mask_mean(np.abs(a - 128) + np.abs(b - 128), sidewalks_mask, 40.0)) / 30.0)
+        )
+        sidewalks_bright = clamp01((mask_mean(l, sidewalks_mask, 100.0) - 120.0) / 60.0)
+        sidewalks_penalty = clamp01((coverage["sidewalks"] - 0.12) / 0.18)
+
+        plowable_mask = masks["plowable"]
+        plowable_neutral = clamp01(
+            1.0 - (mask_mean(s.astype(np.float32), plowable_mask, 160.0) / 140.0)
+        )
+        plowable_dark = clamp01((170.0 - mask_mean(v.astype(np.float32), plowable_mask, 255.0)) / 150.0)
+        plowable_penalty = clamp01((coverage["plowable"] - 0.80) / 0.20)
+
+        mulch_mask = masks["mulch"]
+        mulch_warm = clamp01((mask_mean(r - blue, mulch_mask, 0.0) - 8.0) / 42.0)
+        mulch_sat = clamp01((mask_mean(s.astype(np.float32), mulch_mask, 0.0) - 40.0) / 80.0)
+        mulch_penalty = clamp01((coverage["mulch"] - 0.10) / 0.15)
+
+        raw = {
+            "plowable": (0.58 * plowable_neutral) + (0.22 * plowable_dark) + (0.20 * (1.0 - plowable_penalty)),
+            "sidewalks": (0.46 * sidewalks_neutral) + (0.34 * sidewalks_bright) + (0.20 * (1.0 - sidewalks_penalty)),
+            "turf": (0.62 * turf_green) + (0.38 * (1.0 - turf_penalty)),
+            "mulch": (0.52 * mulch_warm) + (0.28 * mulch_sat) + (0.20 * (1.0 - mulch_penalty)),
+        }
+        return {
+            key: float(floors[key]) if coverage[key] <= 0.0001 else float(max(floors[key], min(0.92, raw[key])))
+            for key in ("plowable", "sidewalks", "turf", "mulch")
+        }
+
+    @staticmethod
+    def _filter_sidewalk_components(mask: np.ndarray) -> np.ndarray:
+        src = mask.astype(np.uint8)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(src, connectivity=8)
+        out = np.zeros_like(mask, dtype=bool)
+        for label in range(1, num_labels):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < 35:
+                continue
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            short_side = min(w, h)
+            long_side = max(w, h)
+            aspect = float(long_side) / float(max(1, short_side))
+            if short_side < 6 and area < 140:
+                continue
+            if short_side < 8 and aspect > 8.0:
+                continue
+            out[labels == label] = True
+        return out
 
     @staticmethod
     def _clean_mask(
@@ -892,6 +1017,17 @@ class SegmentationService:
                 model_first[key] = heur[key]
         if cov["plowable"] < 0.005 and np.count_nonzero(heur["plowable"]) > 0:
             model_first["plowable"] = heur["plowable"]
+
+        if cov["plowable"] < 0.04 and np.count_nonzero(heur["plowable"]) > 0:
+            plowable_support = cls._dilate_mask(heur["plowable"], kernel_size=7)
+            model_first["plowable"] = model_first["plowable"] | plowable_support
+        if cov["turf"] > 0.0 and np.count_nonzero(heur["turf"]) > 0:
+            model_first["turf"] = model_first["turf"] & cls._dilate_mask(heur["turf"], kernel_size=9)
+        if cov["sidewalks"] > 0.12 and np.count_nonzero(heur["sidewalks"]) > 0:
+            model_first["sidewalks"] = model_first["sidewalks"] & cls._dilate_mask(
+                heur["sidewalks"],
+                kernel_size=7,
+            )
 
         masks = cls._enforce_exclusive_masks(model_first)
         confidences = {

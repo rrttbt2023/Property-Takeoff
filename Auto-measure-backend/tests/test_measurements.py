@@ -1,5 +1,6 @@
 import base64
 import os
+import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -9,19 +10,93 @@ DB_PATH = "/tmp/auto_measure_backend_test.db"
 os.environ["AUTO_MEASURE_DB_PATH"] = DB_PATH
 if Path(DB_PATH).exists():
     Path(DB_PATH).unlink()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.main import app
 from app.repositories.measurement_repository import init_db
+from app.services import shared_auth as shared_auth_service
+from app.services.segmentation_service import SegmentationService
 
 init_db()
 
 client = TestClient(app)
+SHARED_AUTH_ENV_KEYS = [
+    "AUTO_MEASURE_SHARED_AUTH_USER",
+    "AUTO_MEASURE_SHARED_AUTH_PASS",
+    "AUTO_MEASURE_SHARED_AUTH_USERS",
+    "AUTO_MEASURE_SHARED_AUTH_USERS_JSON",
+    "AUTO_MEASURE_SHARED_AUTH_ALLOW_INSECURE_DEFAULTS",
+]
+
+
+def _set_shared_auth_env(**overrides: str | None) -> dict[str, str | None]:
+    previous = {key: os.environ.get(key) for key in SHARED_AUTH_ENV_KEYS}
+    for key in SHARED_AUTH_ENV_KEYS:
+        next_value = overrides.get(key)
+        if next_value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = next_value
+    shared_auth_service._TOKEN_STORE.clear()
+    return previous
+
+
+def _restore_shared_auth_env(previous: dict[str, str | None]) -> None:
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    shared_auth_service._TOKEN_STORE.clear()
 
 
 def test_root_health() -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert response.json() == {"message": "Auto Measure Backend Running"}
+
+
+def test_shared_login_requires_explicit_configuration() -> None:
+    previous = _set_shared_auth_env()
+    try:
+        response = client.post(
+            "/auth/login",
+            json={"username": "admin", "password": "changeme"},
+        )
+        assert response.status_code == 503
+        assert "not configured" in response.json()["detail"].lower()
+    finally:
+        _restore_shared_auth_env(previous)
+
+
+def test_shared_login_session_and_logout() -> None:
+    previous = _set_shared_auth_env(
+        AUTO_MEASURE_SHARED_AUTH_USER="qa-user",
+        AUTO_MEASURE_SHARED_AUTH_PASS="super-secret",
+    )
+    try:
+        login_response = client.post(
+            "/auth/login",
+            json={"username": "qa-user", "password": "super-secret"},
+        )
+        assert login_response.status_code == 200
+        body = login_response.json()
+        assert body["username"] == "qa-user"
+        assert body["token"]
+
+        headers = {"Authorization": f"Bearer {body['token']}"}
+        session_response = client.get("/auth/session", headers=headers)
+        assert session_response.status_code == 200
+        assert session_response.json()["authenticated"] is True
+
+        logout_response = client.post("/auth/logout", headers=headers)
+        assert logout_response.status_code == 200
+        assert logout_response.json() == {"ok": True}
+
+        expired_session_response = client.get("/auth/session", headers=headers)
+        assert expired_session_response.status_code == 401
+    finally:
+        _restore_shared_auth_env(previous)
 
 
 def test_create_measurement_success() -> None:
@@ -101,6 +176,40 @@ def test_segment_upload_success() -> None:
     body = response.json()
     assert "plowable" in body
     assert "turf" in body
+
+
+def test_segmentation_heuristics_keep_parking_lot_plowable() -> None:
+    import cv2
+    import numpy as np
+
+    img = np.full((96, 96, 3), 95, dtype=np.uint8)
+    cv2.rectangle(img, (0, 0), (95, 95), (90, 90, 90), -1)
+    for x in range(10, 90, 16):
+        cv2.rectangle(img, (x, 18), (x + 3, 78), (235, 235, 235), -1)
+    cv2.rectangle(img, (28, 30), (40, 56), (60, 60, 60), -1)
+    cv2.rectangle(img, (56, 34), (70, 62), (200, 200, 200), -1)
+
+    masks, confidences = SegmentationService._heuristic_masks(img)
+    coverage = SegmentationService._coverage_by_class(masks)
+
+    assert coverage["plowable"] > coverage["sidewalks"]
+    assert coverage["plowable"] > 0.20
+    assert coverage["sidewalks"] < 0.12
+    assert confidences["plowable"] > 0.60
+
+
+def test_segmentation_heuristics_keep_grass_as_turf() -> None:
+    import numpy as np
+
+    img = np.zeros((48, 48, 3), dtype=np.uint8)
+    img[:, :] = (35, 150, 40)
+
+    masks, confidences = SegmentationService._heuristic_masks(img)
+    coverage = SegmentationService._coverage_by_class(masks)
+
+    assert coverage["turf"] > 0.70
+    assert coverage["plowable"] < 0.05
+    assert confidences["turf"] > confidences["plowable"]
 
 
 def test_calibrate_pixel_distance_success() -> None:

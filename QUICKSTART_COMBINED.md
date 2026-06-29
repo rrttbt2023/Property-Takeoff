@@ -12,12 +12,40 @@ From the project root:
 - Backend API: `http://127.0.0.1:8000`
 - Backend health: `http://127.0.0.1:8000/api/health`
 
+Shared file login now requires explicit backend credentials. Before starting the
+backend, configure one of:
+
+```bash
+export AUTO_MEASURE_SHARED_AUTH_USER="your-user"
+export AUTO_MEASURE_SHARED_AUTH_PASS="your-password"
+```
+
+or
+
+```bash
+export AUTO_MEASURE_SHARED_AUTH_USERS="estimator:secret123,reviewer:secret456"
+```
+
 In frontend code, call backend with relative API paths like:
 
 - `/api/measurements`
 - `/api/measurements/upload`
 
 Vite now proxies `/api/*` to the FastAPI server.
+
+## 1b) Run repo checks
+
+From the project root:
+
+```bash
+./scripts/check.sh
+```
+
+This runs:
+
+- frontend lint
+- frontend production build
+- backend tests
 
 ## 2) Serve built frontend from backend (single backend process)
 

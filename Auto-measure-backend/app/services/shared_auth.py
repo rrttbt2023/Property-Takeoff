@@ -15,6 +15,13 @@ def _now_iso() -> str:
     return _now_utc().isoformat().replace("+00:00", "Z")
 
 
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _session_ttl_hours() -> float:
     raw = str(os.getenv("AUTO_MEASURE_SHARED_AUTH_TTL_HOURS", "12")).strip()
     try:
@@ -29,11 +36,15 @@ def _session_expiry() -> datetime:
 
 
 def _configured_username() -> str:
-    return str(os.getenv("AUTO_MEASURE_SHARED_AUTH_USER", "admin")).strip() or "admin"
+    return str(os.getenv("AUTO_MEASURE_SHARED_AUTH_USER", "")).strip()
 
 
 def _configured_password() -> str:
-    return str(os.getenv("AUTO_MEASURE_SHARED_AUTH_PASS", "changeme")).strip() or "changeme"
+    return str(os.getenv("AUTO_MEASURE_SHARED_AUTH_PASS", ""))
+
+
+def _allow_insecure_default_credentials() -> bool:
+    return _parse_bool_env("AUTO_MEASURE_SHARED_AUTH_ALLOW_INSECURE_DEFAULTS", False)
 
 
 def _append_credential(credentials: dict[str, str], username: str, password: str) -> None:
@@ -97,9 +108,32 @@ def _configured_credentials() -> dict[str, str]:
         csv_creds = _parse_credentials_csv(raw)
         if csv_creds:
             credentials.update(csv_creds)
+    username = _configured_username()
+    password = _configured_password()
+    if username and password:
+        credentials[username] = password
     if credentials:
         return credentials
-    return {_configured_username(): _configured_password()}
+    if _allow_insecure_default_credentials():
+        return {"admin": "changeme"}
+    return {}
+
+
+def _shared_auth_config_error() -> str | None:
+    username = _configured_username()
+    password = _configured_password()
+    if bool(username) ^ bool(password):
+        return (
+            "Shared access is misconfigured. Set both AUTO_MEASURE_SHARED_AUTH_USER and "
+            "AUTO_MEASURE_SHARED_AUTH_PASS together, or use AUTO_MEASURE_SHARED_AUTH_USERS."
+        )
+    if _configured_credentials():
+        return None
+    return (
+        "Shared access login is not configured on this server. Set "
+        "AUTO_MEASURE_SHARED_AUTH_USERS, AUTO_MEASURE_SHARED_AUTH_USERS_JSON, or both "
+        "AUTO_MEASURE_SHARED_AUTH_USER and AUTO_MEASURE_SHARED_AUTH_PASS."
+    )
 
 
 def _parse_bearer_token(raw: str | None) -> str:
@@ -132,13 +166,17 @@ def _gc_expired_tokens() -> None:
 
 
 def login_shared_user(username: str, password: str) -> dict[str, str]:
+    config_error = _shared_auth_config_error()
+    if config_error:
+        raise HTTPException(status_code=503, detail=config_error)
+
     user = str(username or "").strip()
     pwd = str(password or "")
     configured_credentials = _configured_credentials()
     expected_password = configured_credentials.get(user)
     if not expected_password:
         # Keep timing behavior closer to a valid compare.
-        secrets.compare_digest(pwd, _configured_password())
+        secrets.compare_digest(pwd, "shared-auth-placeholder")
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     if not secrets.compare_digest(pwd, expected_password):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
