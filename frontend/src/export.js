@@ -906,12 +906,18 @@ export async function exportAnnotatedPlanPDFBundle({
 }
 
 function downloadBlob(content, mime, filename) {
-  const blob = new Blob([content], { type: mime });
+  const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
+  a.href = url;
   a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(a.href);
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url);
+    a.remove();
+  }, 1000);
 }
 export function exportProjectJSON(project) {
   const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
@@ -943,7 +949,7 @@ export function exportPolygonsCSV(rows, projectName) {
     lines.push(line);
   }
 
-  const csv = lines.join("\n");
+  const csv = `\uFEFF${lines.join("\n")}`;
   const baseProject = safeFilenamePart(projectName, "takeoff-project");
   downloadBlob(csv, "text/csv", `${baseProject}-polygons.csv`);
 }
@@ -951,7 +957,7 @@ export function exportPolygonsCSV(rows, projectName) {
 function csvEscape(v) {
   const s = String(v ?? "");
   if (s.includes(",") || s.includes('"') || s.includes("\n")) {
-    return `"${s.replaceAll('"', '""')}"`;
+    return `"${s.split('"').join('""')}"`;
   }
   return s;
 }
