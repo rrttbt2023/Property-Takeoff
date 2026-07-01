@@ -144,6 +144,7 @@ const TRAIN_PREVIEW_COLORS = {
 };
 const UNDO_REDO_MAX_DEPTH = 80;
 const TINY_POLYGON_SQFT = 25;
+const AUTO_QC_OVERLAP_LIMIT = 180;
 const DEFAULT_SNAP_DISTANCE_M = 2.25;
 const DEFAULT_TERRAIN_EXAGGERATION = 1.4;
 const DEFAULT_3D_OBJECT_OPACITY = 0.36;
@@ -161,6 +162,7 @@ const SHARED_PROJECT_QUEUE_STORAGE_KEY = "takeoff-shared-project-queue-v1";
 const SHARED_AUTH_STORAGE_KEY = "takeoff-shared-auth-v1";
 const HOME_PINNED_PROJECTS_STORAGE_KEY = "takeoff-home-pinned-projects-v1";
 const HOME_RESUME_PROJECT_STORAGE_KEY = "takeoff-home-resume-project-v1";
+const HOME_APPEARANCE_STORAGE_KEY = "takeoff-home-appearance-v1";
 const PROJECT_LIBRARY_MAX_ENTRIES = 30;
 const PROJECT_VERSION_HISTORY_MAX_PER_PROJECT = 16;
 const WORKFLOW_MODE_LOCATION = "location";
@@ -773,6 +775,7 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
   const onDraftChange = typeof options?.onDraftChange === "function" ? options.onDraftChange : null;
   const allowFingerPanInStylusOnly = options?.allowFingerPanInStylusOnly === true;
   const sessionRef = options?.sessionRef || null;
+  const compactTouchUiRef = options?.compactTouchUiRef || null;
 
   const mode = { ...baseMode };
   const resetPanState = (state) => {
@@ -896,6 +899,7 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
   };
 
   mode.onTouchMove = function (state, e) {
+    const compactTouchPointMode = !!compactTouchUiRef?.current;
     if (shouldIgnoreForStylusOnly(e)) {
       if (allowFingerPanInStylusOnly) {
         mode.onDrag(state, e);
@@ -903,6 +907,10 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
         e?.originalEvent?.preventDefault?.();
         e?.originalEvent?.stopPropagation?.();
       }
+      return;
+    }
+    if (compactTouchPointMode && !isStylusLikeEvent(e)) {
+      mode.onDrag(state, e);
       return;
     }
     if (typeof baseMode.onMouseMove === "function") {
@@ -945,16 +953,7 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
 
     try {
       this.map.panBy([-dx, -dy], { animate: false });
-      const lngLat = this.map.unproject([nextPoint.x, nextPoint.y]);
-      state.polygon?.updateCoordinate?.(
-        `0.${state.currentVertexPosition}`,
-        lngLat.lng,
-        lngLat.lat
-      );
-      emitDraftCoords(this, state, {
-        lngLat,
-        point: nextPoint,
-      });
+      emitDraftCoords(this, state);
     } catch {
       /* intentionally ignore non-critical map/draw errors */
     }
@@ -3679,6 +3678,18 @@ function readStoredResumeProject() {
   }
 }
 
+function readStoredHomeAppearance() {
+  if (typeof window === "undefined") return "dark";
+  try {
+    const raw = String(window.localStorage.getItem(HOME_APPEARANCE_STORAGE_KEY) || "")
+      .trim()
+      .toLowerCase();
+    return raw === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
 function normalizeSharedQueueOperation(op) {
   const type = String(op?.op || "").toLowerCase();
   if (type !== "upsert" && type !== "delete") return null;
@@ -4755,11 +4766,13 @@ export default function App() {
   const [homeCollapsedFolders, setHomeCollapsedFolders] = useState(() =>
     readStoredProjectFolderCollapseState()
   );
+  const [qcOverlapScanNonce, setQcOverlapScanNonce] = useState(0);
   const [projectVersionHistory, setProjectVersionHistory] = useState(() =>
     readStoredProjectVersionHistory()
   );
   const [pinnedProjectIds, setPinnedProjectIds] = useState(() => readStoredPinnedProjectIds());
   const [resumeProject, setResumeProject] = useState(() => readStoredResumeProject());
+  const [homeAppearance, setHomeAppearance] = useState(() => readStoredHomeAppearance());
   const [sharedProjectQueue, setSharedProjectQueue] = useState(() =>
     readStoredSharedProjectQueue()
   );
@@ -5061,6 +5074,15 @@ export default function App() {
       /* intentionally ignore localStorage errors */
     }
   }, [pinnedProjectIds]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(HOME_APPEARANCE_STORAGE_KEY, homeAppearance);
+    } catch {
+      /* intentionally ignore local storage errors */
+    }
+  }, [homeAppearance]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -7071,6 +7093,7 @@ export default function App() {
   const draftCursorLngLatRef = useRef(null);
   const draftCursorPointRef = useRef(null);
   const draftDimensionCoordsRef = useRef([]);
+  const isCompactTouchUiRef = useRef(false);
   const pdfUndoStacksByContextRef = useRef(new Map());
   const pdfRedoStacksByContextRef = useRef(new Map());
   const pdfHistoryPrevByContextRef = useRef(new Map());
@@ -7082,6 +7105,10 @@ export default function App() {
   useEffect(() => {
     layerFeaturesRef.current = layerFeatures;
   }, [layerFeatures]);
+
+  useEffect(() => {
+    isCompactTouchUiRef.current = isCompactTouchUi;
+  }, [isCompactTouchUi]);
 
   const layerVisibleRef = useRef(layerVisible);
   useEffect(() => {
@@ -8043,6 +8070,10 @@ export default function App() {
 
     const inPdfMode = workflowModeRef.current === WORKFLOW_MODE_PDF;
     const drawModeNow = drawRef.current?.getMode?.() || drawMode;
+    const compactTouchPolygonMode =
+      isCompactTouchUi &&
+      workflowModeRef.current !== WORKFLOW_MODE_PDF &&
+      drawModeNow === "draw_polygon";
     const selectedCoords =
       drawModeNow === "direct_select" || drawModeNow === "simple_select"
         ? extractSelectedPolygonCoordsFromDraw(drawRef.current)
@@ -8051,7 +8082,9 @@ export default function App() {
       Array.isArray(draftDimensionCoordsRef.current) &&
       draftDimensionCoordsRef.current.length > 0;
     const sourceFallbackCoords =
-      !hasDraftCoords && drawModeNow === "draw_polygon"
+      !compactTouchPolygonMode &&
+      !hasDraftCoords &&
+      drawModeNow === "draw_polygon"
         ? extractDraftCoordsFromRenderedDrawFeatures(map, drawModeNow) ||
           extractDraftCoordsFromDrawSources(map, drawModeNow)
         : [];
@@ -8148,13 +8181,14 @@ export default function App() {
     if (source && typeof source.setData === "function") {
       source.setData(
         buildDraftDimensionsFeatureCollection(coords, {
-          includeLabels: drawModeNow === "draw_polygon",
+          includeLabels: drawModeNow === "draw_polygon" && !compactTouchPolygonMode,
         })
       );
     }
 
     const cursorCoords =
       drawModeNow === "draw_polygon" &&
+      !compactTouchPolygonMode &&
       Array.isArray(draftCursorLngLatRef.current) &&
       draftCursorLngLatRef.current.length >= 2
         ? [...draftCursorLngLatRef.current]
@@ -8175,7 +8209,7 @@ export default function App() {
     );
 
     const nextLabels = [];
-    if (drawModeNow === "draw_polygon") {
+    if (drawModeNow === "draw_polygon" && !compactTouchPolygonMode) {
       for (let idx = 1; idx < coords.length; idx += 1) {
         const start = coords[idx - 1];
         const end = coords[idx];
@@ -8251,7 +8285,7 @@ export default function App() {
             }
           : null,
     });
-  }, [drawMode]);
+  }, [drawMode, isCompactTouchUi]);
 
   const refreshDraftDimensionsOverlayRaf = useRafThrottle(refreshDraftDimensionsOverlay);
 
@@ -10685,6 +10719,12 @@ export default function App() {
 
     try {
       const beforeId = getDrawVertexLayerId(map) || undefined;
+      const liveDrawMode = drawRef.current?.getMode?.() || drawModeRef.current || drawMode || "";
+      const hideHotDraftBorder =
+        isCompactTouchUi &&
+        workflowModeRef.current !== WORKFLOW_MODE_PDF &&
+        liveDrawMode === "draw_polygon";
+      const hideAllTouchDraftBorders = hideHotDraftBorder;
       const width = isEditing ? 2 : 6;
 
       const drawLayerExpr = ["coalesce", ["get", "user_layer"], ["get", "layer"]];
@@ -10705,6 +10745,11 @@ export default function App() {
 
       const ensureOne = (id, source) => {
         if (!map.getSource(source)) return;
+        const isHotSource = source === "mapbox-gl-draw-hot";
+        const lineOpacity =
+          hideAllTouchDraftBorders || (hideHotDraftBorder && isHotSource) ? 0 : 1;
+        const lineWidth =
+          hideAllTouchDraftBorders || (hideHotDraftBorder && isHotSource) ? 0 : width;
 
         if (!map.getLayer(id)) {
           map.addLayer(
@@ -10719,16 +10764,16 @@ export default function App() {
               },
               paint: {
                 "line-color": lineColorExpr,
-                "line-width": width,
-                "line-opacity": 1,
+                "line-width": lineWidth,
+                "line-opacity": lineOpacity,
               },
             },
             beforeId
           );
         } else {
           map.setPaintProperty(id, "line-color", lineColorExpr);
-          map.setPaintProperty(id, "line-width", width);
-          map.setPaintProperty(id, "line-opacity", 1);
+          map.setPaintProperty(id, "line-width", lineWidth);
+          map.setPaintProperty(id, "line-opacity", lineOpacity);
           if (beforeId) map.moveLayer(id, beforeId);
         }
       };
@@ -10738,7 +10783,7 @@ export default function App() {
     } catch {
       /* intentionally ignore non-critical map/draw errors */
     }
-  }, [isEditing]);
+  }, [drawMode, isCompactTouchUi, isEditing]);
 
   const refreshDrawStrokeWidths = useCallback(() => {
     const map = mapRef.current;
@@ -10746,6 +10791,11 @@ export default function App() {
 
     try {
       const inPdfMode = workflowModeRef.current === WORKFLOW_MODE_PDF;
+      const liveDrawMode = drawRef.current?.getMode?.() || drawModeRef.current || drawMode || "";
+      const hideTouchDraftLine =
+        !inPdfMode &&
+        isCompactTouchUi &&
+        liveDrawMode === "draw_polygon";
       const pdfTool = resolvePdfAnnotationTool(
         pdfAnnotationToolRef.current,
         pdfShapeTypeRef.current
@@ -10795,6 +10845,8 @@ export default function App() {
                 ).opacity + 0.13
               )
             )
+          : hideTouchDraftLine
+          ? 0
           : 0.2;
       setDrawPaintByIdPrefix(
         map,
@@ -10824,7 +10876,7 @@ export default function App() {
         map,
         "gl-draw-polygon-fill",
         "fill-opacity",
-        polygonFillOpacity
+        hideTouchDraftLine ? 0 : polygonFillOpacity
       );
       setDrawPaintByIdPrefix(
         map,
@@ -10848,7 +10900,7 @@ export default function App() {
     } catch {
       /* intentionally ignore non-critical map/draw errors */
     }
-  }, [isEditing]);
+  }, [drawMode, isCompactTouchUi, isEditing]);
 
   const getSnapTransportLines = useCallback(() => {
     const map = mapRef.current;
@@ -13136,6 +13188,62 @@ export default function App() {
     workflowMode,
   ]);
 
+  const homeProjectStats = useMemo(() => {
+    const activeModeLabel =
+      homeProjectTab === WORKFLOW_MODE_PDF ? "PDF / Image" : "Location";
+    const totalVisible = filteredHomeProjectLibrary.length;
+    const pinnedCount = pinnedHomeProjects.length;
+    const folderCount = groupedHomeProjectLibrary.length;
+    const activePolygonCount =
+      homeProjectTab === WORKFLOW_MODE_PDF
+        ? filteredHomeProjectLibrary.reduce(
+            (sum, entry) => sum + Math.max(0, Number(entry?.pdfPageNumber || 0) ? 1 : 0),
+            0
+          )
+        : filteredHomeProjectLibrary.reduce(
+            (sum, entry) => sum + Math.max(0, Number(entry?.polygonCount || 0)),
+            0
+          );
+    return {
+      activeModeLabel,
+      totalVisible,
+      pinnedCount,
+      folderCount,
+      activePolygonCount,
+    };
+  }, [
+    filteredHomeProjectLibrary,
+    groupedHomeProjectLibrary.length,
+    homeProjectTab,
+    pinnedHomeProjects.length,
+  ]);
+
+  const isHomeDarkMode = homeAppearance !== "light";
+  const homeShellBackground = isHomeDarkMode
+    ? "radial-gradient(1000px 560px at 12% 2%, rgba(72,140,198,0.26), transparent 56%), radial-gradient(860px 500px at 86% 10%, rgba(52,120,96,0.22), transparent 54%), linear-gradient(180deg, #08111a 0%, #0b1520 26%, #0d1822 72%, #081018 100%)"
+    : "radial-gradient(1100px 620px at 14% 6%, rgba(132,205,255,0.42), transparent 58%), radial-gradient(900px 540px at 86% 12%, rgba(178,229,207,0.4), transparent 56%), linear-gradient(180deg, #f7fbff 0%, #eef6fb 34%, #fcfeff 72%, #f1f7fb 100%)";
+  const homeShellOverlay = isHomeDarkMode
+    ? "radial-gradient(circle at 22% 20%, rgba(255,255,255,0.14) 0 2px, transparent 2px 100%), repeating-linear-gradient(115deg, rgba(129,182,218,0.06) 0 1px, transparent 1px 34px), repeating-linear-gradient(180deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 52px)"
+    : "radial-gradient(circle at 20% 24%, rgba(255,255,255,0.52) 0 2px, transparent 2px 100%), repeating-linear-gradient(115deg, rgba(80,140,176,0.06) 0 1px, transparent 1px 34px), repeating-linear-gradient(180deg, rgba(255,255,255,0.22) 0 1px, transparent 1px 52px)";
+  const homeWorkspaceBandBackground = isHomeDarkMode
+    ? "linear-gradient(180deg, rgba(14,26,38,0.96) 0%, rgba(12,22,33,0.98) 52%, rgba(12,24,22,0.96) 100%)"
+    : "linear-gradient(180deg, rgba(255,255,255,0.56) 0%, rgba(243,249,253,0.6) 52%, rgba(241,248,243,0.58) 100%)";
+  const homeWorkspaceBandBorder = isHomeDarkMode
+    ? "1px solid rgba(106,150,180,0.18)"
+    : "1px solid rgba(137,176,198,0.18)";
+  const homeWorkspaceBandShadow = isHomeDarkMode
+    ? "0 28px 64px rgba(22,47,66,0.28)"
+    : "0 22px 48px rgba(94,138,166,0.14)";
+  const homeWorkspaceBandOverlay = isHomeDarkMode
+    ? "radial-gradient(520px 220px at 18% 0%, rgba(112,186,255,0.1), transparent 72%), radial-gradient(460px 220px at 90% 8%, rgba(123,214,173,0.08), transparent 72%), repeating-linear-gradient(120deg, rgba(255,255,255,0.02) 0 1px, transparent 1px 44px)"
+    : "radial-gradient(520px 220px at 18% 0%, rgba(112,186,255,0.1), transparent 72%), radial-gradient(460px 220px at 90% 8%, rgba(123,214,173,0.08), transparent 72%), repeating-linear-gradient(120deg, rgba(110,160,188,0.04) 0 1px, transparent 1px 44px)";
+  const homeBrandTextColor = isHomeDarkMode ? "#edf6ff" : "#21435e";
+
+  useEffect(() => {
+    if (qcOverlapScanNonce === 0) return;
+    setQcOverlapScanNonce(0);
+  }, [layerFeatures, qcOverlapScanNonce]);
+
   const resumeLastProjectFromHome = useCallback(async () => {
     if (hasCurrentProjectData && appScreen === APP_SCREEN_HOME) {
       openMeasurementScreen(workflowMode);
@@ -15286,18 +15394,21 @@ export default function App() {
       if (Number.isFinite(sqft) && sqft > 0 && sqft < TINY_POLYGON_SQFT) tinyCount += 1;
     }
 
+    const overlapScanDeferred = all.length > AUTO_QC_OVERLAP_LIMIT;
     let overlapCount = 0;
     let overlapSqft = 0;
-    for (let i = 0; i < all.length; i += 1) {
-      for (let j = i + 1; j < all.length; j += 1) {
-        const left = all[i].feature;
-        const right = all[j].feature;
-        const inter = safeIntersectFeature(left, right);
-        if (!inter || !isPolygonLike(inter)) continue;
-        const area = featureSqft(inter);
-        if (!Number.isFinite(area) || area <= 1) continue;
-        overlapCount += 1;
-        overlapSqft += area;
+    if (!overlapScanDeferred || qcOverlapScanNonce > 0) {
+      for (let i = 0; i < all.length; i += 1) {
+        for (let j = i + 1; j < all.length; j += 1) {
+          const left = all[i].feature;
+          const right = all[j].feature;
+          const inter = safeIntersectFeature(left, right);
+          if (!inter || !isPolygonLike(inter)) continue;
+          const area = featureSqft(inter);
+          if (!Number.isFinite(area) || area <= 1) continue;
+          overlapCount += 1;
+          overlapSqft += area;
+        }
       }
     }
 
@@ -15308,8 +15419,10 @@ export default function App() {
       outside: outsideCount,
       tiny: tinyCount,
       invalidArea: invalidAreaCount,
+      overlapScanDeferred,
+      overlapScanThreshold: AUTO_QC_OVERLAP_LIMIT,
     };
-  }, [boundary, layerFeatures]);
+  }, [boundary, layerFeatures, qcOverlapScanNonce]);
 
   const qcHasIssues = useMemo(
     () =>
@@ -15691,6 +15804,7 @@ export default function App() {
     const touchPanDrawPolygonMode = createTouchPanDrawPolygonMode(baseDrawModes.draw_polygon, {
         stylusOnlyRef: applePencilModeRef,
         allowFingerPanInStylusOnly: false,
+        compactTouchUiRef: isCompactTouchUiRef,
         sessionRef: touchPolygonModeSessionRef,
         onDraftChange: (payload) => {
           const coords = Array.isArray(payload?.coords) ? payload.coords : [];
@@ -15941,12 +16055,22 @@ export default function App() {
     map.on("draw.create", onChange);
     map.on("draw.update", onChange);
     const onMapMouseMoveForDraftDimensions = (e) => {
+      const liveMode = draw.getMode?.() || drawMode || "unknown";
+      if (
+        isCompactTouchUi &&
+        workflowModeRef.current !== WORKFLOW_MODE_PDF &&
+        liveMode === "draw_polygon"
+      ) {
+        draftCursorLngLatRef.current = null;
+        draftCursorPointRef.current = null;
+        refreshDraftDimensionsOverlayRaf();
+        return;
+      }
       draftCursorLngLatRef.current = [e.lngLat.lng, e.lngLat.lat];
       draftCursorPointRef.current =
         e?.point && Number.isFinite(e.point.x) && Number.isFinite(e.point.y)
           ? { x: e.point.x, y: e.point.y }
           : null;
-      const liveMode = draw.getMode?.() || drawMode || "unknown";
       if (workflowModeRef.current !== WORKFLOW_MODE_PDF && liveMode === "draw_polygon") {
         const publishedDraftCoords =
           Array.isArray(draftDimensionCoordsRef.current) &&
@@ -18792,10 +18916,9 @@ export default function App() {
         style={{
           minHeight: "100vh",
           width: "100vw",
-          color: "#fff",
+          color: homeBrandTextColor,
           fontFamily: '"Avenir Next", "SF Pro Display", "Segoe UI", sans-serif',
-          background:
-            "radial-gradient(1200px 700px at 20% 10%, rgba(68,170,255,0.22), transparent 60%), radial-gradient(1000px 620px at 82% 18%, rgba(36,198,135,0.18), transparent 58%), linear-gradient(180deg, #07131f 0%, #050a12 100%)",
+          background: homeShellBackground,
           position: "relative",
           overflow: "auto",
         }}
@@ -18806,9 +18929,8 @@ export default function App() {
             position: "absolute",
             inset: 0,
             pointerEvents: "none",
-            background:
-              "repeating-linear-gradient(120deg, rgba(255,255,255,0.02) 0 1px, transparent 1px 40px)",
-            opacity: 0.5,
+            background: homeShellOverlay,
+            opacity: 0.75,
           }}
         />
 
@@ -18830,33 +18952,89 @@ export default function App() {
                   width: 86,
                   height: 86,
                   objectFit: "contain",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.14)",
-                  background: "rgba(255,255,255,0.04)",
+                  borderRadius: 18,
+                  border: isHomeDarkMode
+                    ? "1px solid rgba(115,165,198,0.2)"
+                    : "1px solid rgba(73,130,169,0.16)",
+                  background: isHomeDarkMode ? "rgba(16,33,48,0.82)" : "rgba(255,255,255,0.65)",
                   padding: 6,
+                  boxShadow: isHomeDarkMode
+                    ? "0 16px 28px rgba(0,0,0,0.24)"
+                    : "0 14px 28px rgba(76,130,168,0.12)",
                 }}
               />
               <div style={{ lineHeight: 1.1 }}>
-                <div style={{ fontSize: 12, letterSpacing: 1.4, textTransform: "uppercase", opacity: 0.7 }}>
+                <div style={{ fontSize: 12, letterSpacing: 1.4, textTransform: "uppercase", opacity: isHomeDarkMode ? 0.74 : 0.62 }}>
                   McKenna Site Management
                 </div>
-                <div style={{ fontSize: 20, fontWeight: 800 }}>Takeoff Home</div>
+                <div style={{ fontSize: 22, fontWeight: 900 }}>Snow + Landscape Takeoff</div>
               </div>
             </div>
-            <div style={{ fontSize: 12, opacity: 0.7, textAlign: "right" }}>
-              Shared project hub
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <div style={{ fontSize: 12, opacity: 0.64, textAlign: "right" }}>
+                Brighter project hub
+              </div>
+              <button
+                type="button"
+                onClick={() => setHomeAppearance((prev) => (prev === "light" ? "dark" : "light"))}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: 999,
+                  border: isHomeDarkMode
+                    ? "1px solid rgba(126,183,219,0.24)"
+                    : "1px solid rgba(116,154,180,0.24)",
+                  background: isHomeDarkMode ? "rgba(9,20,30,0.98)" : "rgba(255,255,255,0.78)",
+                  color: isHomeDarkMode ? "#eef8ff" : "#234761",
+                  cursor: "pointer",
+                  fontWeight: 800,
+                  fontSize: 12,
+                  boxShadow: isHomeDarkMode
+                    ? "0 10px 24px rgba(25,48,64,0.18)"
+                    : "0 10px 24px rgba(100,154,194,0.12)",
+                }}
+              >
+                {isHomeDarkMode ? "Dark Home" : "Light Home"}
+              </button>
             </div>
           </div>
+
+          <div
+            style={{
+              position: "relative",
+              borderRadius: 32,
+              padding: "22px 22px 20px",
+              background: homeWorkspaceBandBackground,
+              boxShadow: homeWorkspaceBandShadow,
+              border: homeWorkspaceBandBorder,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                pointerEvents: "none",
+                background: homeWorkspaceBandOverlay,
+                opacity: 0.9,
+              }}
+            />
+            <div style={{ position: "relative", zIndex: 1 }}>
 
           {homeResumeCard ? (
             <div
               style={{
-                borderRadius: 20,
-                border: "1px solid rgba(124,214,255,0.30)",
-                background:
-                  "linear-gradient(145deg, rgba(12,28,48,0.88) 0%, rgba(8,18,30,0.88) 100%)",
-                boxShadow: "0 18px 40px rgba(0,0,0,0.28)",
-                padding: "18px 18px 16px",
+                borderRadius: 24,
+                border: isHomeDarkMode
+                  ? "1px solid rgba(107,166,204,0.18)"
+                  : "1px solid rgba(108,164,198,0.24)",
+                background: isHomeDarkMode
+                  ? "linear-gradient(140deg, rgba(20,36,50,0.96) 0%, rgba(17,31,44,0.96) 100%)"
+                  : "linear-gradient(140deg, rgba(255,255,255,0.88) 0%, rgba(236,246,252,0.9) 100%)",
+                boxShadow: isHomeDarkMode
+                  ? "0 20px 38px rgba(0,0,0,0.28)"
+                  : "0 20px 38px rgba(95,136,170,0.12)",
+                backdropFilter: "blur(12px)",
+                padding: "20px 20px 18px",
                 marginBottom: 18,
               }}
             >
@@ -18876,7 +19054,7 @@ export default function App() {
                       fontWeight: 800,
                       letterSpacing: 1.2,
                       textTransform: "uppercase",
-                      opacity: 0.7,
+                      color: isHomeDarkMode ? "#89aeca" : "#4c708d",
                       marginBottom: 6,
                     }}
                   >
@@ -18886,6 +19064,7 @@ export default function App() {
                     style={{
                       fontSize: 24,
                       fontWeight: 900,
+                      color: isHomeDarkMode ? "#f3f8fd" : "#15334b",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
@@ -18900,7 +19079,7 @@ export default function App() {
                       flexWrap: "wrap",
                       gap: 8,
                       fontSize: 12,
-                      opacity: 0.82,
+                      color: isHomeDarkMode ? "#9cb8ce" : "#547189",
                     }}
                   >
                     <span>
@@ -18930,12 +19109,19 @@ export default function App() {
                   style={{
                     padding: "11px 16px",
                     borderRadius: 999,
-                    border: "1px solid rgba(124,214,255,0.55)",
-                    background: "linear-gradient(120deg, rgba(0,134,255,0.26), rgba(40,210,136,0.22))",
-                    color: "#fff",
+                    border: isHomeDarkMode
+                      ? "1px solid rgba(118,182,219,0.24)"
+                      : "1px solid rgba(74,141,179,0.34)",
+                    background: isHomeDarkMode
+                      ? "linear-gradient(120deg, rgba(38,83,113,0.88), rgba(30,89,72,0.82))"
+                      : "linear-gradient(120deg, #e0f3ff, #dff6ef)",
+                    color: isHomeDarkMode ? "#eef8ff" : "#15405d",
                     cursor: "pointer",
                     fontWeight: 800,
                     whiteSpace: "nowrap",
+                    boxShadow: isHomeDarkMode
+                      ? "0 10px 24px rgba(0,0,0,0.26)"
+                      : "0 10px 24px rgba(100,154,194,0.18)",
                   }}
                 >
                   {homeResumeCard.buttonLabel}
@@ -18946,21 +19132,43 @@ export default function App() {
 
           <div
             style={{
-              borderRadius: 24,
-              border: "1px solid rgba(255,255,255,0.12)",
-              background:
-                "linear-gradient(155deg, rgba(10,26,44,0.88) 0%, rgba(8,18,30,0.88) 58%, rgba(8,28,22,0.82) 100%)",
-              boxShadow: "0 26px 60px rgba(0,0,0,0.45)",
-              padding: "26px 24px 24px",
+              borderRadius: 28,
+              border: isHomeDarkMode
+                ? "1px solid rgba(104,164,200,0.16)"
+                : "1px solid rgba(120,168,194,0.24)",
+              background: isHomeDarkMode
+                ? "linear-gradient(150deg, rgba(16,30,44,0.98) 0%, rgba(15,27,40,0.96) 58%, rgba(17,36,33,0.96) 100%)"
+                : "linear-gradient(150deg, rgba(255,255,255,0.92) 0%, rgba(237,248,255,0.94) 58%, rgba(230,244,238,0.96) 100%)",
+              boxShadow: isHomeDarkMode
+                ? "0 30px 56px rgba(0,0,0,0.3)"
+                : "0 30px 56px rgba(80,124,156,0.16)",
+              padding: "28px 26px 24px",
               marginBottom: 18,
+              overflow: "hidden",
+              position: "relative",
             }}
           >
-            <div style={{ fontSize: 40, fontWeight: 900, letterSpacing: 0.4, marginBottom: 8 }}>
-              Explore, Measure, Deliver
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                pointerEvents: "none",
+                background: isHomeDarkMode
+                  ? "radial-gradient(420px 220px at 82% 18%, rgba(86,152,196,0.18), transparent 70%), linear-gradient(180deg, transparent 0%, rgba(255,255,255,0.03) 100%)"
+                  : "radial-gradient(420px 220px at 82% 18%, rgba(182,224,255,0.45), transparent 70%), linear-gradient(180deg, transparent 0%, rgba(255,255,255,0.22) 100%)",
+              }}
+            />
+            <div style={{ position: "relative", zIndex: 1 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", color: isHomeDarkMode ? "#8eafc9" : "#5a7b93", marginBottom: 10 }}>
+              Winter Workflow Home
             </div>
-            <div style={{ fontSize: 15, opacity: 0.83, maxWidth: 760, marginBottom: 18 }}>
-              Open a saved property, import a project JSON, or start a fresh takeoff page.
-              Location takeoff and PDF/image takeoff now open on separate pages.
+            <div style={{ fontSize: 42, lineHeight: 1.02, fontWeight: 900, letterSpacing: 0.2, marginBottom: 10, color: isHomeDarkMode ? "#f5fbff" : "#15344d", maxWidth: 740 }}>
+              Measure snow sites and landscape plans from a brighter, faster home base.
+            </div>
+            <div style={{ fontSize: 15, color: isHomeDarkMode ? "#9bb8cd" : "#58758c", maxWidth: 760, marginBottom: 22, lineHeight: 1.55 }}>
+              Start fresh in map or plan mode, jump back into the last property your team touched,
+              and keep the busiest jobs pinned at the top. Shared project work stays front and center,
+              while admin tools stay quieter below.
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10, marginBottom: 10 }}>
@@ -18970,12 +19178,17 @@ export default function App() {
                 style={{
                   padding: "14px 16px",
                   borderRadius: 14,
-                  border: "1px solid rgba(124,214,255,0.55)",
-                  background: "linear-gradient(120deg, rgba(0,134,255,0.28), rgba(40,210,136,0.26))",
-                  color: "#fff",
+                  border: isHomeDarkMode
+                    ? "1px solid rgba(118,182,219,0.22)"
+                    : "1px solid rgba(88,151,186,0.34)",
+                  background: isHomeDarkMode
+                    ? "linear-gradient(120deg, rgba(35,79,106,0.92), rgba(24,78,64,0.9))"
+                    : "linear-gradient(120deg, #dff1ff, #d8f0e5)",
+                  color: isHomeDarkMode ? "#eef8ff" : "#173a53",
                   cursor: "pointer",
-                  fontWeight: 800,
+                  fontWeight: 900,
                   fontSize: 14,
+                  boxShadow: "0 14px 24px rgba(112,170,199,0.18)",
                 }}
               >
                 Measure Location Page
@@ -18987,12 +19200,17 @@ export default function App() {
                 style={{
                   padding: "14px 16px",
                   borderRadius: 14,
-                  border: "1px solid rgba(124,214,255,0.55)",
-                  background: "linear-gradient(120deg, rgba(0,134,255,0.22), rgba(85,130,255,0.24))",
-                  color: "#fff",
+                  border: isHomeDarkMode
+                    ? "1px solid rgba(118,182,219,0.22)"
+                    : "1px solid rgba(102,148,201,0.34)",
+                  background: isHomeDarkMode
+                    ? "linear-gradient(120deg, rgba(34,66,104,0.92), rgba(46,66,122,0.88))"
+                    : "linear-gradient(120deg, #edf5ff, #e1edff)",
+                  color: isHomeDarkMode ? "#eef8ff" : "#173a53",
                   cursor: "pointer",
-                  fontWeight: 800,
+                  fontWeight: 900,
                   fontSize: 14,
+                  boxShadow: "0 14px 24px rgba(112,170,199,0.14)",
                 }}
               >
                 Measure PDF/Image Page
@@ -19004,9 +19222,11 @@ export default function App() {
                 style={{
                   padding: "10px 14px",
                   borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  background: "rgba(255,255,255,0.04)",
-                  color: "#fff",
+                  border: isHomeDarkMode
+                    ? "1px solid rgba(118,182,219,0.18)"
+                    : "1px solid rgba(114,152,178,0.2)",
+                  background: isHomeDarkMode ? "rgba(19,36,50,0.88)" : "rgba(255,255,255,0.6)",
+                  color: isHomeDarkMode ? "#dcecff" : "#23445d",
                   cursor: "pointer",
                   fontWeight: 700,
                   textAlign: "center",
@@ -19031,9 +19251,11 @@ export default function App() {
                 style={{
                   padding: "10px 14px",
                   borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  background: "rgba(255,255,255,0.04)",
-                  color: "#fff",
+                  border: isHomeDarkMode
+                    ? "1px solid rgba(118,182,219,0.18)"
+                    : "1px solid rgba(114,152,178,0.2)",
+                  background: isHomeDarkMode ? "rgba(19,36,50,0.88)" : "rgba(255,255,255,0.6)",
+                  color: isHomeDarkMode ? "#dcecff" : "#23445d",
                   cursor: "pointer",
                   fontWeight: 700,
                   fontSize: 12,
@@ -19042,20 +19264,86 @@ export default function App() {
                 Pick Mode
               </button>
             </div>
+            <div
+              style={{
+                marginTop: 18,
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+                gap: 10,
+              }}
+            >
+              {[
+                {
+                  label: "Today’s Work",
+                  value: `${homeProjectStats.totalVisible} visible`,
+                  detail: `${homeProjectStats.activeModeLabel} projects in this view`,
+                },
+                {
+                  label: "Pinned Jobs",
+                  value: `${homeProjectStats.pinnedCount}`,
+                  detail: "favorite sites stay near the top",
+                },
+                {
+                  label: homeProjectTab === WORKFLOW_MODE_PDF ? "Saved Pages" : "Tracked Polygons",
+                  value: homeProjectTab === WORKFLOW_MODE_PDF
+                    ? `${homeProjectStats.activePolygonCount}`
+                    : Number(homeProjectStats.activePolygonCount || 0).toLocaleString(),
+                  detail: homeProjectTab === WORKFLOW_MODE_PDF ? "PDF/image pages in saved jobs" : "measured areas across this view",
+                },
+                {
+                  label: "Folders",
+                  value: `${homeProjectStats.folderCount}`,
+                  detail: "organize routes, clients, and properties",
+                },
+              ].map((item) => (
+                <div
+                  key={item.label}
+                  style={{
+                    borderRadius: 16,
+                    border: isHomeDarkMode
+                      ? "1px solid rgba(111,170,205,0.14)"
+                      : "1px solid rgba(121,170,196,0.18)",
+                    background: isHomeDarkMode ? "rgba(19,34,47,0.84)" : "rgba(255,255,255,0.56)",
+                    padding: "14px 14px 12px",
+                    backdropFilter: "blur(8px)",
+                  }}
+                >
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.1, textTransform: "uppercase", color: isHomeDarkMode ? "#89aeca" : "#64829a", marginBottom: 6 }}>
+                    {item.label}
+                  </div>
+                  <div style={{ fontSize: 24, fontWeight: 900, color: isHomeDarkMode ? "#f2f8fc" : "#16344d", marginBottom: 3 }}>
+                    {item.value}
+                  </div>
+                  <div style={{ fontSize: 12, color: isHomeDarkMode ? "#95b2c8" : "#60809a", lineHeight: 1.4 }}>{item.detail}</div>
+                </div>
+              ))}
+            </div>
+            </div>
           </div>
 
           <div
             style={{
-              borderRadius: 20,
-              border: "1px solid rgba(255,255,255,0.10)",
-              background: "rgba(8,16,26,0.75)",
-              padding: "16px 16px 14px",
+              borderRadius: 24,
+              border: isHomeDarkMode
+                ? "1px solid rgba(104,164,200,0.14)"
+                : "1px solid rgba(124,166,194,0.18)",
+              background: isHomeDarkMode ? "rgba(14,28,40,0.9)" : "rgba(255,255,255,0.66)",
+              boxShadow: isHomeDarkMode
+                ? "0 20px 42px rgba(0,0,0,0.28)"
+                : "0 20px 42px rgba(89,129,157,0.11)",
+              backdropFilter: "blur(10px)",
+              padding: "18px 18px 16px",
             }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-              <div style={{ fontSize: 16, fontWeight: 800 }}>Recent Projects</div>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.3, textTransform: "uppercase", color: isHomeDarkMode ? "#8baeca" : "#66849b", marginBottom: 5 }}>
+                  Project Library
+                </div>
+                <div style={{ fontSize: 24, fontWeight: 900, color: isHomeDarkMode ? "#f3f8fc" : "#173750" }}>Recent, pinned, and shared work</div>
+              </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>
+                <div style={{ fontSize: 12, color: isHomeDarkMode ? "#95b2c8" : "#64839a" }}>
                   {filteredHomeProjectLibrary.length} shown
                 </div>
                 <div
@@ -19065,7 +19353,7 @@ export default function App() {
                     borderRadius: 999,
                     border: sharedStatusUi.border,
                     background: sharedStatusUi.background,
-                    color: "#fff",
+                    color: isHomeDarkMode ? "#f3f8fc" : "#173750",
                     fontWeight: 700,
                   }}
                 >
@@ -19077,9 +19365,9 @@ export default function App() {
                       fontSize: 11,
                       padding: "3px 7px",
                       borderRadius: 999,
-                      border: "1px solid rgba(255,214,102,0.55)",
-                      background: "rgba(164,130,32,0.24)",
-                      color: "#fff",
+                    border: isHomeDarkMode ? "1px solid rgba(191,158,73,0.34)" : "1px solid rgba(220,170,74,0.4)",
+                    background: isHomeDarkMode ? "rgba(92,74,20,0.6)" : "rgba(255,239,196,0.72)",
+                    color: "#7b5c14",
                       fontWeight: 700,
                     }}
                   >
@@ -19097,9 +19385,9 @@ export default function App() {
                   style={{
                     padding: "5px 8px",
                     borderRadius: 8,
-                    border: "1px solid rgba(255,255,255,0.22)",
-                    background: "rgba(255,255,255,0.06)",
-                    color: "#fff",
+                    border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.24)",
+                    background: isHomeDarkMode ? "rgba(20,38,52,0.9)" : "rgba(255,255,255,0.72)",
+                    color: isHomeDarkMode ? "#dcecff" : "#234761",
                     cursor:
                       sharedProjectLibrarySyncing ||
                       sharedAuthChecking ||
@@ -19130,9 +19418,9 @@ export default function App() {
                   style={{
                     padding: "5px 8px",
                     borderRadius: 8,
-                    border: "1px solid rgba(255,255,255,0.22)",
-                    background: "rgba(255,255,255,0.06)",
-                    color: "#fff",
+                    border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.24)",
+                    background: isHomeDarkMode ? "rgba(20,38,52,0.9)" : "rgba(255,255,255,0.72)",
+                    color: isHomeDarkMode ? "#dcecff" : "#234761",
                     cursor:
                       sharedProjectQueueSyncing ||
                       sharedProjectQueue.length === 0 ||
@@ -19181,12 +19469,22 @@ export default function App() {
                       padding: "8px 12px",
                       borderRadius: 10,
                       border: active
-                        ? "1px solid rgba(124,214,255,0.6)"
-                        : "1px solid rgba(255,255,255,0.16)",
+                        ? "1px solid rgba(87,150,189,0.42)"
+                        : "1px solid rgba(116,154,180,0.18)",
                       background: active
-                        ? "rgba(0,140,255,0.2)"
-                        : "rgba(255,255,255,0.05)",
-                      color: "#fff",
+                        ? isHomeDarkMode
+                          ? "rgba(33,73,102,0.92)"
+                          : "rgba(213,239,255,0.95)"
+                        : isHomeDarkMode
+                          ? "rgba(19,36,50,0.84)"
+                          : "rgba(255,255,255,0.64)",
+                      color: active
+                        ? isHomeDarkMode
+                          ? "#eef8ff"
+                          : "#163b57"
+                        : isHomeDarkMode
+                          ? "#9dbbd0"
+                          : "#4c6b83",
                       cursor: "pointer",
                       fontWeight: 700,
                       fontSize: 12,
@@ -19218,8 +19516,8 @@ export default function App() {
                   padding: "9px 11px",
                   borderRadius: 10,
                   border: "1px solid rgba(255,255,255,0.18)",
-                  background: "rgba(6,12,18,0.88)",
-                  color: "#fff",
+                  background: isHomeDarkMode ? "rgba(11,23,33,0.92)" : "rgba(247,251,255,0.96)",
+                  color: isHomeDarkMode ? "#edf6ff" : "#173750",
                 }}
               />
               <select
@@ -19230,8 +19528,8 @@ export default function App() {
                   padding: "9px 11px",
                   borderRadius: 10,
                   border: "1px solid rgba(255,255,255,0.18)",
-                  background: "rgba(6,12,18,0.88)",
-                  color: "#fff",
+                  background: isHomeDarkMode ? "rgba(11,23,33,0.92)" : "rgba(247,251,255,0.96)",
+                  color: isHomeDarkMode ? "#edf6ff" : "#173750",
                 }}
               >
                 <option value="all">All folders</option>
@@ -19253,8 +19551,8 @@ export default function App() {
                     padding: "9px 11px",
                     borderRadius: 10,
                     border: "1px solid rgba(255,255,255,0.18)",
-                    background: "rgba(6,12,18,0.88)",
-                    color: "#fff",
+                    background: isHomeDarkMode ? "rgba(11,23,33,0.92)" : "rgba(247,251,255,0.96)",
+                    color: isHomeDarkMode ? "#edf6ff" : "#173750",
                   }}
                 />
                 <button
@@ -19263,9 +19561,9 @@ export default function App() {
                   style={{
                     padding: "9px 11px",
                     borderRadius: 10,
-                    border: "1px solid rgba(255,255,255,0.22)",
-                    background: "rgba(255,255,255,0.06)",
-                    color: "#fff",
+                    border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.24)",
+                    background: isHomeDarkMode ? "rgba(20,38,52,0.9)" : "rgba(255,255,255,0.74)",
+                    color: isHomeDarkMode ? "#dcecff" : "#234761",
                     cursor: "pointer",
                     fontWeight: 700,
                     fontSize: 12,
@@ -19284,13 +19582,13 @@ export default function App() {
                   borderRadius: 12,
                   padding: 12,
                   marginBottom: 10,
-                  background: "rgba(255,255,255,0.04)",
+                  background: isHomeDarkMode ? "rgba(17,32,45,0.96)" : "rgba(244,249,253,0.95)",
                 }}
               >
-                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: isHomeDarkMode ? "#f0f7fc" : "#173750" }}>
                   Log in to access shared files
                 </div>
-                <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: isHomeDarkMode ? "#94b0c5" : "#68839a", marginBottom: 8 }}>
                   Shared project library is locked until authenticated. Each team member can use their own login.
                 </div>
                 <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr auto" }}>
@@ -19305,8 +19603,8 @@ export default function App() {
                       padding: "8px 10px",
                       borderRadius: 10,
                       border: "1px solid rgba(255,255,255,0.18)",
-                      background: "rgba(6,12,18,0.9)",
-                      color: "#fff",
+                      background: isHomeDarkMode ? "rgba(10,21,31,0.96)" : "#fff",
+                      color: isHomeDarkMode ? "#edf6ff" : "#173750",
                     }}
                   />
                   <input
@@ -19320,8 +19618,8 @@ export default function App() {
                       padding: "8px 10px",
                       borderRadius: 10,
                       border: "1px solid rgba(255,255,255,0.18)",
-                      background: "rgba(6,12,18,0.9)",
-                      color: "#fff",
+                      background: isHomeDarkMode ? "rgba(10,21,31,0.96)" : "#fff",
+                      color: isHomeDarkMode ? "#edf6ff" : "#173750",
                     }}
                   />
                   <button
@@ -19330,9 +19628,9 @@ export default function App() {
                     style={{
                       padding: "8px 10px",
                       borderRadius: 10,
-                      border: "1px solid rgba(124,214,255,0.55)",
-                      background: "rgba(0,140,255,0.2)",
-                      color: "#fff",
+                      border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.2)" : "1px solid rgba(87,150,189,0.34)",
+                      background: isHomeDarkMode ? "linear-gradient(120deg, rgba(36,79,108,0.92), rgba(32,67,98,0.9))" : "linear-gradient(120deg, #dff1ff, #edf8ff)",
+                      color: isHomeDarkMode ? "#eef8ff" : "#173b56",
                       cursor:
                         sharedLoginSubmitting || sharedAuthChecking ? "not-allowed" : "pointer",
                       opacity: sharedLoginSubmitting || sharedAuthChecking ? 0.65 : 1,
@@ -19350,14 +19648,14 @@ export default function App() {
                   borderRadius: 12,
                   padding: "10px 12px",
                   marginBottom: 10,
-                  background: "rgba(28,162,92,0.14)",
+                  background: "rgba(226,246,233,0.9)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
                   gap: 10,
                 }}
               >
-                <div style={{ fontSize: 12, opacity: 0.88 }}>
+                <div style={{ fontSize: 12, color: "#285d42" }}>
                   Signed in as <b>{sharedAuth?.username || "Shared user"}</b>
                   {sharedAuth?.expiresAt ? (
                     <span style={{ opacity: 0.8 }}>
@@ -19372,9 +19670,9 @@ export default function App() {
                   style={{
                     padding: "7px 10px",
                     borderRadius: 10,
-                    border: "1px solid rgba(255,255,255,0.2)",
-                    background: "rgba(255,255,255,0.08)",
-                    color: "#fff",
+                    border: "1px solid rgba(88,144,110,0.18)",
+                    background: "rgba(255,255,255,0.68)",
+                    color: "#285d42",
                     cursor: "pointer",
                     fontWeight: 700,
                     fontSize: 12,
@@ -19391,7 +19689,7 @@ export default function App() {
               </div>
             ) : pinnedHomeProjects.length > 0 ? (
               <div style={{ display: "grid", gap: 10, marginBottom: 12 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, opacity: 0.9 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#41657f" }}>
                   Pinned Projects
                 </div>
                 <div
@@ -19405,10 +19703,17 @@ export default function App() {
                     <div
                       key={`pinned-${entry.id}`}
                       style={{
-                        border: "1px solid rgba(124,214,255,0.20)",
-                        borderRadius: 14,
-                        padding: "12px 12px 10px",
-                        background: "rgba(255,255,255,0.04)",
+                        border: isHomeDarkMode
+                          ? "1px solid rgba(104,164,200,0.16)"
+                          : "1px solid rgba(124,214,255,0.20)",
+                        borderRadius: 16,
+                        padding: "14px 14px 12px",
+                        background: isHomeDarkMode
+                          ? "linear-gradient(160deg, rgba(16,31,44,0.96), rgba(18,35,48,0.94))"
+                          : "linear-gradient(160deg, rgba(255,255,255,0.88), rgba(237,247,253,0.9))",
+                        boxShadow: isHomeDarkMode
+                          ? "0 12px 26px rgba(0,0,0,0.26)"
+                          : "0 12px 26px rgba(108,154,186,0.08)",
                       }}
                     >
                       <div
@@ -19422,7 +19727,8 @@ export default function App() {
                         <div style={{ minWidth: 0 }}>
                           <div
                             style={{
-                              fontWeight: 800,
+                              fontWeight: 900,
+                              color: isHomeDarkMode ? "#eef8ff" : "#173750",
                               overflow: "hidden",
                               textOverflow: "ellipsis",
                               whiteSpace: "nowrap",
@@ -19430,7 +19736,7 @@ export default function App() {
                           >
                             {entry.projectName || "Untitled Project"}
                           </div>
-                          <div style={{ marginTop: 4, fontSize: 12, opacity: 0.72 }}>
+                          <div style={{ marginTop: 4, fontSize: 12, color: isHomeDarkMode ? "#8eafc7" : "#6a869b" }}>
                             {String(entry.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME}
                           </div>
                         </div>
@@ -19440,9 +19746,9 @@ export default function App() {
                           style={{
                             padding: "5px 8px",
                             borderRadius: 8,
-                            border: "1px solid rgba(255,255,255,0.18)",
-                            background: "rgba(255,255,255,0.06)",
-                            color: "#fff",
+                            border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.24)",
+                            background: isHomeDarkMode ? "rgba(18,36,49,0.88)" : "rgba(255,255,255,0.72)",
+                            color: isHomeDarkMode ? "#dcecff" : "#234761",
                             cursor: "pointer",
                             fontWeight: 700,
                             fontSize: 11,
@@ -19456,7 +19762,7 @@ export default function App() {
                         style={{
                           marginTop: 8,
                           fontSize: 12,
-                          opacity: 0.74,
+                          color: isHomeDarkMode ? "#93afc5" : "#62819a",
                           display: "flex",
                           flexWrap: "wrap",
                           gap: 6,
@@ -19478,9 +19784,9 @@ export default function App() {
                           marginTop: 10,
                           padding: "8px 10px",
                           borderRadius: 10,
-                          border: "1px solid rgba(124,214,255,0.55)",
-                          background: "rgba(0,140,255,0.2)",
-                          color: "#fff",
+                          border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.2)" : "1px solid rgba(87,150,189,0.34)",
+                          background: isHomeDarkMode ? "linear-gradient(120deg, rgba(34,77,106,0.92), rgba(30,63,96,0.9))" : "linear-gradient(120deg, #dff1ff, #edf8ff)",
+                          color: isHomeDarkMode ? "#eef8ff" : "#173b56",
                           cursor: "pointer",
                           fontWeight: 700,
                         }}
@@ -19502,7 +19808,7 @@ export default function App() {
                     } projects in this view yet.`}
               </div>
             ) : (
-              <div style={{ display: "grid", gap: 8 }}>
+              <div style={{ display: "grid", gap: 10 }}>
                 {groupedHomeProjectLibrary.map(([folderName, entries]) => {
                   const collapseKey = `${homeProjectTab}:${folderName}`;
                   const collapsed = Boolean(homeCollapsedFolders?.[collapseKey]);
@@ -19510,10 +19816,12 @@ export default function App() {
                     <div
                       key={folderName}
                       style={{
-                        border: "1px solid rgba(255,255,255,0.10)",
-                        borderRadius: 14,
-                        padding: "10px 10px 8px",
-                        background: "rgba(255,255,255,0.03)",
+                        border: isHomeDarkMode
+                          ? "1px solid rgba(104,164,200,0.14)"
+                          : "1px solid rgba(121,170,196,0.14)",
+                        borderRadius: 18,
+                        padding: "12px 12px 10px",
+                        background: isHomeDarkMode ? "rgba(16,31,43,0.92)" : "rgba(248,252,255,0.72)",
                       }}
                     >
                       <div
@@ -19537,7 +19845,7 @@ export default function App() {
                             padding: 0,
                             background: "transparent",
                             border: "none",
-                            color: "#fff",
+                            color: isHomeDarkMode ? "#edf6ff" : "#183852",
                             cursor: "pointer",
                             textAlign: "left",
                           }}
@@ -19550,16 +19858,32 @@ export default function App() {
                             minWidth: 0,
                           }}
                         >
-                          <span style={{ fontSize: 16, lineHeight: 1 }}>
+                          <span
+                            style={{
+                              width: 32,
+                              height: 32,
+                              borderRadius: 10,
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              background: "linear-gradient(160deg, rgba(255,244,200,0.95), rgba(242,215,122,0.9))",
+                              border: "1px solid rgba(186,149,55,0.24)",
+                              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.55)",
+                              flexShrink: 0,
+                              fontSize: 18,
+                              lineHeight: 1,
+                            }}
+                          >
                             {collapsed ? "📁" : "📂"}
                           </span>
-                          <span style={{ fontSize: 12, opacity: 0.72, lineHeight: 1 }}>
+                          <span style={{ fontSize: 13, lineHeight: 1, color: isHomeDarkMode ? "#8faec8" : "#6f8aa1" }}>
                             {collapsed ? "▸" : "▾"}
                           </span>
                           <span
                             style={{
-                              fontSize: 13,
-                              fontWeight: 800,
+                              fontSize: 15,
+                              fontWeight: 900,
+                              color: isHomeDarkMode ? "#f2f8fc" : "#173750",
                               overflow: "hidden",
                               textOverflow: "ellipsis",
                               whiteSpace: "nowrap",
@@ -19568,7 +19892,7 @@ export default function App() {
                             {folderName}
                           </span>
                           </div>
-                          <div style={{ fontSize: 11, opacity: 0.7, flexShrink: 0 }}>
+                          <div style={{ fontSize: 11, color: isHomeDarkMode ? "#8eaec6" : "#6b879b", flexShrink: 0 }}>
                             {entries.length} project{entries.length === 1 ? "" : "s"}
                           </div>
                         </button>
@@ -19580,9 +19904,9 @@ export default function App() {
                               style={{
                                 padding: "6px 8px",
                                 borderRadius: 8,
-                                border: "1px solid rgba(255,255,255,0.16)",
-                                background: "rgba(255,255,255,0.06)",
-                                color: "#fff",
+                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.22)",
+                                background: isHomeDarkMode ? "rgba(18,36,49,0.88)" : "rgba(255,255,255,0.74)",
+                                color: isHomeDarkMode ? "#dcecff" : "#234761",
                                 cursor: "pointer",
                                 fontSize: 11,
                                 fontWeight: 700,
@@ -19598,12 +19922,16 @@ export default function App() {
                               style={{
                                 padding: "6px 8px",
                                 borderRadius: 8,
-                                border: "1px solid rgba(255,255,255,0.16)",
+                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.22)",
                                 background:
                                   entries.length > 0
-                                    ? "rgba(255,255,255,0.03)"
-                                    : "rgba(255,255,255,0.06)",
-                                color: "#fff",
+                                    ? isHomeDarkMode
+                                      ? "rgba(28,43,55,0.72)"
+                                      : "rgba(255,255,255,0.45)"
+                                    : isHomeDarkMode
+                                      ? "rgba(18,36,49,0.88)"
+                                      : "rgba(255,255,255,0.74)",
+                                color: isHomeDarkMode ? "#dcecff" : "#234761",
                                 cursor: entries.length > 0 ? "not-allowed" : "pointer",
                                 fontSize: 11,
                                 fontWeight: 700,
@@ -19630,9 +19958,9 @@ export default function App() {
                                 border: "1px dashed rgba(255,255,255,0.16)",
                                 borderRadius: 12,
                                 padding: "12px 14px",
-                                background: "rgba(255,255,255,0.02)",
+                                background: isHomeDarkMode ? "rgba(15,29,41,0.9)" : "rgba(255,255,255,0.6)",
                                 fontSize: 12,
-                                opacity: 0.74,
+                                color: isHomeDarkMode ? "#8daec7" : "#67849b",
                               }}
                             >
                               No projects in this folder yet.
@@ -19644,18 +19972,26 @@ export default function App() {
                                 style={{
                                   display: "grid",
                                   gridTemplateColumns: "1fr auto auto auto",
-                                  gap: 8,
+                                  gap: 10,
                                   alignItems: "center",
-                                  border: "1px solid rgba(255,255,255,0.12)",
-                                  borderRadius: 12,
-                                  padding: "10px 12px",
-                                  background: "rgba(255,255,255,0.03)",
+                                  border: isHomeDarkMode
+                                    ? "1px solid rgba(104,164,200,0.14)"
+                                    : "1px solid rgba(121,170,196,0.16)",
+                                  borderRadius: 16,
+                                  padding: "12px 14px",
+                                  background: isHomeDarkMode
+                                    ? "linear-gradient(160deg, rgba(14,28,40,0.96), rgba(17,33,47,0.94))"
+                                    : "linear-gradient(160deg, rgba(255,255,255,0.9), rgba(241,248,253,0.92))",
+                                  boxShadow: isHomeDarkMode
+                                    ? "0 10px 22px rgba(0,0,0,0.22)"
+                                    : "0 10px 22px rgba(111,157,186,0.08)",
                                 }}
                               >
                             <div style={{ minWidth: 0 }}>
                               <div
                                 style={{
-                                  fontWeight: 700,
+                                  fontWeight: 900,
+                                  color: isHomeDarkMode ? "#f2f8fc" : "#173750",
                                   overflow: "hidden",
                                   textOverflow: "ellipsis",
                                   whiteSpace: "nowrap",
@@ -19666,7 +20002,7 @@ export default function App() {
                               <div
                                 style={{
                                   fontSize: 12,
-                                  opacity: 0.72,
+                                  color: isHomeDarkMode ? "#93afc5" : "#64829b",
                                   display: "flex",
                                   flexWrap: "wrap",
                                   gap: 6,
@@ -19690,7 +20026,7 @@ export default function App() {
                                 </span>
                               </div>
                               <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
-                                <span style={{ fontSize: 11, opacity: 0.68 }}>Folder</span>
+                                <span style={{ fontSize: 11, color: isHomeDarkMode ? "#90aec7" : "#7892a5" }}>Folder</span>
                                 <select
                                   value={String(entry.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME}
                                   onChange={(event) =>
@@ -19700,9 +20036,9 @@ export default function App() {
                                     minWidth: 150,
                                     padding: "6px 9px",
                                     borderRadius: 9,
-                                    border: "1px solid rgba(255,255,255,0.16)",
-                                    background: "rgba(6,12,18,0.88)",
-                                    color: "#fff",
+                                    border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.16)" : "1px solid rgba(116,154,180,0.18)",
+                                    background: isHomeDarkMode ? "rgba(10,21,31,0.96)" : "#fff",
+                                    color: isHomeDarkMode ? "#edf6ff" : "#173750",
                                     fontSize: 12,
                                   }}
                                 >
@@ -19720,9 +20056,9 @@ export default function App() {
                               style={{
                                 padding: "8px 10px",
                                 borderRadius: 10,
-                                border: "1px solid rgba(124,214,255,0.55)",
-                                background: "rgba(0,140,255,0.2)",
-                                color: "#fff",
+                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.2)" : "1px solid rgba(87,150,189,0.34)",
+                                background: isHomeDarkMode ? "linear-gradient(120deg, rgba(34,77,106,0.92), rgba(30,63,96,0.9))" : "linear-gradient(120deg, #dff1ff, #edf8ff)",
+                                color: isHomeDarkMode ? "#eef8ff" : "#173b56",
                                 cursor: "pointer",
                                 fontWeight: 700,
                               }}
@@ -19735,11 +20071,15 @@ export default function App() {
                               style={{
                                 padding: "8px 10px",
                                 borderRadius: 10,
-                                border: "1px solid rgba(255,255,255,0.22)",
+                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.22)",
                                 background: pinnedProjectIdSet.has(String(entry.id || "").trim())
-                                  ? "rgba(255,214,102,0.16)"
-                                  : "rgba(255,255,255,0.06)",
-                                color: "#fff",
+                                  ? isHomeDarkMode
+                                    ? "rgba(94,76,22,0.68)"
+                                    : "rgba(255,232,180,0.82)"
+                                  : isHomeDarkMode
+                                    ? "rgba(18,36,49,0.88)"
+                                    : "rgba(255,255,255,0.72)",
+                                color: isHomeDarkMode ? "#e7f2fb" : "#234761",
                                 cursor: "pointer",
                                 fontWeight: 700,
                               }}
@@ -19752,9 +20092,9 @@ export default function App() {
                               style={{
                                 padding: "8px 10px",
                                 borderRadius: 10,
-                                border: "1px solid rgba(255,255,255,0.22)",
-                                background: "rgba(255,255,255,0.06)",
-                                color: "#fff",
+                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.22)",
+                                background: isHomeDarkMode ? "rgba(18,36,49,0.88)" : "rgba(255,255,255,0.72)",
+                                color: isHomeDarkMode ? "#dcecff" : "#234761",
                                 cursor: "pointer",
                                 fontWeight: 700,
                               }}
@@ -19783,9 +20123,9 @@ export default function App() {
           >
             <div
               style={{
-                borderRadius: 20,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(8,16,26,0.75)",
+                borderRadius: 22,
+                border: "1px solid rgba(121,170,196,0.14)",
+                background: "rgba(255,255,255,0.58)",
                 padding: "14px 14px 12px",
               }}
             >
@@ -19798,16 +20138,21 @@ export default function App() {
                   gap: 10,
                 }}
               >
-                <div style={{ fontSize: 16, fontWeight: 800 }}>Admin: Security & Legal</div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.2, textTransform: "uppercase", color: "#708ba0", marginBottom: 3 }}>
+                    Admin
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: 900, color: "#173750" }}>Security & Legal</div>
+                </div>
                 <button
                   type="button"
                   onClick={() => setShowSecurityAdminCard((prev) => !prev)}
                   style={{
                     padding: "6px 9px",
                     borderRadius: 9,
-                    border: "1px solid rgba(255,255,255,0.22)",
-                    background: "rgba(255,255,255,0.06)",
-                    color: "#fff",
+                    border: "1px solid rgba(116,154,180,0.22)",
+                    background: "rgba(255,255,255,0.74)",
+                    color: "#234761",
                     cursor: "pointer",
                     fontWeight: 700,
                     fontSize: 11,
@@ -19818,7 +20163,7 @@ export default function App() {
               </div>
               {showSecurityAdminCard ? (
                 <>
-                  <div style={{ fontSize: 12, opacity: 0.8, lineHeight: 1.45 }}>
+                  <div style={{ fontSize: 12, color: "#5f7f96", lineHeight: 1.45 }}>
                     Access requires login. Project changes are audit-logged (user, action, time, device/IP metadata).
                   </div>
                   <button
@@ -19828,9 +20173,9 @@ export default function App() {
                       marginTop: 10,
                       padding: "6px 9px",
                       borderRadius: 9,
-                      border: "1px solid rgba(255,255,255,0.22)",
-                      background: "rgba(255,255,255,0.06)",
-                      color: "#fff",
+                      border: "1px solid rgba(116,154,180,0.22)",
+                      background: "rgba(255,255,255,0.74)",
+                      color: "#234761",
                       cursor: "pointer",
                       fontWeight: 700,
                       fontSize: 11,
@@ -19840,7 +20185,7 @@ export default function App() {
                   </button>
                 </>
               ) : (
-                <div style={{ fontSize: 12, opacity: 0.68, lineHeight: 1.45 }}>
+                <div style={{ fontSize: 12, color: "#7b95a8", lineHeight: 1.45 }}>
                   Hidden by default so the project workspace stays front and center.
                 </div>
               )}
@@ -19849,12 +20194,12 @@ export default function App() {
                   style={{
                     marginTop: 10,
                     borderRadius: 12,
-                    border: "1px solid rgba(255,255,255,0.12)",
-                    background: "rgba(255,255,255,0.04)",
+                    border: "1px solid rgba(121,170,196,0.14)",
+                    background: "rgba(255,255,255,0.7)",
                     padding: "10px 11px",
                     fontSize: 12,
                     lineHeight: 1.48,
-                    color: "rgba(255,255,255,0.9)",
+                    color: "#48667f",
                   }}
                 >
                   <div style={{ fontWeight: 800, marginBottom: 4 }}>Terms of Use</div>
@@ -19870,9 +20215,9 @@ export default function App() {
 
             <div
               style={{
-                borderRadius: 20,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(8,16,26,0.75)",
+                borderRadius: 22,
+                border: "1px solid rgba(121,170,196,0.14)",
+                background: "rgba(255,255,255,0.58)",
                 padding: "14px 14px 12px",
               }}
             >
@@ -19885,7 +20230,12 @@ export default function App() {
                   gap: 8,
                 }}
               >
-                <div style={{ fontSize: 16, fontWeight: 800 }}>Admin: Access Audit Log</div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.2, textTransform: "uppercase", color: "#708ba0", marginBottom: 3 }}>
+                    Admin
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: 900, color: "#173750" }}>Access Audit Log</div>
+                </div>
                 <button
                   type="button"
                   onClick={() => {
@@ -19897,9 +20247,9 @@ export default function App() {
                   style={{
                     padding: "6px 9px",
                     borderRadius: 9,
-                    border: "1px solid rgba(255,255,255,0.22)",
-                    background: "rgba(255,255,255,0.06)",
-                    color: "#fff",
+                    border: "1px solid rgba(116,154,180,0.22)",
+                    background: "rgba(255,255,255,0.74)",
+                    color: "#234761",
                     cursor: "pointer",
                     opacity: 1,
                     fontWeight: 700,
@@ -19910,15 +20260,15 @@ export default function App() {
                 </button>
               </div>
               {!showAuditAdminCard ? (
-                <div style={{ fontSize: 12, opacity: 0.68 }}>
+                <div style={{ fontSize: 12, color: "#7b95a8" }}>
                   Hidden by default so audit activity does not crowd the project list.
                 </div>
               ) : !sharedAccessAuthenticated ? (
-                <div style={{ fontSize: 12, opacity: 0.78 }}>
+                <div style={{ fontSize: 12, color: "#62809a" }}>
                   Sign in above to view audit events.
                 </div>
               ) : securityAuditEvents.length === 0 ? (
-                <div style={{ fontSize: 12, opacity: 0.78 }}>
+                <div style={{ fontSize: 12, color: "#62809a" }}>
                   No audit events yet.
                 </div>
               ) : (
@@ -19931,9 +20281,9 @@ export default function App() {
                       marginBottom: 10,
                       padding: "6px 9px",
                       borderRadius: 9,
-                      border: "1px solid rgba(255,255,255,0.22)",
-                      background: "rgba(255,255,255,0.06)",
-                      color: "#fff",
+                      border: "1px solid rgba(116,154,180,0.22)",
+                      background: "rgba(255,255,255,0.74)",
+                      color: "#234761",
                       cursor:
                         !sharedAccessAuthenticated || sharedAuthChecking || securityAuditSyncing
                           ? "not-allowed"
@@ -19952,9 +20302,9 @@ export default function App() {
                     style={{
                       maxHeight: 250,
                       overflow: "auto",
-                      border: "1px solid rgba(255,255,255,0.1)",
+                      border: "1px solid rgba(121,170,196,0.14)",
                       borderRadius: 10,
-                      background: "rgba(3,8,12,0.72)",
+                      background: "rgba(246,250,253,0.88)",
                     }}
                   >
                     {securityAuditEvents.slice(0, 80).map((event) => (
@@ -20001,6 +20351,8 @@ export default function App() {
                   </div>
                 </>
               )}
+            </div>
+          </div>
             </div>
           </div>
         </div>
@@ -23824,6 +24176,24 @@ export default function App() {
             Scanned polygons: {qcSummary.polygons.toLocaleString()}
           </div>
 
+          {qcSummary.overlapScanDeferred ? (
+            <div
+              style={{
+                fontSize: 12,
+                lineHeight: 1.45,
+                marginBottom: 8,
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,214,102,0.28)",
+                background: "rgba(255,214,102,0.10)",
+                color: "#ffe0a0",
+              }}
+            >
+              Overlap scanning is paused during live editing once a project passes{" "}
+              {qcSummary.overlapScanThreshold.toLocaleString()} polygons so large jobs stay fast.
+            </div>
+          ) : null}
+
           <div
             style={{
               display: "grid",
@@ -23835,7 +24205,9 @@ export default function App() {
           >
             <span style={{ opacity: 0.85 }}>Overlaps</span>
             <span style={{ color: qcSummary.overlaps > 0 ? "#ffb066" : "rgba(255,255,255,0.75)" }}>
-              {qcSummary.overlaps.toLocaleString()} ({qcSummary.overlapSqft.toLocaleString()} sq ft)
+              {qcSummary.overlapScanDeferred
+                ? "Run scan"
+                : `${qcSummary.overlaps.toLocaleString()} (${qcSummary.overlapSqft.toLocaleString()} sq ft)`}
             </span>
             <span style={{ opacity: 0.85 }}>Outside boundary</span>
             <span style={{ color: qcSummary.outside > 0 ? "#ffb066" : "rgba(255,255,255,0.75)" }}>
@@ -23851,20 +24223,42 @@ export default function App() {
             </span>
           </div>
 
+          {qcSummary.overlapScanDeferred ? (
+            <button
+              onClick={() => setQcOverlapScanNonce((value) => value + 1)}
+              style={{
+                marginTop: 8,
+                width: "100%",
+                padding: "8px 10px",
+                borderRadius: 10,
+                cursor: "pointer",
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: "rgba(255,255,255,0.06)",
+                color: "#fff",
+                fontWeight: 700,
+              }}
+            >
+              Run Overlap Scan Now
+            </button>
+          ) : null}
+
           <button
             onClick={resolveOverlapsPlowablePriority}
-            disabled={qcSummary.overlaps <= 0}
+            disabled={qcSummary.overlapScanDeferred || qcSummary.overlaps <= 0}
             style={{
               marginTop: 8,
               width: "100%",
               padding: "8px 10px",
               borderRadius: 10,
-              cursor: qcSummary.overlaps > 0 ? "pointer" : "not-allowed",
+              cursor:
+                !qcSummary.overlapScanDeferred && qcSummary.overlaps > 0
+                  ? "pointer"
+                  : "not-allowed",
               border: "1px solid rgba(255,255,255,0.12)",
               background: "rgba(255,255,255,0.06)",
               color: "#fff",
               fontWeight: 700,
-              opacity: qcSummary.overlaps > 0 ? 1 : 0.55,
+              opacity: !qcSummary.overlapScanDeferred && qcSummary.overlaps > 0 ? 1 : 0.55,
             }}
           >
             Fix Overlaps (Plowable Priority)
