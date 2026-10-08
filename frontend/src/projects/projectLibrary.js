@@ -391,6 +391,90 @@ export function buildProjectLibraryEntryFromPayload(
   };
 }
 
+export function buildProjectLibraryEntryFromRecord(record) {
+  const payload = record?.payload;
+  if (!isValidProjectPayload(payload)) return null;
+  const projectName =
+    String(record?.project_name || record?.projectName || payload?.projectName || "").trim() ||
+    "Untitled Project";
+  const savedAt = String(
+    record?.saved_at || record?.savedAt || payload?.savedAt || new Date().toISOString()
+  ).trim();
+  return {
+    id: String(record?.id || buildProjectLibraryId(projectName)).trim(),
+    projectName,
+    savedAt,
+    savedBy: String(record?.saved_by || record?.savedBy || "").trim(),
+    lastEditedAt: String(
+      record?.last_edited_at || record?.lastEditedAt || savedAt
+    ).trim(),
+    revision: Math.max(0, Number(record?.revision) || 0),
+    storageScope: "local",
+    workflowMode:
+      String(
+        record?.workflow_mode || record?.workflowMode || payload?.workflowMode || ""
+      ).trim().toLowerCase() === WORKFLOW_MODE_PDF
+        ? WORKFLOW_MODE_PDF
+        : WORKFLOW_MODE_LOCATION,
+    folderName:
+      String(
+        record?.folder_name || record?.folderName || payload?.folderName || ""
+      ).trim() || DEFAULT_PROJECT_FOLDER_NAME,
+    polygonCount: Number.isFinite(Number(record?.polygon_count))
+      ? Math.max(0, Number(record.polygon_count))
+      : countProjectPayloadPolygons(payload),
+    hasBoundary:
+      typeof record?.has_boundary === "boolean"
+        ? record.has_boundary
+        : typeof record?.hasBoundary === "boolean"
+        ? record.hasBoundary
+        : !!payload?.boundary,
+    payload,
+  };
+}
+
+export function mergeLocalProjectLibraryRecords(prevEntries, records) {
+  const previous = Array.isArray(prevEntries) ? prevEntries : [];
+  const entriesById = new Map(
+    previous
+      .map((entry) => [String(entry?.id || "").trim(), entry])
+      .filter(([id]) => !!id)
+  );
+
+  for (const record of Array.isArray(records) ? records : []) {
+    const candidate = buildProjectLibraryEntryFromRecord(record);
+    if (!candidate?.id) continue;
+    const existing = entriesById.get(candidate.id);
+    if (!existing) {
+      entriesById.set(candidate.id, candidate);
+      continue;
+    }
+
+    const existingTimestamp = Date.parse(
+      String(existing?.lastEditedAt || existing?.savedAt || "")
+    );
+    const candidateTimestamp = Date.parse(
+      String(candidate.lastEditedAt || candidate.savedAt || "")
+    );
+    const candidateIsNewer =
+      !Number.isFinite(existingTimestamp) ||
+      (Number.isFinite(candidateTimestamp) && candidateTimestamp > existingTimestamp);
+    if (!candidateIsNewer) continue;
+
+    const existingFolder = String(existing?.folderName || "").trim();
+    if (
+      candidate.folderName === DEFAULT_PROJECT_FOLDER_NAME &&
+      existingFolder &&
+      existingFolder !== DEFAULT_PROJECT_FOLDER_NAME
+    ) {
+      candidate.folderName = existingFolder;
+    }
+    entriesById.set(candidate.id, candidate);
+  }
+
+  return [...entriesById.values()];
+}
+
 export function upsertProjectLibraryEntries(
   prevEntries,
   payload,

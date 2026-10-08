@@ -78,6 +78,7 @@ import {
   buildProjectPayloadSignature,
   countProjectPayloadPolygons,
   isAuthError,
+  mergeLocalProjectLibraryRecords,
   mergeSharedProjectLibrarySummaries,
   readStoredHomeAppearance,
   readStoredPinnedProjectIds,
@@ -4653,6 +4654,24 @@ export default function App() {
       /* intentionally ignore localStorage errors */
     }
   }, [projectLibrary]);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+    let canceled = false;
+    listLocalMigrationProjects(SHARED_PROJECT_LIBRARY_FETCH_LIMIT)
+      .then((records) => {
+        if (canceled) return;
+        setProjectLibrary((previous) =>
+          mergeLocalProjectLibraryRecords(previous, records)
+        );
+      })
+      .catch(() => {
+        // The local backend may still be starting; the upload action retries this source.
+      });
+    return () => {
+      canceled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -13373,49 +13392,10 @@ export default function App() {
         const localBackendProjects = await listLocalMigrationProjects(
           SHARED_PROJECT_LIBRARY_FETCH_LIMIT
         );
-        const entriesById = new Map(
-          localEntries
-            .map((entry) => [String(entry?.id || "").trim(), entry])
-            .filter(([id]) => !!id)
-        );
-        for (const record of Array.isArray(localBackendProjects) ? localBackendProjects : []) {
-          const id = String(record?.id || "").trim();
-          const payload = record?.payload;
-          if (!id || !isValidProjectPayload(payload)) continue;
-          const candidate = {
-            id,
-            projectName:
-              String(record?.project_name || payload?.projectName || "").trim() ||
-              "Untitled Project",
-            savedAt: String(record?.saved_at || payload?.savedAt || "").trim(),
-            lastEditedAt: String(
-              record?.last_edited_at || record?.saved_at || payload?.savedAt || ""
-            ).trim(),
-            workflowMode:
-              String(payload?.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
-                ? WORKFLOW_MODE_PDF
-                : WORKFLOW_MODE_LOCATION,
-            folderName:
-              String(payload?.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME,
-            storageScope: "local",
-            payload,
-          };
-          const existing = entriesById.get(id);
-          const existingTimestamp = Date.parse(
-            String(existing?.lastEditedAt || existing?.savedAt || "")
-          );
-          const candidateTimestamp = Date.parse(
-            String(candidate.lastEditedAt || candidate.savedAt || "")
-          );
-          if (
-            !existing ||
-            !Number.isFinite(existingTimestamp) ||
-            (Number.isFinite(candidateTimestamp) && candidateTimestamp > existingTimestamp)
-          ) {
-            entriesById.set(id, candidate);
-          }
-        }
-        localEntries = [...entriesById.values()];
+        localEntries = mergeLocalProjectLibraryRecords(
+          localEntries,
+          localBackendProjects
+        ).filter((entry) => isValidProjectPayload(entry?.payload));
       } catch (error) {
         pushToast(
           `Could not read the old local project database: ${error?.message || "local backend unavailable"}.`,
