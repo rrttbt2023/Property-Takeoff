@@ -1,20 +1,28 @@
 const RAW_API_BASE = String(import.meta.env.VITE_API_BASE_URL || "").trim();
 const API_BASE_URL = RAW_API_BASE.replace(/\/+$/, "");
+const RAW_SHARED_API_BASE = String(
+  import.meta.env.VITE_SHARED_API_BASE_URL ||
+    "https://property-takeoff.onrender.com"
+).trim();
+const SHARED_API_BASE_URL = RAW_SHARED_API_BASE.replace(/\/+$/, "");
 let sharedAuthToken = "";
 
 export function setSharedAuthToken(token) {
   sharedAuthToken = String(token || "").trim();
 }
 
-function buildApiCandidates(path) {
+function buildApiCandidates(
+  path,
+  { baseUrl = API_BASE_URL, includeRelative = true, includeLocalFallbacks = true } = {}
+) {
   const candidates = [];
   const normalizedPath = String(path || "");
-  if (API_BASE_URL) {
-    candidates.push(`${API_BASE_URL}${normalizedPath}`);
+  if (baseUrl) {
+    candidates.push(`${baseUrl}${normalizedPath}`);
   }
-  candidates.push(normalizedPath);
+  if (includeRelative) candidates.push(normalizedPath);
 
-  if (typeof window !== "undefined") {
+  if (includeLocalFallbacks && typeof window !== "undefined") {
     const protocol = window.location.protocol === "https:" ? "https:" : "http:";
     const host = String(window.location.hostname || "").trim();
     if (host) {
@@ -62,8 +70,8 @@ async function readErrorPayload(response) {
   }
 }
 
-async function request(path, options = {}) {
-  const candidates = buildApiCandidates(path);
+async function request(path, options = {}, candidateOptions = undefined) {
+  const candidates = buildApiCandidates(path, candidateOptions);
   let networkError = null;
   for (const url of candidates) {
     try {
@@ -104,6 +112,14 @@ async function request(path, options = {}) {
     throw networkError;
   }
   throw new Error("Request failed");
+}
+
+function sharedRequest(path, options = {}) {
+  return request(path, options, {
+    baseUrl: SHARED_API_BASE_URL,
+    includeRelative: false,
+    includeLocalFallbacks: false,
+  });
 }
 
 export function getMeasurementHistory(limit = 20) {
@@ -218,7 +234,7 @@ export function saveSegmentationCorrection({ imageBlob, maskBlob, metadata }) {
 }
 
 export function listSharedProjects(limit = 100) {
-  return request(`/api/projects?limit=${encodeURIComponent(limit)}`, {
+  return sharedRequest(`/api/projects?limit=${encodeURIComponent(limit)}`, {
     headers: sharedAuthToken
       ? { Authorization: `Bearer ${sharedAuthToken}` }
       : {},
@@ -226,7 +242,7 @@ export function listSharedProjects(limit = 100) {
 }
 
 export function getSharedProject(projectId) {
-  return request(`/api/projects/${encodeURIComponent(projectId)}`, {
+  return sharedRequest(`/api/projects/${encodeURIComponent(projectId)}`, {
     headers: sharedAuthToken
       ? { Authorization: `Bearer ${sharedAuthToken}` }
       : {},
@@ -244,7 +260,7 @@ export function saveSharedProject({
   forceOverwrite = false,
   payload,
 }) {
-  return request(`/api/projects/${encodeURIComponent(id)}`, {
+  return sharedRequest(`/api/projects/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -271,7 +287,7 @@ export function saveSharedProject({
 }
 
 export function listSharedProjectVersions(projectId, limit = 100) {
-  return request(
+  return sharedRequest(
     `/api/projects/${encodeURIComponent(projectId)}/versions?limit=${encodeURIComponent(limit)}`,
     {
       headers: sharedAuthToken
@@ -282,7 +298,7 @@ export function listSharedProjectVersions(projectId, limit = 100) {
 }
 
 export function getSharedProjectVersion(projectId, revision) {
-  return request(
+  return sharedRequest(
     `/api/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(revision)}`,
     {
       headers: sharedAuthToken
@@ -293,7 +309,7 @@ export function getSharedProjectVersion(projectId, revision) {
 }
 
 export function deleteSharedProject(projectId) {
-  return request(`/api/projects/${encodeURIComponent(projectId)}`, {
+  return sharedRequest(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
     headers: sharedAuthToken
       ? { Authorization: `Bearer ${sharedAuthToken}` }
@@ -302,7 +318,7 @@ export function deleteSharedProject(projectId) {
 }
 
 export function loginSharedAccess({ username, password }) {
-  return request("/api/auth/login", {
+  return sharedRequest("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -313,7 +329,7 @@ export function loginSharedAccess({ username, password }) {
 }
 
 export function getSharedAccessSession() {
-  return request("/api/auth/session", {
+  return sharedRequest("/api/auth/session", {
     headers: sharedAuthToken
       ? { Authorization: `Bearer ${sharedAuthToken}` }
       : {},
@@ -321,7 +337,7 @@ export function getSharedAccessSession() {
 }
 
 export function logoutSharedAccess() {
-  return request("/api/auth/logout", {
+  return sharedRequest("/api/auth/logout", {
     method: "POST",
     headers: sharedAuthToken
       ? { Authorization: `Bearer ${sharedAuthToken}` }
@@ -330,7 +346,7 @@ export function logoutSharedAccess() {
 }
 
 export function getSecurityAuditEvents(limit = 120) {
-  return request(`/api/audit/events?limit=${encodeURIComponent(limit)}`, {
+  return sharedRequest(`/api/audit/events?limit=${encodeURIComponent(limit)}`, {
     headers: sharedAuthToken
       ? { Authorization: `Bearer ${sharedAuthToken}` }
       : {},
