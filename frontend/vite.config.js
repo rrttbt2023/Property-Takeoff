@@ -16,7 +16,7 @@ export default defineConfig({
       '/shared-api': {
         target: 'https://property-takeoff.onrender.com',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/shared-api/, '/api'),
+        rewrite: (path) => path.replace(/^\/shared-api(?:\/api)?/, '/api'),
       },
     },
   },
