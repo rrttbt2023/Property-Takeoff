@@ -31,6 +31,8 @@ Auto-measure-backend/data/shared_projects/
 Auto-measure-backend/training/data/
 Auto-measure-backend/training/checkpoints/*.pt
 Auto-measure-backend/training/checkpoints/*.ts
+Auto-measure-backend/training/checkpoints*/
 Auto-measure-backend/training/checkpoints_smoke/
 Auto-measure-backend/training/checkpoints_smoke_r50/
+Auto-measure-backend/training/data*/
 .vercel

@@ -64,12 +64,33 @@ class SegmentationClassResult(BaseModel):
     confidence: float = Field(..., ge=0, le=1)
 
 
+class SegmentationDiagnostics(BaseModel):
+    engine: str = "heuristic"
+    model_loaded: bool = False
+    model_version: str | None = None
+    model_error: str | None = None
+    tiled_inference: bool = False
+    tile_size: int | None = Field(None, ge=1)
+    tile_overlap: int | None = Field(None, ge=0)
+    tile_count: int = Field(0, ge=0)
+    mean_confidence: float = Field(0.0, ge=0, le=1)
+    uncertain_fraction: float = Field(0.0, ge=0, le=1)
+
+
 class SegmentationResponse(BaseModel):
     plowable: SegmentationClassResult
     sidewalks: SegmentationClassResult
     turf: SegmentationClassResult
     mulch: SegmentationClassResult
-    notes: list[str] = []
+    uncertain_polygons: list[list[Point]] = Field(default_factory=list)
+    diagnostics: SegmentationDiagnostics = Field(default_factory=SegmentationDiagnostics)
+    notes: list[str] = Field(default_factory=list)
+
+
+class SegmentationCorrectionResponse(BaseModel):
+    sample_id: str
+    stored_at: str
+    storage_path: str
 
 
 class MeasurementResponse(BaseModel):
@@ -113,6 +134,7 @@ class SharedProjectSummary(BaseModel):
     last_edited_at: str | None = None
     polygon_count: int = Field(0, ge=0)
     has_boundary: bool = False
+    revision: int = Field(1, ge=1)
 
 
 class SharedProjectRecord(SharedProjectSummary):
@@ -126,12 +148,27 @@ class SharedProjectUpsertRequest(BaseModel):
     polygon_count: int | None = Field(None, ge=0)
     has_boundary: bool | None = None
     base_last_edited_at: str | None = None
+    base_revision: int | None = Field(None, ge=1)
     force_overwrite: bool = False
     payload: dict[str, Any]
 
 
 class SharedProjectDeleteResponse(BaseModel):
     deleted: bool
+
+
+class SharedProjectVersionSummary(BaseModel):
+    project_id: str
+    revision: int = Field(..., ge=1)
+    created_at: str
+    saved_by: str
+    polygon_count: int = Field(0, ge=0)
+    has_boundary: bool = False
+    project_name: str
+
+
+class SharedProjectVersionRecord(SharedProjectVersionSummary):
+    payload: dict[str, Any]
 
 
 class SharedAuthLoginRequest(BaseModel):

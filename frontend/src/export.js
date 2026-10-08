@@ -258,6 +258,129 @@ export async function exportPDF(map, totals) {
   doc.save("takeoff_report.pdf");
 }
 
+function addReportPageHeader(doc, projectName, savedAt, logoDataUrl = "") {
+  const pageWidth = doc.internal.pageSize.getWidth();
+  doc.setFillColor(18, 31, 46);
+  doc.rect(0, 0, pageWidth, 92, "F");
+  if (logoDataUrl) {
+    try {
+      doc.addImage(logoDataUrl, "PNG", 36, 20, 52, 52);
+    } catch {
+      /* intentionally ignore non-critical export errors */
+    }
+  }
+  doc.setTextColor(255, 255, 255);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(22);
+  doc.text("Client Takeoff Report", 102, 38);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(11);
+  doc.text(projectName || "Untitled Project", 102, 58);
+  doc.text(
+    savedAt ? `Prepared ${new Date(savedAt).toLocaleString()}` : "Prepared just now",
+    102,
+    74
+  );
+  doc.setTextColor(32, 32, 32);
+}
+
+function ensureReportPageSpace(doc, y, requiredHeight, projectName, savedAt, logoDataUrl) {
+  const pageHeight = doc.internal.pageSize.getHeight();
+  if (y + requiredHeight <= pageHeight - 38) return y;
+  doc.addPage();
+  addReportPageHeader(doc, projectName, savedAt, logoDataUrl);
+  return 120;
+}
+
+export async function exportClientReportPDF({
+  projectName,
+  totals,
+  mapImageDataUrl = "",
+  reportNotes = "",
+  savedAt = "",
+  logoUrl = "/logo.png",
+} = {}) {
+  const jsPdfModule = await import("jspdf");
+  const jsPDF = jsPdfModule?.default || jsPdfModule;
+  const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "letter" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const contentWidth = pageWidth - 72;
+  let logoDataUrl = "";
+  try {
+    logoDataUrl = await imageUrlToDataUrl(
+      String(logoUrl || "").startsWith("http")
+        ? String(logoUrl)
+        : new URL(String(logoUrl || "/logo.png"), window.location.origin).toString()
+    );
+  } catch {
+    logoDataUrl = "";
+  }
+
+  addReportPageHeader(doc, projectName, savedAt, logoDataUrl);
+  const resolvedMapImageDataUrl = String(mapImageDataUrl || "").trim();
+
+  let y = 116;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(13);
+  doc.text("Property Summary", 36, y);
+  y += 12;
+
+  const summaryCards = [
+    { label: "Plowable", value: `${Math.round(Number(totals?.plowable?.sqft || 0)).toLocaleString()} sq ft` },
+    { label: "Sidewalks", value: `${Math.round(Number(totals?.sidewalks?.sqft || 0)).toLocaleString()} sq ft` },
+    { label: "Turf", value: `${Math.round(Number(totals?.turf?.sqft || 0)).toLocaleString()} sq ft` },
+    { label: "Mulch", value: `${Math.round(Number(totals?.mulch?.sqft || 0)).toLocaleString()} sq ft` },
+  ];
+  const cardGap = 10;
+  const cardWidth = (contentWidth - cardGap) / 2;
+  summaryCards.forEach((card, index) => {
+    const col = index % 2;
+    const row = Math.floor(index / 2);
+    const x = 36 + col * (cardWidth + cardGap);
+    const cardY = y + row * 64;
+    doc.setFillColor(243, 247, 252);
+    doc.setDrawColor(210, 220, 232);
+    doc.roundedRect(x, cardY, cardWidth, 52, 12, 12, "FD");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11);
+    doc.text(card.label, x + 12, cardY + 20);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(14);
+    doc.text(card.value, x + 12, cardY + 38);
+  });
+  y += Math.ceil(summaryCards.length / 2) * 64 + 10;
+
+  if (String(reportNotes || "").trim()) {
+    y = ensureReportPageSpace(doc, y, 90, projectName, savedAt, logoDataUrl);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    doc.text("Notes", 36, y);
+    y += 14;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    const noteLines = doc.splitTextToSize(String(reportNotes).trim(), contentWidth);
+    doc.text(noteLines, 36, y);
+    y += noteLines.length * 14 + 12;
+  }
+
+  if (resolvedMapImageDataUrl) {
+    y = ensureReportPageSpace(doc, y, 300, projectName, savedAt, logoDataUrl);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    doc.text("Map View", 36, y);
+    y += 12;
+    try {
+      doc.addImage(resolvedMapImageDataUrl, "PNG", 36, y, contentWidth, 250);
+      y += 264;
+    } catch {
+      y += 10;
+    }
+  }
+
+  const baseProject = safeFilenamePart(projectName, "takeoff-project");
+  doc.save(`${baseProject}-client-report.pdf`);
+}
+
 function canvasToBlob(canvas, mimeType = "image/png") {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -407,45 +530,61 @@ function getPdfStrokeTextureStyle(kind) {
   const normalizedKind = String(kind || "").toLowerCase();
   if (normalizedKind === "pen") {
     return {
-      textureDash: [1.4, 3.6],
-      textureOpacityScale: 0.2,
-      textureWidthScale: 0.34,
-      edgeOpacityScale: 0.26,
-      edgeWidthScale: 1.16,
+      filterId: "",
+      textureDash: [],
+      textureOpacityScale: 0,
+      textureWidthScale: 0,
+      edgeOpacityScale: 0,
+      edgeWidthScale: 0,
       overlayBlend: "source-over",
     };
   }
   if (normalizedKind === "pencil") {
     return {
-      textureDash: [0.65, 3.4],
-      textureOpacityScale: 0.5,
-      textureWidthScale: 0.42,
-      edgeOpacityScale: 0.18,
-      edgeWidthScale: 1.22,
+      filterId: "url(#pdf-export-pencil-grain)",
+      textureDash: [0.45, 2.6],
+      textureOpacityScale: 0.52,
+      textureWidthScale: 0.46,
+      edgeOpacityScale: 0.12,
+      edgeWidthScale: 1.16,
       overlayBlend: "source-over",
     };
   }
   if (normalizedKind === "crayon") {
     return {
-      textureDash: [2.1, 3.1],
-      textureOpacityScale: 0.4,
-      textureWidthScale: 0.58,
-      edgeOpacityScale: 0.14,
-      edgeWidthScale: 1.32,
+      filterId: "url(#pdf-export-crayon-wax)",
+      textureDash: [1.2, 2.2],
+      textureOpacityScale: 0.46,
+      textureWidthScale: 0.68,
+      edgeOpacityScale: 0.18,
+      edgeWidthScale: 1.38,
       overlayBlend: "source-over",
     };
   }
   if (normalizedKind === "marker") {
     return {
-      textureDash: [5.5, 3.8],
-      textureOpacityScale: 0.12,
+      filterId: "url(#pdf-export-marker-felt)",
+      textureDash: [3.6, 2.2],
+      textureOpacityScale: 0.16,
       textureWidthScale: 0.72,
-      edgeOpacityScale: 0.22,
-      edgeWidthScale: 1.08,
+      edgeOpacityScale: 0.2,
+      edgeWidthScale: 1.18,
       overlayBlend: "source-over",
     };
   }
+  if (normalizedKind === "highlighter") {
+    return {
+      filterId: "",
+      textureDash: [],
+      textureOpacityScale: 0,
+      textureWidthScale: 0,
+      edgeOpacityScale: 0.12,
+      edgeWidthScale: 1.04,
+      overlayBlend: "multiply",
+    };
+  }
   return {
+    filterId: "",
     textureDash: [],
     textureOpacityScale: 0,
     textureWidthScale: 0,
@@ -462,23 +601,26 @@ function buildSvgStrokeMarkup(points, feature) {
   const width = Math.max(1, (Number(feature?.properties?.width) || 2) * strokeScale);
   const opacity = Math.max(0.05, Math.min(1, Number(feature?.properties?.opacity) || 1));
   const textureStyle = getPdfStrokeTextureStyle(kind);
-  const strokeCap = kind === "marker" ? "square" : "round";
+  const strokeCap = kind === "highlighter" ? "square" : "round";
   const pointsAttr = pointsToSvgString(points);
   if (!pointsAttr) return "";
   const segments = [];
+  const blendStyle =
+    textureStyle.overlayBlend === "multiply" ? ' style="mix-blend-mode:multiply"' : "";
+  const filterAttr = textureStyle.filterId ? ` filter="${textureStyle.filterId}"` : "";
   if (textureStyle.edgeWidthScale > 0) {
     segments.push(
       `<polyline points="${pointsAttr}" fill="none" stroke="${escapeXml(color)}" stroke-width="${formatSvgNumber(
         Math.max(1, width * textureStyle.edgeWidthScale)
       )}" stroke-opacity="${formatSvgNumber(
         Math.max(0.06, opacity * textureStyle.edgeOpacityScale)
-      )}" stroke-linecap="${strokeCap}" stroke-linejoin="round" />`
+      )}" stroke-linecap="${strokeCap}" stroke-linejoin="round"${filterAttr}${blendStyle} />`
     );
   }
   segments.push(
     `<polyline points="${pointsAttr}" fill="none" stroke="${escapeXml(color)}" stroke-width="${formatSvgNumber(
       width
-    )}" stroke-opacity="${formatSvgNumber(opacity)}" stroke-linecap="${strokeCap}" stroke-linejoin="round" />`
+    )}" stroke-opacity="${formatSvgNumber(opacity)}" stroke-linecap="${strokeCap}" stroke-linejoin="round"${filterAttr}${blendStyle} />`
   );
   if (textureStyle.textureDash.length) {
     segments.push(
@@ -488,7 +630,7 @@ function buildSvgStrokeMarkup(points, feature) {
         Math.max(0.08, opacity * textureStyle.textureOpacityScale)
       )}" stroke-linecap="${strokeCap}" stroke-linejoin="round" stroke-dasharray="${textureStyle.textureDash
         .map(formatSvgNumber)
-        .join(" ")}" />`
+        .join(" ")}"${filterAttr}${blendStyle} />`
     );
   }
   if (kind === "arrow" || kind === "callout") {
@@ -649,7 +791,26 @@ function buildSvgMeasurementMarkup(measurement = {}) {
 
 function buildSvgMeasurementLabelMarkup(measurement = {}, normalizedPoints = []) {
   const label = String(measurement?.label || "").trim();
-  const value = String(measurement?.displayValue || "").trim();
+  const result = measurement?.result && typeof measurement.result === "object"
+    ? measurement.result
+    : {};
+  const squareFeet = Number(result.sqft);
+  const storedAcres = Number(result.acres);
+  const feet = Number(result.feet);
+  const hasSquareFeet =
+    result.sqft !== null && result.sqft !== "" && Number.isFinite(squareFeet);
+  const hasFeet = result.feet !== null && result.feet !== "" && Number.isFinite(feet);
+  const acres =
+    result.acres !== null && result.acres !== "" && Number.isFinite(storedAcres)
+      ? storedAcres
+      : squareFeet / 43560;
+  const calculatedValue =
+    measurement?.kind === "area" && hasSquareFeet
+      ? `${squareFeet.toFixed(2)} sq ft (${acres.toFixed(Math.abs(acres) < 1 ? 3 : 2)} ac)`
+      : measurement?.kind !== "area" && hasFeet
+      ? `${feet.toFixed(2)} ft`
+      : "";
+  const value = String(measurement?.displayValue || calculatedValue).trim();
   const caption = [label, value].filter(Boolean).join(" - ");
   if (!caption || !normalizedPoints.length) return "";
   const anchor =
@@ -732,6 +893,20 @@ function buildAnnotatedPlanSvgMarkup({
 <svg xmlns="http://www.w3.org/2000/svg" width="${formatSvgNumber(width)}" height="${formatSvgNumber(
     height
   )}" viewBox="0 0 ${formatSvgNumber(width)} ${formatSvgNumber(height)}">
+  <defs>
+    <filter id="pdf-export-pencil-grain" x="-8%" y="-20%" width="116%" height="140%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="7" result="pencilNoise" />
+      <feDisplacementMap in="SourceGraphic" in2="pencilNoise" scale="0.75" xChannelSelector="R" yChannelSelector="G" />
+    </filter>
+    <filter id="pdf-export-marker-felt" x="-6%" y="-18%" width="112%" height="136%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.22 0.7" numOctaves="1" seed="12" result="markerNoise" />
+      <feDisplacementMap in="SourceGraphic" in2="markerNoise" scale="0.45" xChannelSelector="R" yChannelSelector="B" />
+    </filter>
+    <filter id="pdf-export-crayon-wax" x="-10%" y="-25%" width="120%" height="150%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.52" numOctaves="3" seed="19" result="crayonNoise" />
+      <feDisplacementMap in="SourceGraphic" in2="crayonNoise" scale="1.6" xChannelSelector="R" yChannelSelector="G" />
+    </filter>
+  </defs>
   <image href="${escapeXml(imageHref)}" x="0" y="0" width="${formatSvgNumber(
     width
   )}" height="${formatSvgNumber(height)}" preserveAspectRatio="none" />

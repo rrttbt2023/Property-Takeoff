@@ -14,6 +14,8 @@ from app.schemas import (
     MeasurementType,
     PixelDistanceRequest,
     PixelDistanceResponse,
+    SegmentationCorrectionResponse,
+    SegmentationDiagnostics,
     SegmentationResponse,
 )
 from app.services.measurement_service import MeasurementService
@@ -74,6 +76,11 @@ def calculate_pixel_distance(payload: PixelDistanceRequest) -> PixelDistanceResp
 @router.get("/history", response_model=list[MeasurementRecord])
 def get_measurement_history(limit: int = Query(20, ge=1, le=200)) -> list[MeasurementRecord]:
     return measurement_repository.list_measurements(limit=limit)
+
+
+@router.get("/segment/status", response_model=SegmentationDiagnostics)
+def get_segmentation_status() -> SegmentationDiagnostics:
+    return SegmentationService.get_model_status(load_model=True)
 
 
 @router.get("/{measurement_id}", response_model=MeasurementRecord)
@@ -137,3 +144,28 @@ async def segment_upload(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/segment/corrections", response_model=SegmentationCorrectionResponse)
+async def save_segmentation_correction(
+    image: UploadFile = File(...),
+    mask: UploadFile = File(...),
+    metadata: str = Form("{}"),
+) -> SegmentationCorrectionResponse:
+    for upload, label in ((image, "image"), (mask, "mask")):
+        if upload.content_type is None or not upload.content_type.startswith("image/"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Correction {label} must be an image.",
+            )
+    image_bytes = await image.read()
+    mask_bytes = await mask.read()
+    try:
+        stored = SegmentationService.save_correction_sample(
+            image_bytes=image_bytes,
+            mask_bytes=mask_bytes,
+            metadata_json=metadata,
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return SegmentationCorrectionResponse(**stored)

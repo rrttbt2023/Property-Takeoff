@@ -99,6 +99,127 @@ def test_shared_login_session_and_logout() -> None:
         _restore_shared_auth_env(previous)
 
 
+def test_shared_project_revisions_and_polygon_drop_guard() -> None:
+    previous = _set_shared_auth_env(
+        AUTO_MEASURE_SHARED_AUTH_USER="revision-user",
+        AUTO_MEASURE_SHARED_AUTH_PASS="revision-secret",
+    )
+    project_id = "revision-safety-test"
+    try:
+        login_response = client.post(
+            "/api/auth/login",
+            json={"username": "revision-user", "password": "revision-secret"},
+        )
+        assert login_response.status_code == 200
+        headers = {"Authorization": f"Bearer {login_response.json()['token']}"}
+        many_polygons = [{"id": f"p-{idx}", "type": "Feature"} for idx in range(25)]
+        payload = {
+            "version": 1,
+            "projectName": "Revision Safety",
+            "layerFeatures": {
+                "plowable": many_polygons,
+                "sidewalks": [],
+                "turf": [],
+                "mulch": [],
+            },
+        }
+        create_response = client.put(
+            f"/api/projects/{project_id}",
+            headers=headers,
+            json={
+                "id": project_id,
+                "project_name": "Revision Safety",
+                "polygon_count": 25,
+                "payload": payload,
+            },
+        )
+        assert create_response.status_code == 200
+        assert create_response.json()["revision"] == 1
+
+        versions_response = client.get(
+            f"/api/projects/{project_id}/versions",
+            headers=headers,
+        )
+        assert versions_response.status_code == 200
+        assert versions_response.json()[0]["revision"] == 1
+
+        reduced_payload = {
+            **payload,
+            "layerFeatures": {
+                **payload["layerFeatures"],
+                "plowable": many_polygons[:1],
+            },
+        }
+        blocked_response = client.put(
+            f"/api/projects/{project_id}",
+            headers=headers,
+            json={
+                "id": project_id,
+                "project_name": "Revision Safety",
+                "polygon_count": 1,
+                "base_revision": 1,
+                "payload": reduced_payload,
+            },
+        )
+        assert blocked_response.status_code == 409
+        assert blocked_response.json()["detail"]["code"] == "polygon_count_drop"
+
+        mismatched_count_response = client.put(
+            f"/api/projects/{project_id}",
+            headers=headers,
+            json={
+                "id": project_id,
+                "project_name": "Revision Safety",
+                "polygon_count": 25,
+                "base_revision": 1,
+                "payload": reduced_payload,
+            },
+        )
+        assert mismatched_count_response.status_code == 400
+
+        forced_response = client.put(
+            f"/api/projects/{project_id}",
+            headers=headers,
+            json={
+                "id": project_id,
+                "project_name": "Revision Safety",
+                "polygon_count": 1,
+                "base_revision": 1,
+                "force_overwrite": True,
+                "payload": reduced_payload,
+            },
+        )
+        assert forced_response.status_code == 200
+        assert forced_response.json()["revision"] == 2
+
+        stale_response = client.put(
+            f"/api/projects/{project_id}",
+            headers=headers,
+            json={
+                "id": project_id,
+                "project_name": "Revision Safety",
+                "polygon_count": 25,
+                "base_revision": 1,
+                "payload": payload,
+            },
+        )
+        assert stale_response.status_code == 409
+        assert stale_response.json()["detail"]["conflict"]["revision"] == 2
+
+        revision_response = client.get(
+            f"/api/projects/{project_id}/versions/1",
+            headers=headers,
+        )
+        assert revision_response.status_code == 200
+        assert revision_response.json()["polygon_count"] == 25
+    finally:
+        try:
+            if "headers" in locals():
+                client.delete(f"/api/projects/{project_id}", headers=headers)
+        finally:
+            _restore_shared_auth_env(previous)
+
+
 def test_create_measurement_success() -> None:
     payload = {
         "image_url": "https://example.com/site.png",
@@ -176,6 +297,46 @@ def test_segment_upload_success() -> None:
     body = response.json()
     assert "plowable" in body
     assert "turf" in body
+    assert body["diagnostics"]["engine"] == "heuristic-disabled"
+
+
+def test_segmentation_status_and_tile_coverage() -> None:
+    response = client.get("/measurements/segment/status")
+    assert response.status_code == 200
+    assert response.json()["engine"] in {"torchscript-ready", "heuristic-fallback"}
+
+    starts = SegmentationService._tile_starts(2500, 1024, 192)
+    assert starts[0] == 0
+    assert starts[-1] == 2500 - 1024
+    assert all((b - a) <= (1024 - 192) for a, b in zip(starts, starts[1:]))
+
+
+def test_save_segmentation_correction(tmp_path, monkeypatch) -> None:
+    import cv2
+    import numpy as np
+
+    monkeypatch.setenv("AUTO_MEASURE_TRAINING_FEEDBACK_DIR", str(tmp_path))
+    image = np.zeros((16, 16, 3), dtype=np.uint8)
+    image[:, :] = (30, 150, 45)
+    mask = np.full((16, 16), 3, dtype=np.uint8)
+    ok_image, encoded_image = cv2.imencode(".png", image)
+    ok_mask, encoded_mask = cv2.imencode(".png", mask)
+    assert ok_image and ok_mask
+
+    response = client.post(
+        "/measurements/segment/corrections",
+        data={"metadata": '{"project_name":"Correction Test"}'},
+        files={
+            "image": ("image.png", encoded_image.tobytes(), "image/png"),
+            "mask": ("mask.png", encoded_mask.tobytes(), "image/png"),
+        },
+    )
+
+    assert response.status_code == 200
+    sample_id = response.json()["sample_id"]
+    assert (tmp_path / sample_id / "image.png").exists()
+    assert (tmp_path / sample_id / "mask.png").exists()
+    assert (tmp_path / sample_id / "metadata.json").exists()
 
 
 def test_segmentation_heuristics_keep_parking_lot_plowable() -> None:

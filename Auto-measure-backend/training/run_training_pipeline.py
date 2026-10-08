@@ -34,6 +34,12 @@ def parse_args() -> argparse.Namespace:
         help="Validation split ratio in [0,1]. Default: 0.2",
     )
     parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=0.1,
+        help="Held-out test split ratio in [0,1]. Default: 0.1",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -130,6 +136,8 @@ def main() -> None:
         str(args.dataset_root),
         "--val-ratio",
         str(args.val_ratio),
+        "--test-ratio",
+        str(args.test_ratio),
         "--seed",
         str(args.seed),
         "--tile-size",
@@ -146,6 +154,16 @@ def main() -> None:
     else:
         prepare_cmd.append("--no-recursive")
     _run(prepare_cmd, cwd=backend_root)
+
+    _run(
+        [
+            py,
+            str(training_dir / "validate_dataset.py"),
+            "--data-root",
+            str(args.dataset_root),
+        ],
+        cwd=backend_root,
+    )
 
     train_cmd = [
         py,

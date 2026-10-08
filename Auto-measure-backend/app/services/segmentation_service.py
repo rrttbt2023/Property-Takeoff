@@ -1,12 +1,21 @@
-import math
+import hashlib
+import json
 import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import cv2
 import numpy as np
 
-from app.schemas import Point, SegmentationClassResult, SegmentationResponse
+from app.schemas import (
+    Point,
+    SegmentationClassResult,
+    SegmentationDiagnostics,
+    SegmentationResponse,
+)
 
 
 class SegmentationService:
@@ -15,6 +24,8 @@ class SegmentationService:
     _model = None
     _model_loaded = False
     _model_error: str | None = None
+    _model_path: str | None = None
+    _model_version: str | None = None
 
     @classmethod
     def segment_uploaded(
@@ -30,6 +41,8 @@ class SegmentationService:
                 "Uploaded image looks blank/black. Re-capture map image after panning or zooming."
             )
         notes: list[str] = []
+        diagnostics = SegmentationDiagnostics(engine="heuristic")
+        uncertainty_mask: np.ndarray | None = None
         heuristic_masks, heuristic_confidences = cls._heuristic_masks(image)
         blend_mode = os.getenv("AUTO_MEASURE_SEG_BLEND_MODE", "heuristic_anchor").strip().lower()
         if blend_mode not in {"model_priority", "heuristic_anchor"}:
@@ -43,11 +56,25 @@ class SegmentationService:
 
         if model_out is None:
             masks, confidences = heuristic_masks, heuristic_confidences
-            notes.append("Torch model unavailable; used HSV heuristic segmentation.")
+            diagnostics = cls.get_model_status(load_model=False)
+            diagnostics.engine = "heuristic-disabled" if not use_model else "heuristic-fallback"
+            diagnostics.mean_confidence = cls._mean_class_confidence(confidences)
+            notes.append(
+                "Torch model disabled; used HSV heuristic segmentation."
+                if not use_model
+                else "Torch model unavailable; used HSV heuristic segmentation."
+            )
             if cls._model_error:
                 notes.append(f"Model load/predict error: {cls._model_error}")
         else:
-            model_masks, model_confidences, model_decode_note = model_out
+            (
+                model_masks,
+                model_confidences,
+                model_decode_note,
+                model_diagnostics,
+                model_uncertainty_mask,
+            ) = model_out
+            diagnostics = model_diagnostics
             if model_decode_note:
                 notes.append(model_decode_note)
             model_coverage = cls._coverage_by_class(model_masks)
@@ -60,8 +87,12 @@ class SegmentationService:
             )
             if cls._is_degenerate_prediction(model_masks):
                 masks, confidences = heuristic_masks, heuristic_confidences
+                diagnostics.engine = "heuristic-fallback"
+                diagnostics.mean_confidence = cls._mean_class_confidence(confidences)
+                diagnostics.uncertain_fraction = 0.0
                 notes.append("Torch model output looked degenerate; used heuristic segmentation.")
             else:
+                uncertainty_mask = model_uncertainty_mask
                 masks, confidences = cls._blend_model_and_heuristics(
                     blend_mode=blend_mode,
                     model_masks=model_masks,
@@ -73,6 +104,7 @@ class SegmentationService:
                     notes.append("Used TorchScript model with heuristic-anchored refinement.")
                 else:
                     notes.append("Used TorchScript model with model-priority refinement.")
+                diagnostics.mean_confidence = cls._mean_class_confidence(confidences)
 
         masks = cls._stabilize_masks(
             masks=masks,
@@ -120,6 +152,14 @@ class SegmentationService:
             f"M:{coverage['mulch'] * 100:.1f}%"
         )
 
+        uncertain_polygons = (
+            cls._mask_to_polygons(
+                uncertainty_mask,
+                min_area_px=max(120, int(min_area_px)),
+            )
+            if uncertainty_mask is not None
+            else []
+        )
         return SegmentationResponse(
             plowable=SegmentationClassResult(
                 polygons=polygons_by_class["plowable"],
@@ -137,64 +177,59 @@ class SegmentationService:
                 polygons=polygons_by_class["mulch"],
                 confidence=confidences["mulch"],
             ),
+            uncertain_polygons=uncertain_polygons,
+            diagnostics=diagnostics,
             notes=notes,
         )
 
     @classmethod
     def _predict_with_model(
         cls, image_bgr: np.ndarray
-    ) -> tuple[dict[str, np.ndarray], dict[str, float], str | None] | None:
+    ) -> tuple[
+        dict[str, np.ndarray],
+        dict[str, float],
+        str | None,
+        SegmentationDiagnostics,
+        np.ndarray,
+    ] | None:
         model = cls._get_model()
         if model is None:
             return None
 
         try:
-            import torch
-
             image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             orig_h, orig_w = image_rgb.shape[:2]
-            model_h = max(32, int(math.ceil(orig_h / 32) * 32))
-            model_w = max(32, int(math.ceil(orig_w / 32) * 32))
-
-            if model_h != orig_h or model_w != orig_w:
-                model_rgb = cv2.resize(image_rgb, (model_w, model_h), interpolation=cv2.INTER_LINEAR)
-            else:
-                model_rgb = image_rgb
-
-            tensor = (
-                torch.from_numpy(model_rgb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+            tile_size = cls._env_int("AUTO_MEASURE_SEG_TILE_SIZE", 1024, 256, 2048)
+            overlap = cls._env_int(
+                "AUTO_MEASURE_SEG_TILE_OVERLAP",
+                192,
+                0,
+                max(0, tile_size // 2),
             )
-            mean = torch.tensor([0.485, 0.456, 0.406], dtype=tensor.dtype).view(1, 3, 1, 1)
-            std = torch.tensor([0.229, 0.224, 0.225], dtype=tensor.dtype).view(1, 3, 1, 1)
-            tensor = (tensor - mean) / std
-            with torch.no_grad():
-                logits = model(tensor)
-                if isinstance(logits, (tuple, list)):
-                    logits = logits[0]
-                probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+            y_starts = cls._tile_starts(orig_h, tile_size, overlap)
+            x_starts = cls._tile_starts(orig_w, tile_size, overlap)
+            probs_sum = np.zeros((5, orig_h, orig_w), dtype=np.float32)
+            weights_sum = np.zeros((orig_h, orig_w), dtype=np.float32)
+            tile_count = 0
 
-            # Class order expected by this scaffold:
-            # 0 background, 1 plowable, 2 sidewalks, 3 turf, 4 mulch
-            if probs.shape[0] < 5:
-                cls._model_error = (
-                    f"Model output has {probs.shape[0]} classes, expected at least 5."
-                )
-                return None
-
-            if model_h != orig_h or model_w != orig_w:
-                probs_orig = np.stack(
-                    [
-                        cv2.resize(
-                            probs[c],
-                            (orig_w, orig_h),
-                            interpolation=cv2.INTER_LINEAR,
+            for y0 in y_starts:
+                for x0 in x_starts:
+                    y1 = min(orig_h, y0 + tile_size)
+                    x1 = min(orig_w, x0 + tile_size)
+                    tile = image_rgb[y0:y1, x0:x1]
+                    tile_probs = cls._run_model_tile(model, tile)
+                    if tile_probs.shape[0] < 5:
+                        cls._model_error = (
+                            f"Model output has {tile_probs.shape[0]} classes, expected at least 5."
                         )
-                        for c in range(probs.shape[0])
-                    ],
-                    axis=0,
-                )
-            else:
-                probs_orig = probs
+                        return None
+                    tile_probs = tile_probs[:5].astype(np.float32, copy=False)
+                    weight = cls._tile_blend_weight(y1 - y0, x1 - x0)
+                    probs_sum[:, y0:y1, x0:x1] += tile_probs * weight[None, :, :]
+                    weights_sum[y0:y1, x0:x1] += weight
+                    tile_count += 1
+
+            probs_orig = probs_sum / np.maximum(weights_sum[None, :, :], 1e-6)
 
             class_map = np.argmax(probs_orig, axis=0).astype(np.uint8)
             masks = {
@@ -229,10 +264,107 @@ class SegmentationService:
                 "turf": float(np.mean(probs_orig[3][masks["turf"]])) if np.any(masks["turf"]) else 0.0,
                 "mulch": float(np.mean(probs_orig[4][masks["mulch"]])) if np.any(masks["mulch"]) else 0.0,
             }
-            return masks, confidences, decode_note
+            max_confidence = np.max(probs_orig, axis=0)
+            uncertainty_threshold = float(
+                np.clip(
+                    float(os.getenv("AUTO_MEASURE_SEG_UNCERTAINTY_THRESHOLD", "0.32")),
+                    0.2,
+                    0.75,
+                )
+            )
+            uncertainty_mask = max_confidence < uncertainty_threshold
+            diagnostics = SegmentationDiagnostics(
+                engine="torchscript-tiled",
+                model_loaded=True,
+                model_version=cls._model_version,
+                model_error=None,
+                tiled_inference=tile_count > 1,
+                tile_size=tile_size,
+                tile_overlap=overlap,
+                tile_count=tile_count,
+                mean_confidence=cls._mean_class_confidence(confidences),
+                uncertain_fraction=float(np.mean(uncertainty_mask)),
+            )
+            tile_note = (
+                f"Tiled inference: {tile_count} tile(s), {tile_size}px with {overlap}px overlap."
+            )
+            decode_note = f"{tile_note} {decode_note}" if decode_note else tile_note
+            return masks, confidences, decode_note, diagnostics, uncertainty_mask
         except Exception as exc:  # pragma: no cover
             cls._model_error = cls._summarize_error(exc)
             return None
+
+    @staticmethod
+    def _run_model_tile(model, image_rgb: np.ndarray) -> np.ndarray:
+        import torch
+
+        tile_h, tile_w = image_rgb.shape[:2]
+        padded_h = max(32, ((tile_h + 31) // 32) * 32)
+        padded_w = max(32, ((tile_w + 31) // 32) * 32)
+        if padded_h != tile_h or padded_w != tile_w:
+            model_rgb = cv2.copyMakeBorder(
+                image_rgb,
+                0,
+                padded_h - tile_h,
+                0,
+                padded_w - tile_w,
+                cv2.BORDER_REFLECT_101,
+            )
+        else:
+            model_rgb = image_rgb
+        tensor = torch.from_numpy(model_rgb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+        mean = torch.tensor([0.485, 0.456, 0.406], dtype=tensor.dtype).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], dtype=tensor.dtype).view(1, 3, 1, 1)
+        tensor = (tensor - mean) / std
+        with torch.no_grad():
+            logits = model(tensor)
+            if isinstance(logits, (tuple, list)):
+                logits = logits[0]
+            probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+        if probs.shape[1:] != (padded_h, padded_w):
+            probs = np.stack(
+                [
+                    cv2.resize(channel, (padded_w, padded_h), interpolation=cv2.INTER_LINEAR)
+                    for channel in probs
+                ],
+                axis=0,
+            )
+        return probs[:, :tile_h, :tile_w]
+
+    @staticmethod
+    def _tile_starts(length: int, tile_size: int, overlap: int) -> list[int]:
+        length = max(1, int(length))
+        tile_size = max(1, int(tile_size))
+        if length <= tile_size:
+            return [0]
+        stride = max(1, tile_size - max(0, int(overlap)))
+        starts = list(range(0, max(1, length - tile_size + 1), stride))
+        last = max(0, length - tile_size)
+        if not starts or starts[-1] != last:
+            starts.append(last)
+        return starts
+
+    @staticmethod
+    def _tile_blend_weight(height: int, width: int) -> np.ndarray:
+        y = np.hanning(max(3, int(height)))[:height]
+        x = np.hanning(max(3, int(width)))[:width]
+        return np.maximum(np.outer(y, x).astype(np.float32), 0.05)
+
+    @staticmethod
+    def _env_int(name: str, default: int, low: int, high: int) -> int:
+        try:
+            value = int(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            value = default
+        return max(low, min(high, value))
+
+    @staticmethod
+    def _mean_class_confidence(confidences: dict[str, float]) -> float:
+        values = [
+            float(np.clip(confidences.get(key, 0.0), 0.0, 1.0))
+            for key in ("plowable", "sidewalks", "turf", "mulch")
+        ]
+        return float(np.mean(values)) if values else 0.0
 
     @classmethod
     def _get_model(cls):
@@ -264,11 +396,111 @@ class SegmentationService:
 
             cls._model = torch.jit.load(str(path), map_location="cpu")
             cls._model.eval()
+            cls._model_path = str(path)
+            cls._model_version = cls._fingerprint_model(path)
+            cls._model_error = None
             return cls._model
         except Exception as exc:  # pragma: no cover
             cls._model_error = cls._summarize_error(exc)
             cls._model = None
             return None
+
+    @classmethod
+    def get_model_status(cls, *, load_model: bool = True) -> SegmentationDiagnostics:
+        if load_model and not cls._model_loaded:
+            cls._get_model()
+        return SegmentationDiagnostics(
+            engine="torchscript-ready" if cls._model is not None else "heuristic-fallback",
+            model_loaded=cls._model is not None,
+            model_version=cls._model_version,
+            model_error=cls._model_error,
+        )
+
+    @staticmethod
+    def _fingerprint_model(path: Path) -> str:
+        stat = path.stat()
+        digest = hashlib.sha256()
+        digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8"))
+        with path.open("rb") as handle:
+            digest.update(handle.read(1024 * 1024))
+            if stat.st_size > 1024 * 1024:
+                handle.seek(max(0, stat.st_size - 1024 * 1024))
+                digest.update(handle.read(1024 * 1024))
+        return digest.hexdigest()[:12]
+
+    @classmethod
+    def save_correction_sample(
+        cls,
+        *,
+        image_bytes: bytes,
+        mask_bytes: bytes,
+        metadata_json: str,
+    ) -> dict[str, str]:
+        max_bytes = cls._env_int(
+            "AUTO_MEASURE_CORRECTION_MAX_BYTES",
+            30 * 1024 * 1024,
+            1024,
+            100 * 1024 * 1024,
+        )
+        if not image_bytes or not mask_bytes:
+            raise ValueError("Correction image and mask are required.")
+        if len(image_bytes) > max_bytes or len(mask_bytes) > max_bytes:
+            raise ValueError("Correction image or mask exceeds the configured size limit.")
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("Correction metadata is not valid JSON.") from exc
+        if not isinstance(metadata, dict):
+            raise ValueError("Correction metadata must be a JSON object.")
+
+        image = cls._decode_image_bytes(image_bytes)
+        mask_frame = np.frombuffer(mask_bytes, dtype=np.uint8)
+        mask = cv2.imdecode(mask_frame, cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise ValueError("Failed to decode correction mask.")
+        if image.shape[:2] != mask.shape[:2]:
+            raise ValueError("Correction image and mask dimensions must match.")
+        if int(mask.max(initial=0)) > 4:
+            raise ValueError("Correction mask must use class IDs 0 through 4.")
+
+        configured_root = os.getenv("AUTO_MEASURE_TRAINING_FEEDBACK_DIR", "").strip()
+        root = (
+            Path(configured_root).expanduser()
+            if configured_root
+            else Path(__file__).resolve().parents[2] / "training" / "corrections" / "inbox"
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        project_slug = re.sub(
+            r"[^a-z0-9]+",
+            "-",
+            str(metadata.get("project_name") or "takeoff").strip().lower(),
+        ).strip("-")[:48] or "takeoff"
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        sample_id = f"{project_slug}-{stamp}-{uuid4().hex[:8]}"
+        sample_dir = root / sample_id
+        sample_dir.mkdir(parents=False, exist_ok=False)
+        stored_at = datetime.now(timezone.utc).isoformat()
+        metadata = {
+            **metadata,
+            "original_image_filename": metadata.get("image_filename"),
+            "original_mask_filename": metadata.get("mask_filename"),
+            "image_filename": "image.png",
+            "mask_filename": "mask.png",
+            "sample_id": sample_id,
+            "stored_at": stored_at,
+            "source": "operator-correction",
+        }
+        (sample_dir / "image.png").write_bytes(image_bytes)
+        (sample_dir / "mask.png").write_bytes(mask_bytes)
+        (sample_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "sample_id": sample_id,
+            "stored_at": stored_at,
+            "storage_path": f"training-inbox/{sample_id}",
+        }
 
     @staticmethod
     def _decode_image_bytes(image_bytes: bytes) -> np.ndarray:

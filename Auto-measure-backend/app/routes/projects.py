@@ -1,16 +1,25 @@
-import json
 import re
 from datetime import UTC, datetime
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.repositories.audit_repository import write_event
+from app.repositories.project_repository import (
+    ProjectRevisionConflictError,
+    delete_record,
+    get_record,
+    get_version,
+    list_records,
+    list_versions,
+    save_record,
+)
 from app.schemas import (
     SharedProjectDeleteResponse,
     SharedProjectRecord,
     SharedProjectSummary,
     SharedProjectUpsertRequest,
+    SharedProjectVersionRecord,
+    SharedProjectVersionSummary,
 )
 from app.services.shared_auth import require_shared_access
 
@@ -19,7 +28,6 @@ router = APIRouter(
     tags=["projects"],
 )
 
-PROJECTS_DIR = Path(__file__).resolve().parents[2] / "data" / "shared_projects"
 MAX_PROJECTS_LIMIT = 500
 PROJECT_ID_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
@@ -57,11 +65,6 @@ def _parse_iso_strict(value: str | None) -> str | None:
     return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _project_path(project_id: str) -> Path:
-    safe_id = _normalize_project_id(project_id)
-    return PROJECTS_DIR / f"{safe_id}.json"
-
-
 def _count_payload_polygons(payload: dict) -> int:
     layer_features = payload.get("layerFeatures")
     if not isinstance(layer_features, dict):
@@ -82,17 +85,6 @@ def _payload_has_boundary(payload: dict) -> bool:
     if not isinstance(geometry, dict):
         return False
     return geometry.get("type") in {"Polygon", "MultiPolygon"}
-
-
-def _read_record(path: Path) -> dict | None:
-    try:
-        raw = path.read_text(encoding="utf-8")
-        value = json.loads(raw)
-        if isinstance(value, dict):
-            return value
-    except Exception:
-        return None
-    return None
 
 
 def _to_summary(record: dict, project_id: str) -> SharedProjectSummary:
@@ -124,6 +116,7 @@ def _to_summary(record: dict, project_id: str) -> SharedProjectSummary:
         last_edited_at=last_edited_at,
         polygon_count=max(0, int(polygon_count)),
         has_boundary=bool(has_boundary),
+        revision=max(1, int(record.get("revision") or 1)),
     )
 
 
@@ -147,23 +140,60 @@ def list_shared_projects(
     limit: int = Query(100, ge=1, le=MAX_PROJECTS_LIMIT),
     _: dict[str, str] = Depends(require_shared_access),
 ) -> list[SharedProjectSummary]:
-    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     summaries: list[SharedProjectSummary] = []
-    for path in PROJECTS_DIR.glob("*.json"):
-        record = _read_record(path)
-        if not record:
-            continue
-        project_id = path.stem
+    for record in list_records(limit):
         try:
-            summaries.append(_to_summary(record, project_id))
+            summaries.append(_to_summary(record, str(record.get("id") or "")))
         except Exception:
-            # Keep listing robust even if one saved file is malformed.
+            # Keep listing robust even if one migrated record is malformed.
             continue
-    summaries.sort(
-        key=lambda item: str(item.last_edited_at or item.saved_at or ""),
-        reverse=True,
+    return summaries
+
+
+@router.get("/{project_id}/versions", response_model=list[SharedProjectVersionSummary])
+def list_shared_project_versions(
+    project_id: str,
+    limit: int = Query(100, ge=1, le=1000),
+    _: dict[str, str] = Depends(require_shared_access),
+) -> list[SharedProjectVersionSummary]:
+    normalized_id = _normalize_project_id(project_id)
+    return [
+        SharedProjectVersionSummary(
+            project_id=normalized_id,
+            revision=max(1, int(item.get("revision") or 1)),
+            created_at=str(item.get("created_at") or ""),
+            saved_by=str(item.get("saved_by") or "unknown"),
+            polygon_count=max(0, int(item.get("polygon_count") or 0)),
+            has_boundary=bool(item.get("has_boundary")),
+            project_name=str(item.get("project_name") or "Untitled Project"),
+        )
+        for item in list_versions(normalized_id, limit)
+    ]
+
+
+@router.get(
+    "/{project_id}/versions/{revision}",
+    response_model=SharedProjectVersionRecord,
+)
+def get_shared_project_version(
+    project_id: str,
+    revision: int,
+    _: dict[str, str] = Depends(require_shared_access),
+) -> SharedProjectVersionRecord:
+    normalized_id = _normalize_project_id(project_id)
+    record = get_version(normalized_id, revision)
+    if not record:
+        raise HTTPException(status_code=404, detail="Project revision not found.")
+    return SharedProjectVersionRecord(
+        project_id=normalized_id,
+        revision=max(1, int(record.get("revision") or 1)),
+        created_at=str(record.get("created_at") or ""),
+        saved_by=str(record.get("saved_by") or "unknown"),
+        polygon_count=max(0, int(record.get("polygon_count") or 0)),
+        has_boundary=bool(record.get("has_boundary")),
+        project_name=str(record.get("project_name") or "Untitled Project"),
+        payload=record["payload"],
     )
-    return summaries[:limit]
 
 
 @router.get("/{project_id}", response_model=SharedProjectRecord)
@@ -174,8 +204,9 @@ def get_shared_project(
 ) -> SharedProjectRecord:
     username = str(session.get("username") or "unknown")
     ip_address, user_agent = _request_meta(request)
-    path = _project_path(project_id)
-    if not path.exists():
+    normalized_id = _normalize_project_id(project_id)
+    record = get_record(normalized_id)
+    if not record:
         _write_audit_safe(
             username=username,
             action="project.open",
@@ -185,10 +216,7 @@ def get_shared_project(
             user_agent=user_agent,
         )
         raise HTTPException(status_code=404, detail=f"Shared project '{project_id}' not found.")
-    record = _read_record(path)
-    if not record:
-        raise HTTPException(status_code=500, detail="Shared project file is unreadable.")
-    summary = _to_summary(record, path.stem)
+    summary = _to_summary(record, normalized_id)
     payload = record.get("payload")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=500, detail="Shared project payload is invalid.")
@@ -208,6 +236,7 @@ def get_shared_project(
         last_edited_at=summary.last_edited_at,
         polygon_count=summary.polygon_count,
         has_boundary=summary.has_boundary,
+        revision=summary.revision,
         payload=payload,
     )
 
@@ -219,13 +248,11 @@ def upsert_shared_project(
     body: SharedProjectUpsertRequest,
     session: dict[str, str] = Depends(require_shared_access),
 ) -> SharedProjectSummary:
-    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     normalized_id = _normalize_project_id(project_id or body.id)
     now_iso = _now_iso()
     saved_at = _parse_saved_at(body.saved_at, now_iso)
     saved_by = str(session.get("username") or "").strip() or "unknown"
-    path = _project_path(normalized_id)
-    existing = _read_record(path) or {}
+    existing = get_record(normalized_id) or {}
     existing_summary = _to_summary(existing, normalized_id) if existing else None
     base_last_edited_at: str | None = None
     try:
@@ -238,9 +265,15 @@ def upsert_shared_project(
 
     if (
         existing_summary
-        and base_last_edited_at
+        and (body.base_revision or base_last_edited_at)
         and not body.force_overwrite
-        and base_last_edited_at != str(existing_summary.last_edited_at or "")
+        and (
+            (body.base_revision and body.base_revision != existing_summary.revision)
+            or (
+                not body.base_revision
+                and base_last_edited_at != str(existing_summary.last_edited_at or "")
+            )
+        )
     ):
         raise HTTPException(
             status_code=409,
@@ -250,16 +283,38 @@ def upsert_shared_project(
             },
         )
 
-    polygon_count = (
-        int(body.polygon_count)
-        if isinstance(body.polygon_count, int)
-        else _count_payload_polygons(body.payload)
-    )
-    has_boundary = (
-        bool(body.has_boundary)
-        if isinstance(body.has_boundary, bool)
-        else _payload_has_boundary(body.payload)
-    )
+    polygon_count = _count_payload_polygons(body.payload)
+    if body.polygon_count is not None and int(body.polygon_count) != polygon_count:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "polygon_count does not match the project payload. "
+                "Refresh the project before saving again."
+            ),
+        )
+    has_boundary = _payload_has_boundary(body.payload)
+    if body.has_boundary is not None and bool(body.has_boundary) != has_boundary:
+        raise HTTPException(
+            status_code=400,
+            detail="has_boundary does not match the project payload.",
+        )
+    if (
+        existing_summary
+        and existing_summary.polygon_count >= 20
+        and polygon_count < max(2, int(existing_summary.polygon_count * 0.2))
+        and not body.force_overwrite
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "Save blocked because the polygon count dropped unexpectedly. "
+                    "Review the local project before forcing an overwrite."
+                ),
+                "code": "polygon_count_drop",
+                "conflict": existing_summary.model_dump(),
+            },
+        )
     project_name = str(body.project_name or body.payload.get("projectName") or "").strip()
     if not project_name:
         project_name = "Untitled Project"
@@ -277,9 +332,21 @@ def upsert_shared_project(
         "payload": body.payload,
     }
 
-    temp_path = path.with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(record, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
-    temp_path.replace(path)
+    try:
+        saved_record = save_record(
+            record,
+            expected_revision=body.base_revision,
+            force=body.force_overwrite,
+        )
+    except ProjectRevisionConflictError:
+        current = get_record(normalized_id) or existing
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Shared project changed while this save was being written.",
+                "conflict": _to_summary(current, normalized_id).model_dump(),
+            },
+        )
 
     ip_address, user_agent = _request_meta(request)
     _write_audit_safe(
@@ -292,10 +359,11 @@ def upsert_shared_project(
         details={
             "polygon_count": int(record["polygon_count"]),
             "has_boundary": bool(record["has_boundary"]),
+            "revision": int(saved_record.get("revision") or 1),
         },
     )
 
-    return _to_summary(record, normalized_id)
+    return _to_summary(saved_record, normalized_id)
 
 
 @router.delete("/{project_id}", response_model=SharedProjectDeleteResponse)
@@ -304,11 +372,10 @@ def delete_shared_project(
     project_id: str,
     session: dict[str, str] = Depends(require_shared_access),
 ) -> SharedProjectDeleteResponse:
-    path = _project_path(project_id)
     normalized_id = _normalize_project_id(project_id)
     username = str(session.get("username") or "unknown")
     ip_address, user_agent = _request_meta(request)
-    if not path.exists():
+    if not get_record(normalized_id):
         _write_audit_safe(
             username=username,
             action="project.delete",
@@ -318,7 +385,7 @@ def delete_shared_project(
             user_agent=user_agent,
         )
         return SharedProjectDeleteResponse(deleted=False)
-    path.unlink(missing_ok=True)
+    deleted = delete_record(normalized_id)
     _write_audit_safe(
         username=username,
         action="project.delete",
@@ -327,4 +394,4 @@ def delete_shared_project(
         ip_address=ip_address,
         user_agent=user_agent,
     )
-    return SharedProjectDeleteResponse(deleted=True)
+    return SharedProjectDeleteResponse(deleted=deleted)

@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 
 from app.repositories.audit_repository import init_db as init_audit_db
 from app.repositories.measurement_repository import init_db
+from app.repositories.project_repository import init_db as init_project_db
 from app.routes.audit import router as audit_router
 from app.routes.auth import router as auth_router
 from app.routes.measurements import router as measurements_router
@@ -18,6 +19,7 @@ from app.routes.projects import router as projects_router
 async def lifespan(_: FastAPI):
     init_db()
     init_audit_db()
+    init_project_db()
     yield
 
 

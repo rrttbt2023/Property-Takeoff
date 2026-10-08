@@ -26,6 +26,24 @@ or
 export AUTO_MEASURE_SHARED_AUTH_USERS="estimator:secret123,reviewer:secret456"
 ```
 
+### Production project durability
+
+Shared projects and their revision history are stored in SQLite. In production,
+`AUTO_MEASURE_DB_PATH` must point to a persistent disk/volume supplied by the
+backend host, not the container's temporary filesystem. For example, if a
+persistent disk is mounted at `/var/data`:
+
+```bash
+export AUTO_MEASURE_DB_PATH="/var/data/property-takeoff.db"
+export AUTO_MEASURE_TRAINING_FEEDBACK_DIR="/var/data/training-corrections"
+```
+
+The second path keeps operator-corrected CV masks across backend restarts. The
+frontend still downloads a correction ZIP as a local backup if the inbox is unavailable.
+
+Existing `data/shared_projects/*.json` files are imported automatically the
+first time the revision database starts.
+
 In frontend code, call backend with relative API paths like:
 
 - `/api/measurements`

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
+import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -46,7 +48,7 @@ class ExportSample:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build training/data/{train,val}/{images,masks} from frontend "
+            "Build training/data/{train,val,test}/{images,masks} from frontend "
             "One-Click Training Export files (zip or folder)."
         )
     )
@@ -72,10 +74,16 @@ def parse_args() -> argparse.Namespace:
         help="Validation split ratio in [0,1]. Default: 0.2",
     )
     parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=0.1,
+        help="Held-out test split ratio in [0,1]. Default: 0.1",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Random seed for deterministic train/val split. Default: 42",
+        help="Random seed for deterministic train/val/test split. Default: 42",
     )
     parser.add_argument(
         "--append",
@@ -281,7 +289,7 @@ def _normalize_mask(mask: np.ndarray, source: str) -> np.ndarray:
 
 
 def _clear_dataset_pngs(dataset_root: Path) -> None:
-    for split in ("train", "val"):
+    for split in ("train", "val", "test"):
         for kind in ("images", "masks"):
             target = dataset_root / split / kind
             if not target.exists():
@@ -292,7 +300,7 @@ def _clear_dataset_pngs(dataset_root: Path) -> None:
 
 def _ensure_dirs(dataset_root: Path) -> dict[str, Path]:
     out = {}
-    for split in ("train", "val"):
+    for split in ("train", "val", "test"):
         for kind in ("images", "masks"):
             key = f"{split}_{kind}"
             path = dataset_root / split / kind
@@ -303,7 +311,7 @@ def _ensure_dirs(dataset_root: Path) -> dict[str, Path]:
 
 def _next_numeric_id(dataset_root: Path) -> int:
     max_idx = -1
-    for split in ("train", "val"):
+    for split in ("train", "val", "test"):
         for kind in ("images", "masks"):
             folder = dataset_root / split / kind
             if not folder.exists():
@@ -316,19 +324,159 @@ def _next_numeric_id(dataset_root: Path) -> int:
     return max_idx + 1
 
 
-def _split_indices(n: int, val_ratio: float, seed: int) -> tuple[list[int], set[int]]:
-    indices = list(range(n))
-    random.Random(seed).shuffle(indices)
-    if n <= 1 or val_ratio <= 0:
-        n_val = 0
-    elif val_ratio >= 1:
-        n_val = max(1, n - 1)
-    else:
-        n_val = int(round(n * val_ratio))
-        if n > 1:
-            n_val = max(1, min(n - 1, n_val))
-    val_set = set(indices[:n_val])
-    return indices, val_set
+def _project_group_key(
+    project_name_value: object,
+    image_filename_value: object = "",
+    source_value: object = "",
+) -> str:
+    project_name = str(project_name_value or "").strip().lower()
+    if project_name:
+        normalized = re.sub(
+            r"\s+(?:#|section\s+|part\s+|area\s+|zone\s+)?\d+\s*$",
+            "",
+            project_name,
+            flags=re.IGNORECASE,
+        ).strip()
+        return f"project:{normalized or project_name}"
+    image_name = str(image_filename_value or "").strip().lower()
+    if image_name:
+        return f"image:{Path(image_name).stem}"
+    return f"source:{source_value}"
+
+
+def _sample_group_key(sample: ExportSample) -> str:
+    return _project_group_key(
+        sample.metadata.get("project_name"),
+        sample.metadata.get("image_filename"),
+        sample.source,
+    )
+
+
+def _sample_content_hash(image: np.ndarray, mask: np.ndarray) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(tuple(image.shape)).encode("ascii"))
+    digest.update(image.tobytes())
+    digest.update(b"\0")
+    digest.update(str(tuple(mask.shape)).encode("ascii"))
+    digest.update(mask.tobytes())
+    return digest.hexdigest()
+
+
+def _load_append_state(dataset_root: Path) -> dict:
+    manifest_path = dataset_root / "manifest.json"
+    manifest_payload: dict = {}
+    if manifest_path.exists():
+        try:
+            parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                manifest_payload = parsed
+        except Exception as exc:
+            raise SystemExit(f"Cannot append: existing manifest is invalid: {exc}") from exc
+
+    existing_records: list[dict] = []
+    group_splits: dict[str, set[str]] = {}
+    for raw_record in manifest_payload.get("samples") or []:
+        if not isinstance(raw_record, dict):
+            continue
+        split = str(raw_record.get("split") or "").strip()
+        sample_id = str(raw_record.get("id") or "").strip()
+        if split not in {"train", "val", "test"} or not sample_id:
+            continue
+        group = str(raw_record.get("group") or "").strip() or _project_group_key(
+            raw_record.get("project_name"),
+            raw_record.get("image_filename"),
+            raw_record.get("source"),
+        )
+        record = {**raw_record, "group": group}
+        existing_records.append(record)
+        group_splits.setdefault(group, set()).add(split)
+
+    seen_hashes: set[str] = set()
+    split_counts = {"train": 0, "val": 0, "test": 0}
+    split_pixel_counts = {
+        "train": np.zeros(5, dtype=np.int64),
+        "val": np.zeros(5, dtype=np.int64),
+        "test": np.zeros(5, dtype=np.int64),
+    }
+    existing_files = 0
+    for split in ("train", "val", "test"):
+        images_dir = dataset_root / split / "images"
+        masks_dir = dataset_root / split / "masks"
+        for image_path in sorted(images_dir.glob("*.png")) if images_dir.exists() else []:
+            mask_path = masks_dir / image_path.name
+            if not mask_path.exists():
+                continue
+            existing_files += 1
+            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if image is None or mask is None or image.shape[:2] != mask.shape[:2]:
+                continue
+            seen_hashes.add(_sample_content_hash(image, mask))
+            split_counts[split] += 1
+            split_pixel_counts[split] += np.bincount(mask.reshape(-1), minlength=5)[:5]
+
+    if existing_files and not existing_records:
+        raise SystemExit(
+            "Cannot safely append because existing dataset files have no usable manifest. "
+            "Rebuild without --append so property split history can be recorded."
+        )
+    leaking_groups = sorted(group for group, splits in group_splits.items() if len(splits) > 1)
+    if leaking_groups:
+        preview = ", ".join(leaking_groups[:5])
+        raise SystemExit(
+            "Cannot safely append because properties already cross dataset splits: "
+            f"{preview}. Rebuild the dataset without --append."
+        )
+
+    return {
+        "records": existing_records,
+        "group_splits": {
+            group: next(iter(splits)) for group, splits in group_splits.items() if splits
+        },
+        "seen_hashes": seen_hashes,
+        "split_counts": split_counts,
+        "split_pixel_counts": split_pixel_counts,
+        "duplicate_count": max(
+            0, int(manifest_payload.get("duplicate_exports_skipped") or 0)
+        ),
+    }
+
+
+def _split_indices_grouped(
+    samples: list[ExportSample],
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> dict[int, str]:
+    groups: dict[str, list[int]] = {}
+    for index, sample in enumerate(samples):
+        groups.setdefault(_sample_group_key(sample), []).append(index)
+    grouped = list(groups.items())
+    random.Random(seed).shuffle(grouped)
+    total = len(samples)
+    targets = {
+        "test": int(round(total * test_ratio)),
+        "val": int(round(total * val_ratio)),
+    }
+    if len(grouped) >= 3 and test_ratio > 0:
+        targets["test"] = max(1, targets["test"])
+    if len(grouped) >= 2 and val_ratio > 0:
+        targets["val"] = max(1, targets["val"])
+
+    assignment: dict[int, str] = {}
+    counts = {"train": 0, "val": 0, "test": 0}
+    for group_index, (_, indices) in enumerate(grouped):
+        remaining_groups = len(grouped) - group_index
+        if counts["test"] < targets["test"] and remaining_groups > 2:
+            split = "test"
+        elif counts["val"] < targets["val"] and remaining_groups > 1:
+            split = "val"
+        else:
+            split = "train"
+        for index in indices:
+            assignment[index] = split
+        counts[split] += len(indices)
+    return assignment
 
 
 def _tile_origins(length: int, tile_size: int, stride: int) -> list[int]:
@@ -400,6 +548,10 @@ def main() -> None:
     args = parse_args()
     if args.val_ratio < 0 or args.val_ratio > 1:
         raise SystemExit("--val-ratio must be between 0 and 1.")
+    if args.test_ratio < 0 or args.test_ratio > 1:
+        raise SystemExit("--test-ratio must be between 0 and 1.")
+    if args.val_ratio + args.test_ratio >= 1:
+        raise SystemExit("--val-ratio + --test-ratio must be less than 1.")
     if args.tile_size < 0:
         raise SystemExit("--tile-size must be >= 0.")
     if args.tile_overlap < 0:
@@ -414,15 +566,50 @@ def main() -> None:
         )
 
     dataset_root = args.dataset_root
+    append_state = (
+        _load_append_state(dataset_root)
+        if args.append
+        else {
+            "records": [],
+            "group_splits": {},
+            "seen_hashes": set(),
+            "split_counts": {"train": 0, "val": 0, "test": 0},
+            "split_pixel_counts": {
+                "train": np.zeros(5, dtype=np.int64),
+                "val": np.zeros(5, dtype=np.int64),
+                "test": np.zeros(5, dtype=np.int64),
+            },
+            "duplicate_count": 0,
+        }
+    )
     if not args.append:
         _clear_dataset_pngs(dataset_root)
     dirs = _ensure_dirs(dataset_root)
     next_idx = _next_numeric_id(dataset_root)
 
-    _, val_set = _split_indices(len(samples), args.val_ratio, args.seed)
-    manifest = []
-    pixel_counts = np.zeros(5, dtype=np.int64)
-    split_counts = {"train": 0, "val": 0}
+    split_by_index = _split_indices_grouped(
+        samples,
+        args.val_ratio,
+        args.test_ratio,
+        args.seed,
+    )
+    for src_idx, sample in enumerate(samples):
+        existing_split = append_state["group_splits"].get(_sample_group_key(sample))
+        if existing_split:
+            split_by_index[src_idx] = existing_split
+
+    manifest = list(append_state["records"])
+    split_pixel_counts = {
+        split: np.array(append_state["split_pixel_counts"][split], dtype=np.int64)
+        for split in ("train", "val", "test")
+    }
+    pixel_counts = sum(
+        (split_pixel_counts[split] for split in ("train", "val", "test")),
+        start=np.zeros(5, dtype=np.int64),
+    )
+    split_counts = dict(append_state["split_counts"])
+    seen_sample_hashes: set[str] = set(append_state["seen_hashes"])
+    duplicate_count = int(append_state["duplicate_count"])
 
     for src_idx, sample in enumerate(samples):
         try:
@@ -442,7 +629,14 @@ def main() -> None:
             print(f"[skip] {exc}")
             continue
 
-        split = "val" if src_idx in val_set else "train"
+        sample_hash = _sample_content_hash(image, mask)
+        if sample_hash in seen_sample_hashes:
+            duplicate_count += 1
+            print(f"[skip] duplicate image/mask export: {sample.source}")
+            continue
+        seen_sample_hashes.add(sample_hash)
+
+        split = split_by_index.get(src_idx, "train")
         variants = _build_tiled_variants(
             image,
             mask,
@@ -466,7 +660,9 @@ def main() -> None:
                 continue
 
             split_counts[split] += 1
-            pixel_counts += np.bincount(tile_mask.reshape(-1), minlength=5)
+            tile_counts = np.bincount(tile_mask.reshape(-1), minlength=5)
+            pixel_counts += tile_counts
+            split_pixel_counts[split] += tile_counts
             manifest.append(
                 {
                     "id": sample_id,
@@ -478,6 +674,8 @@ def main() -> None:
                     "mask_filename": sample.metadata.get("mask_filename"),
                     "tile_index": int(tile_idx),
                     "tile": tile_meta,
+                    "group": _sample_group_key(sample),
+                    "sample_hash": sample_hash,
                 }
             )
 
@@ -487,11 +685,25 @@ def main() -> None:
     (dataset_root / "manifest.json").write_text(
         json.dumps(
             {
-                "total": split_counts["train"] + split_counts["val"],
+                "total": sum(split_counts.values()),
                 "train": split_counts["train"],
                 "val": split_counts["val"],
+                "test": split_counts["test"],
+                "duplicate_exports_skipped": duplicate_count,
+                "split_strategy": "grouped-by-property",
+                "split_ratios": {
+                    "val": float(args.val_ratio),
+                    "test": float(args.test_ratio),
+                },
                 "class_pixel_counts": {
                     CLASS_NAMES[i]: int(pixel_counts[i]) for i in range(5)
+                },
+                "class_pixel_counts_by_split": {
+                    split: {
+                        CLASS_NAMES[i]: int(split_pixel_counts[split][i])
+                        for i in range(5)
+                    }
+                    for split in ("train", "val", "test")
                 },
                 "samples": manifest,
             },
@@ -504,9 +716,12 @@ def main() -> None:
     total_pixels = int(pixel_counts.sum())
     print("Dataset build complete.")
     print(
-        f"- Samples: total={split_counts['train'] + split_counts['val']} "
-        f"train={split_counts['train']} val={split_counts['val']}"
+        f"- Samples: total={sum(split_counts.values())} "
+        f"train={split_counts['train']} val={split_counts['val']} "
+        f"test={split_counts['test']}"
     )
+    print(f"- Duplicate exports skipped: {duplicate_count}")
+    print("- Split strategy: grouped by property (prevents property leakage)")
     if args.tile_size > 0:
         print(
             f"- Tiling: tile_size={args.tile_size} overlap={args.tile_overlap} "

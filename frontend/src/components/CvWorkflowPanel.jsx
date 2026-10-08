@@ -10,6 +10,9 @@ export default function CvWorkflowPanel({
   segmentingImage,
   trainingExporting,
   segmentationResult,
+  segmentationStatus,
+  showCvUncertainty,
+  setShowCvUncertainty,
   backendMeasurementResult,
   measurementHistory,
   activeLearningQueue,
@@ -36,6 +39,22 @@ export default function CvWorkflowPanel({
     ? layerFeatures[selectedReviewLayer].length
     : 0;
   const selectedConfidence = segmentationResult?.[selectedReviewLayer]?.confidence;
+  const diagnostics = segmentationResult?.diagnostics || segmentationStatus || {};
+  const engineLabel = String(diagnostics.engine || "unknown").replaceAll("-", " ");
+  const trainedOutputActive = String(diagnostics.engine || "").startsWith("torchscript");
+  const modelStatusLabel = trainedOutputActive
+    ? diagnostics.engine === "torchscript-ready"
+      ? "Trained model ready"
+      : "Trained model active"
+    : diagnostics.model_loaded
+      ? "Model ready; fallback used"
+      : "Heuristic fallback";
+  const uncertaintyPct = Math.round(
+    Math.max(0, Math.min(1, Number(diagnostics.uncertain_fraction || 0))) * 100
+  );
+  const uncertaintyRegionCount = Array.isArray(segmentationResult?.uncertain_polygons)
+    ? segmentationResult.uncertain_polygons.length
+    : 0;
 
   return (
     <div
@@ -56,6 +75,61 @@ export default function CvWorkflowPanel({
         </div>
       ) : (
         <>
+          <div
+            style={{
+              padding: 9,
+              borderRadius: 10,
+              border: trainedOutputActive
+                ? "1px solid rgba(120,220,150,0.30)"
+                : "1px solid rgba(255,190,105,0.34)",
+              background: trainedOutputActive
+                ? "rgba(38,145,76,0.12)"
+                : "rgba(180,110,30,0.12)",
+              marginBottom: 8,
+              fontSize: 11,
+              lineHeight: 1.45,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <strong style={{ textTransform: "capitalize" }}>{engineLabel}</strong>
+              <span>{modelStatusLabel}</span>
+            </div>
+            <div style={{ opacity: 0.78, marginTop: 3 }}>
+              Model: {diagnostics.model_version || "not loaded"}
+              {Number(diagnostics.tile_count || 0) > 0
+                ? ` • ${diagnostics.tile_count} tile${diagnostics.tile_count === 1 ? "" : "s"}`
+                : ""}
+              {diagnostics.tiled_inference
+                ? ` • ${diagnostics.tile_size}px / ${diagnostics.tile_overlap}px overlap`
+                : ""}
+            </div>
+            {diagnostics.model_error ? (
+              <div style={{ color: "#ffd39d", marginTop: 3 }}>
+                {String(diagnostics.model_error).slice(0, 180)}
+              </div>
+            ) : null}
+            {segmentationResult ? (
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 7,
+                  marginTop: 7,
+                  cursor: uncertaintyRegionCount ? "pointer" : "default",
+                  opacity: uncertaintyRegionCount ? 1 : 0.65,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={!!showCvUncertainty}
+                  onChange={(event) => setShowCvUncertainty(event.target.checked)}
+                  disabled={!uncertaintyRegionCount}
+                />
+                Show low-confidence review areas ({uncertaintyPct}% of image, {uncertaintyRegionCount} regions)
+              </label>
+            ) : null}
+          </div>
+
           <div
             style={{
               padding: 8,
@@ -312,7 +386,9 @@ export default function CvWorkflowPanel({
                   fontSize: 12,
                 }}
               >
-                {trainingExporting ? "Exporting Correction ZIP..." : "Mark CV Wrong + Export Correction Sample"}
+                {trainingExporting
+                  ? "Saving Correction..."
+                  : "Save Corrected Polygons for Training"}
               </button>
             </div>
           ) : null}

@@ -242,6 +242,17 @@ def main():
         samples_per_image=1,
         normalize_imagenet=args.normalize_imagenet,
     )
+    test_ds = SegmentationDataset(
+        args.data_root / "test",
+        crop_size=args.crop_size,
+        training=False,
+        samples_per_image=1,
+        normalize_imagenet=args.normalize_imagenet,
+    )
+    if len(train_ds) == 0:
+        raise RuntimeError("Training split is empty. Rebuild and validate the dataset first.")
+    if len(val_ds) == 0:
+        raise RuntimeError("Validation split is empty. Use exports from at least two properties.")
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
@@ -251,6 +262,13 @@ def main():
     )
     val_loader = DataLoader(
         val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=max(0, int(args.num_workers)),
+        collate_fn=pad_collate,
+    )
+    test_loader = DataLoader(
+        test_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=max(0, int(args.num_workers)),
@@ -295,12 +313,13 @@ def main():
         )
     )
     print(
-        f"dataset_samples train={len(train_ds)} val={len(val_ds)} "
+        f"dataset_samples train={len(train_ds)} val={len(val_ds)} test={len(test_ds)} "
         f"(crop={args.crop_size}, samples_per_image={args.samples_per_image})"
     )
     criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     best_val = float("inf")
+    best_score = float("-inf")
     best_epoch = 0
     best_metrics = None
     history: list[dict] = []
@@ -349,18 +368,38 @@ def main():
             "metrics": metrics,
         }
         torch.save(ckpt, args.out / "last.pt")
-        if val_loss < best_val:
+        score = float(metrics["mean_iou_fg"])
+        if score > best_score or (score == best_score and val_loss < best_val):
+            best_score = score
             best_val = val_loss
             best_epoch = epoch
             best_metrics = metrics
             torch.save(ckpt, args.out / "best.pt")
+
+    test_metrics = None
+    test_loss = None
+    if len(test_ds) > 0 and (args.out / "best.pt").exists():
+        best_checkpoint = torch.load(args.out / "best.pt", map_location=device)
+        model.load_state_dict(best_checkpoint["model_state_dict"])
+        test_loss, test_confmat = validate(
+            model,
+            test_loader,
+            criterion,
+            device,
+            num_classes=num_classes,
+        )
+        test_metrics = compute_segmentation_metrics(test_confmat)
 
     metrics_path = args.out / "metrics.json"
     metrics_payload = {
         "class_order": CLASS_ORDER,
         "best_epoch": int(best_epoch),
         "best_val_loss": float(best_val),
+        "selection_metric": "mean_iou_fg",
+        "best_selection_score": float(best_score),
         "best_metrics": best_metrics,
+        "test_loss": float(test_loss) if test_loss is not None else None,
+        "test_metrics": test_metrics,
         "history": history,
     }
     metrics_path.write_text(json.dumps(metrics_payload, indent=2) + "\n", encoding="utf-8")
@@ -370,6 +409,13 @@ def main():
             f"epoch={best_epoch} "
             f"mIoU_fg={best_metrics['mean_iou_fg']:.4f} "
             f"mIoU_all={best_metrics['mean_iou_all']:.4f}"
+        )
+    if test_metrics:
+        print(
+            "held_out_test "
+            f"loss={float(test_loss):.4f} "
+            f"mIoU_fg={test_metrics['mean_iou_fg']:.4f} "
+            f"mIoU_all={test_metrics['mean_iou_all']:.4f}"
         )
     print(f"metrics_json={metrics_path}")
 

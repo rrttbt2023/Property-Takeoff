@@ -202,6 +202,21 @@ export function segmentMeasurementUpload({
   });
 }
 
+export function getSegmentationStatus() {
+  return request("/api/measurements/segment/status");
+}
+
+export function saveSegmentationCorrection({ imageBlob, maskBlob, metadata }) {
+  const formData = new FormData();
+  formData.append("image", imageBlob, "image.png");
+  formData.append("mask", maskBlob, "mask.png");
+  formData.append("metadata", JSON.stringify(metadata || {}));
+  return request("/api/measurements/segment/corrections", {
+    method: "POST",
+    body: formData,
+  });
+}
+
 export function listSharedProjects(limit = 100) {
   return request(`/api/projects?limit=${encodeURIComponent(limit)}`, {
     headers: sharedAuthToken
@@ -225,6 +240,7 @@ export function saveSharedProject({
   polygonCount,
   hasBoundary,
   baseLastEditedAt,
+  baseRevision,
   forceOverwrite = false,
   payload,
 }) {
@@ -241,10 +257,39 @@ export function saveSharedProject({
       polygon_count: Number.isFinite(Number(polygonCount)) ? Number(polygonCount) : null,
       has_boundary: typeof hasBoundary === "boolean" ? hasBoundary : null,
       base_last_edited_at: String(baseLastEditedAt || "").trim() || null,
+      base_revision:
+        baseRevision !== null &&
+        baseRevision !== undefined &&
+        String(baseRevision).trim() !== "" &&
+        Number.isFinite(Number(baseRevision))
+        ? Math.max(1, Math.trunc(Number(baseRevision)))
+        : null,
       force_overwrite: !!forceOverwrite,
       payload,
     }),
   });
+}
+
+export function listSharedProjectVersions(projectId, limit = 100) {
+  return request(
+    `/api/projects/${encodeURIComponent(projectId)}/versions?limit=${encodeURIComponent(limit)}`,
+    {
+      headers: sharedAuthToken
+        ? { Authorization: `Bearer ${sharedAuthToken}` }
+        : {},
+    }
+  );
+}
+
+export function getSharedProjectVersion(projectId, revision) {
+  return request(
+    `/api/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(revision)}`,
+    {
+      headers: sharedAuthToken
+        ? { Authorization: `Bearer ${sharedAuthToken}` }
+        : {},
+    }
+  );
 }
 
 export function deleteSharedProject(projectId) {

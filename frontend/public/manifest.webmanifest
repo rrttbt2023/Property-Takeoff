@@ -1,0 +1,21 @@
+{
+  "name": "McKenna Site Management Property Takeoff",
+  "short_name": "Property Takeoff",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "description": "Offline-friendly property takeoff for snow and landscaping.",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

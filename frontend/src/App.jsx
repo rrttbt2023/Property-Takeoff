@@ -17,21 +17,81 @@ import {
   deleteSharedProject,
   getApiHealth,
   getSharedProject,
+  getSharedProjectVersion,
   getSharedAccessSession,
   getSecurityAuditEvents,
   getMeasurementHistory,
+  getSegmentationStatus,
   loginSharedAccess,
+  listSharedProjectVersions,
   listSharedProjects,
   logoutSharedAccess,
   measureGeoJson,
+  saveSegmentationCorrection,
   saveSharedProject,
   setSharedAuthToken,
   segmentMeasurementUpload,
   uploadMeasurement,
 } from "./api";
 import CvWorkflowPanel from "./components/CvWorkflowPanel";
+import HomeDashboard from "./components/HomeDashboard";
 import SystemStatusPanel from "./components/SystemStatusPanel";
 import WorkflowSummaryCard from "./components/WorkflowSummaryCard";
+import useGeometryAnalysis from "./hooks/useGeometryAnalysis";
+import {
+  clearProjectRecovery,
+  getLatestProjectRecovery,
+  getRecoveryStorageStatus,
+  hasProjectRecovery,
+  listProjectRecoveries,
+  queueProjectRecoverySnapshot,
+} from "./persistence/projectRecovery";
+import {
+  INPUT_SESSION,
+  createPointerInputMachine,
+  extractClientPointFromRawInputEvent,
+  getPointerKindFromRawEvent,
+  getRawTouchCount,
+  isConfirmedStylusRawEvent,
+  isLikelyStylusRawEvent,
+} from "./interaction/pointerInput";
+import {
+  DEFAULT_PROJECT_FOLDER_NAME,
+  HOME_APPEARANCE_STORAGE_KEY,
+  HOME_PINNED_PROJECTS_STORAGE_KEY,
+  HOME_PROJECT_PREVIEWS_STORAGE_KEY,
+  HOME_RESUME_PROJECT_STORAGE_KEY,
+  PROJECT_FOLDER_COLLAPSE_STORAGE_KEY,
+  PROJECT_FOLDER_LIBRARY_STORAGE_KEY,
+  PROJECT_LIBRARY_STORAGE_KEY,
+  PROJECT_VERSION_HISTORY_MAX_PER_PROJECT,
+  PROJECT_VERSION_HISTORY_STORAGE_KEY,
+  SHARED_AUTH_STORAGE_KEY,
+  SHARED_PROJECT_LIBRARY_FETCH_LIMIT,
+  SHARED_PROJECT_QUEUE_STORAGE_KEY,
+  WORKFLOW_MODE_LOCATION,
+  WORKFLOW_MODE_PDF,
+  WORKFLOW_MODE_STORAGE_KEY,
+  buildProjectLibraryEntryFromPayload,
+  buildProjectLibraryId,
+  buildProjectPayloadSignature,
+  countProjectPayloadPolygons,
+  isAuthError,
+  mergeSharedProjectLibrarySummaries,
+  readStoredHomeAppearance,
+  readStoredPinnedProjectIds,
+  readStoredProjectPreviewImages,
+  readStoredProjectFolderCollapseState,
+  readStoredProjectFolders,
+  readStoredProjectLibrary,
+  readStoredProjectVersionHistory,
+  readStoredResumeProject,
+  readStoredSharedAuth,
+  readStoredSharedProjectQueue,
+  readStoredWorkflowMode,
+  upsertProjectLibraryEntries,
+  upsertSharedQueueOperation,
+} from "./projects/projectLibrary";
 
 // ---------- Layer config (single source of truth) ----------
 const LAYER_KEYS = ["plowable", "sidewalks", "turf", "mulch"];
@@ -100,10 +160,11 @@ const PDF_ANNOT_COLOR_PRESETS = [
   "#6e4f2a",
 ];
 const PDF_ANNOT_TOOL_OPACITY_DEFAULTS = {
-  pen: 0.95,
-  pencil: 0.7,
-  marker: 0.42,
-  crayon: 0.76,
+  pen: 0.98,
+  pencil: 0.62,
+  marker: 0.88,
+  highlighter: 0.28,
+  crayon: 0.8,
   shape: 0.95,
   line: 0.95,
   rectangle: 0.95,
@@ -111,6 +172,14 @@ const PDF_ANNOT_TOOL_OPACITY_DEFAULTS = {
   arrow: 0.95,
   callout: 0.95,
 };
+const PDF_CANVAS_ZOOM_MIN = 0.5;
+const PDF_CANVAS_ZOOM_MAX = 8;
+const PDF_CANVAS_ZOOM_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
+const PDF_HIGH_QUALITY_ZOOM_THRESHOLD = 1.5;
+const PDF_HIGH_QUALITY_RENDER_DIMENSION = 4800;
+const PDF_ULTRA_QUALITY_RENDER_DIMENSION = 6400;
+const PDF_TOUCH_HIGH_QUALITY_RENDER_DIMENSION = 4400;
+const PDF_TOUCH_ULTRA_QUALITY_RENDER_DIMENSION = 5600;
 const PDF_SHAPE_OPTIONS = [
   { key: "line", label: "Line" },
   { key: "rectangle", label: "Rectangle" },
@@ -144,7 +213,6 @@ const TRAIN_PREVIEW_COLORS = {
 };
 const UNDO_REDO_MAX_DEPTH = 80;
 const TINY_POLYGON_SQFT = 25;
-const AUTO_QC_OVERLAP_LIMIT = 180;
 const DEFAULT_SNAP_DISTANCE_M = 2.25;
 const DEFAULT_TERRAIN_EXAGGERATION = 1.4;
 const DEFAULT_3D_OBJECT_OPACITY = 0.36;
@@ -152,22 +220,7 @@ const ENABLE_TRUE_TERRAIN = true;
 const ENABLE_OBJECTS_3D = true;
 const PLAN_OVERLAY_SOURCE_ID = "uploaded-plan-overlay-src";
 const PLAN_OVERLAY_LAYER_ID = "uploaded-plan-overlay-layer";
-const WORKFLOW_MODE_STORAGE_KEY = "takeoff-workflow-mode-v1";
 const ESTIMATE_TEMPLATES_STORAGE_KEY = "takeoff-estimate-templates-v1";
-const PROJECT_LIBRARY_STORAGE_KEY = "takeoff-project-library-v1";
-const PROJECT_FOLDER_LIBRARY_STORAGE_KEY = "takeoff-project-folders-v1";
-const PROJECT_FOLDER_COLLAPSE_STORAGE_KEY = "takeoff-project-folders-collapsed-v1";
-const PROJECT_VERSION_HISTORY_STORAGE_KEY = "takeoff-project-version-history-v1";
-const SHARED_PROJECT_QUEUE_STORAGE_KEY = "takeoff-shared-project-queue-v1";
-const SHARED_AUTH_STORAGE_KEY = "takeoff-shared-auth-v1";
-const HOME_PINNED_PROJECTS_STORAGE_KEY = "takeoff-home-pinned-projects-v1";
-const HOME_RESUME_PROJECT_STORAGE_KEY = "takeoff-home-resume-project-v1";
-const HOME_APPEARANCE_STORAGE_KEY = "takeoff-home-appearance-v1";
-const PROJECT_LIBRARY_MAX_ENTRIES = 30;
-const PROJECT_VERSION_HISTORY_MAX_PER_PROJECT = 16;
-const WORKFLOW_MODE_LOCATION = "location";
-const WORKFLOW_MODE_PDF = "pdf";
-const DEFAULT_PROJECT_FOLDER_NAME = "Unfiled";
 const APP_SCREEN_HOME = "home";
 const APP_SCREEN_LOCATION = "location";
 const APP_SCREEN_PDF = "pdf";
@@ -657,114 +710,6 @@ function useRafThrottle(fn) {
       fnRef.current?.(...args);
     });
   }, []);
-}
-
-function getPointerKindFromRawEvent(original) {
-  if (!original) return "unknown";
-  if (typeof original.pointerType === "string" && original.pointerType) {
-    return original.pointerType.toLowerCase();
-  }
-  const touch =
-    original.touches?.[0] ||
-    original.changedTouches?.[0] ||
-    original.targetTouches?.[0] ||
-    null;
-  const touchType = String(touch?.touchType || "").toLowerCase();
-  if (touchType === "stylus") return "pen";
-  if (touch) return "touch";
-  const type = String(original.type || "").toLowerCase();
-  if (type.startsWith("touch")) return "touch";
-  if (type.startsWith("mouse")) return "mouse";
-  return "unknown";
-}
-
-function isLikelyStylusRawEvent(original, pointerKind = getPointerKindFromRawEvent(original)) {
-  if (!original) return false;
-  if (pointerKind === "pen" || pointerKind === "mouse") return true;
-  const touch =
-    original.touches?.[0] ||
-    original.changedTouches?.[0] ||
-    original.targetTouches?.[0] ||
-    null;
-  const touchType = String(touch?.touchType || "").toLowerCase();
-  if (touchType === "stylus") return true;
-  if (
-    Number.isFinite(Number(original.altitudeAngle)) ||
-    Number.isFinite(Number(original.azimuthAngle)) ||
-    Number.isFinite(Number(original.tiltX)) ||
-    Number.isFinite(Number(original.tiltY)) ||
-    Number.isFinite(Number(original.twist))
-  ) {
-    return true;
-  }
-  const width = Number(original.width ?? touch?.radiusX ?? touch?.webkitRadiusX);
-  const height = Number(original.height ?? touch?.radiusY ?? touch?.webkitRadiusY);
-  const pressure = Number(original.pressure ?? touch?.force ?? original.webkitForce);
-  if (
-    pointerKind === "touch" &&
-    Number.isFinite(pressure) &&
-    pressure > 0 &&
-    Number.isFinite(width) &&
-    Number.isFinite(height) &&
-    width <= 5 &&
-    height <= 5
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function isConfirmedStylusRawEvent(original, pointerKind = getPointerKindFromRawEvent(original)) {
-  if (!original) return false;
-  if (pointerKind === "pen") return true;
-  const touch =
-    original.touches?.[0] ||
-    original.changedTouches?.[0] ||
-    original.targetTouches?.[0] ||
-    null;
-  const touchType = String(touch?.touchType || "").toLowerCase();
-  if (touchType === "stylus") return true;
-  if (
-    Number.isFinite(Number(original.altitudeAngle)) ||
-    Number.isFinite(Number(original.azimuthAngle)) ||
-    Number.isFinite(Number(original.tiltX)) ||
-    Number.isFinite(Number(original.tiltY)) ||
-    Number.isFinite(Number(original.twist))
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function extractClientPointFromRawInputEvent(original) {
-  if (!original) return null;
-  const directX = Number(original.clientX);
-  const directY = Number(original.clientY);
-  if (Number.isFinite(directX) && Number.isFinite(directY)) {
-    return { clientX: directX, clientY: directY };
-  }
-  const touch =
-    original.touches?.[0] ||
-    original.changedTouches?.[0] ||
-    original.targetTouches?.[0] ||
-    null;
-  const touchX = Number(touch?.clientX);
-  const touchY = Number(touch?.clientY);
-  if (Number.isFinite(touchX) && Number.isFinite(touchY)) {
-    return { clientX: touchX, clientY: touchY };
-  }
-  return null;
-}
-
-function getRawTouchCount(original) {
-  if (!original) return 0;
-  const touchesCount = Number(original.touches?.length);
-  if (Number.isFinite(touchesCount) && touchesCount > 0) return touchesCount;
-  const targetTouchesCount = Number(original.targetTouches?.length);
-  if (Number.isFinite(targetTouchesCount) && targetTouchesCount > 0) return targetTouchesCount;
-  const changedTouchesCount = Number(original.changedTouches?.length);
-  if (Number.isFinite(changedTouchesCount) && changedTouchesCount > 0) return changedTouchesCount;
-  return 0;
 }
 
 // MapboxDraw default polygon mode is tap-focused on mobile and makes panning while
@@ -1962,7 +1907,9 @@ function normalizeHexColor(value, fallback = PDF_ANNOT_DEFAULT_COLOR) {
 }
 
 function isPdfLineTool(tool) {
-  return ["pen", "pencil", "marker", "crayon"].includes(String(tool || "").toLowerCase());
+  return ["pen", "pencil", "marker", "highlighter", "crayon"].includes(
+    String(tool || "").toLowerCase()
+  );
 }
 
 function isPdfArrowTool(tool) {
@@ -2025,6 +1972,9 @@ function normalizePdfToolOpacityMap(candidate) {
     marker: Number.isFinite(Number(source.marker))
       ? Math.max(0.05, Math.min(1, Number(source.marker)))
       : PDF_ANNOT_TOOL_OPACITY_DEFAULTS.marker,
+    highlighter: Number.isFinite(Number(source.highlighter))
+      ? Math.max(0.05, Math.min(1, Number(source.highlighter)))
+      : PDF_ANNOT_TOOL_OPACITY_DEFAULTS.highlighter,
     crayon: Number.isFinite(Number(source.crayon))
       ? Math.max(0.05, Math.min(1, Number(source.crayon)))
       : PDF_ANNOT_TOOL_OPACITY_DEFAULTS.crayon,
@@ -2066,7 +2016,14 @@ function getPdfAnnotationStrokeStyle(tool, baseWidth, opacityMap = null) {
   const toolOpacity = getPdfToolOpacity(kind, opacityMap);
   if (kind === "marker") {
     return {
-      width: Math.max(8, safeBaseWidth * 2),
+      width: Math.max(6, safeBaseWidth * 1.55),
+      opacity: toolOpacity,
+      fillOpacity: 0,
+    };
+  }
+  if (kind === "highlighter") {
+    return {
+      width: Math.max(14, safeBaseWidth * 3.2),
       opacity: toolOpacity,
       fillOpacity: 0,
     };
@@ -2275,8 +2232,16 @@ function renderPdfToolbarToolPreview(toolKey, color = "#d7e9ff", activeShapeKind
   if (toolKey === "marker") {
     return (
       <>
-        <path d="M11 27 L23 15 L35 15" stroke={stroke} strokeWidth="5.8" strokeLinecap="butt" strokeLinejoin="round" />
-        <path d="M12 29 L34 29" stroke={stroke} strokeWidth="2" strokeOpacity="0.55" strokeLinecap="butt" strokeDasharray="4 3" />
+        <path d="M10 28 C16 22, 24 17, 38 13" stroke={stroke} strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M10 27 C17 21, 25 17, 38 14" stroke="#ffffff" strokeWidth="1.1" strokeOpacity="0.22" strokeLinecap="round" />
+      </>
+    );
+  }
+  if (toolKey === "highlighter") {
+    return (
+      <>
+        <path d="M9 27 L37 14" stroke={stroke} strokeWidth="9" strokeOpacity="0.42" strokeLinecap="square" />
+        <path d="M10 31 L38 18" stroke={stroke} strokeWidth="2" strokeOpacity="0.72" strokeLinecap="square" />
       </>
     );
   }
@@ -2297,10 +2262,13 @@ function renderPdfToolbarToolPreview(toolKey, color = "#d7e9ff", activeShapeKind
     );
   }
   return (
-    <>
-      <path d="M10 29 C18 23, 24 18, 38 13" stroke={stroke} strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M10 31 C18 25, 24 20, 38 15" stroke={stroke} strokeWidth="1.1" strokeOpacity="0.28" strokeLinecap="round" strokeDasharray="1.5 3.5" />
-    </>
+    <path
+      d="M10 29 C18 23, 24 18, 38 13"
+      stroke={stroke}
+      strokeWidth="2.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
   );
 }
 
@@ -2309,49 +2277,61 @@ function getPdfStrokeTextureStyle(kind) {
   if (normalizedKind === "pen") {
     return {
       filterId: "",
-      textureDash: "1.4 3.6",
-      textureOpacityScale: 0.2,
-      textureWidthScale: 0.34,
-      edgeOpacityScale: 0.26,
-      edgeWidthScale: 1.16,
+      textureDash: "",
+      textureOpacityScale: 0,
+      textureWidthScale: 0,
+      edgeOpacityScale: 0,
+      edgeWidthScale: 0,
       edgeFilterId: "",
       overlayBlend: "normal",
     };
   }
   if (normalizedKind === "pencil") {
     return {
-      filterId: "",
-      textureDash: "0.65 3.4",
-      textureOpacityScale: 0.5,
-      textureWidthScale: 0.42,
-      edgeOpacityScale: 0.18,
-      edgeWidthScale: 1.22,
-      edgeFilterId: "",
+      filterId: "url(#pdf-pencil-grain)",
+      textureDash: "0.45 2.6",
+      textureOpacityScale: 0.52,
+      textureWidthScale: 0.46,
+      edgeOpacityScale: 0.12,
+      edgeWidthScale: 1.16,
+      edgeFilterId: "url(#pdf-pencil-grain)",
       overlayBlend: "normal",
     };
   }
   if (normalizedKind === "crayon") {
     return {
-      filterId: "",
-      textureDash: "2.1 3.1",
-      textureOpacityScale: 0.4,
-      textureWidthScale: 0.58,
-      edgeOpacityScale: 0.14,
-      edgeWidthScale: 1.32,
-      edgeFilterId: "",
+      filterId: "url(#pdf-crayon-wax)",
+      textureDash: "1.2 2.2",
+      textureOpacityScale: 0.46,
+      textureWidthScale: 0.68,
+      edgeOpacityScale: 0.18,
+      edgeWidthScale: 1.38,
+      edgeFilterId: "url(#pdf-crayon-wax)",
       overlayBlend: "normal",
     };
   }
   if (normalizedKind === "marker") {
     return {
-      filterId: "",
-      textureDash: "5.5 3.8",
-      textureOpacityScale: 0.12,
+      filterId: "url(#pdf-marker-felt)",
+      textureDash: "3.6 2.2",
+      textureOpacityScale: 0.16,
       textureWidthScale: 0.72,
-      edgeOpacityScale: 0.22,
-      edgeWidthScale: 1.08,
-      edgeFilterId: "",
+      edgeOpacityScale: 0.2,
+      edgeWidthScale: 1.18,
+      edgeFilterId: "url(#pdf-marker-felt)",
       overlayBlend: "normal",
+    };
+  }
+  if (normalizedKind === "highlighter") {
+    return {
+      filterId: "",
+      textureDash: "",
+      textureOpacityScale: 0,
+      textureWidthScale: 0,
+      edgeOpacityScale: 0.12,
+      edgeWidthScale: 1.04,
+      edgeFilterId: "",
+      overlayBlend: "multiply",
     };
   }
   return {
@@ -2681,7 +2661,17 @@ function loadPdfToolOpacities() {
   if (typeof window === "undefined") return { ...PDF_ANNOT_TOOL_OPACITY_DEFAULTS };
   try {
     const raw = window.localStorage.getItem(PDF_ANNOT_TOOL_OPACITY_STORAGE_KEY);
-    return normalizePdfToolOpacityMap(JSON.parse(raw || "{}"));
+    const parsed = JSON.parse(raw || "{}");
+    const candidate = parsed && typeof parsed === "object" ? { ...parsed } : {};
+    if (!Object.prototype.hasOwnProperty.call(candidate, "highlighter")) {
+      // Preserve custom values while migrating the former, much less distinct defaults.
+      if (Number(candidate.pen) === 0.95) candidate.pen = PDF_ANNOT_TOOL_OPACITY_DEFAULTS.pen;
+      if (Number(candidate.pencil) === 0.7) candidate.pencil = PDF_ANNOT_TOOL_OPACITY_DEFAULTS.pencil;
+      if (Number(candidate.marker) === 0.42) candidate.marker = PDF_ANNOT_TOOL_OPACITY_DEFAULTS.marker;
+      if (Number(candidate.crayon) === 0.76) candidate.crayon = PDF_ANNOT_TOOL_OPACITY_DEFAULTS.crayon;
+      candidate.highlighter = PDF_ANNOT_TOOL_OPACITY_DEFAULTS.highlighter;
+    }
+    return normalizePdfToolOpacityMap(candidate);
   } catch {
     return { ...PDF_ANNOT_TOOL_OPACITY_DEFAULTS };
   }
@@ -2722,7 +2712,7 @@ function normalizePdfAnnotationFeature(feature, idx = 0) {
   const geometry = to2DFeature(feature).geometry;
   const kindRaw = String(feature.properties?.kind || "").toLowerCase();
   const kindCandidate = kindRaw === "shape" ? "rectangle" : kindRaw;
-  const kind = ["pen", "pencil", "marker", "crayon", "line", "rectangle", "diamond", "triangle", "circle", "star", "arrow", "callout", "text"].includes(kindCandidate)
+  const kind = ["pen", "pencil", "marker", "highlighter", "crayon", "line", "rectangle", "diamond", "triangle", "circle", "star", "arrow", "callout", "text"].includes(kindCandidate)
     ? kindCandidate
     : "pen";
   const color = normalizeHexColor(feature.properties?.color, PDF_ANNOT_DEFAULT_COLOR);
@@ -2976,12 +2966,23 @@ function normalizePdfSavedMeasurementEntry(entry, idx = 0) {
   return normalized;
 }
 
+function formatPdfAreaDisplayValue(squareFeet, acresValue = null) {
+  const sqft = Number(squareFeet);
+  if (!Number.isFinite(sqft)) return "";
+  const providedAcres = Number(acresValue);
+  const hasProvidedAcres =
+    acresValue !== null && acresValue !== "" && Number.isFinite(providedAcres);
+  const acres = hasProvidedAcres ? providedAcres : sqft / 43560;
+  const acreDecimals = Math.abs(acres) < 1 ? 3 : 2;
+  return `${sqft.toFixed(2)} sq ft (${acres.toFixed(acreDecimals)} ac)`;
+}
+
 function formatPdfMeasurementDisplayValue(measurement) {
   if (!measurement || typeof measurement !== "object") return "";
   const result = measurement.result && typeof measurement.result === "object" ? measurement.result : {};
   if (measurement.kind === "area") {
     if (Number.isFinite(Number(result.sqft))) {
-      return `${Number(result.sqft).toFixed(2)} sq ft`;
+      return formatPdfAreaDisplayValue(result.sqft, result.acres);
     }
     if (Number.isFinite(Number(result.squarePixels))) {
       return `${Number(result.squarePixels).toFixed(2)} px²`;
@@ -3143,6 +3144,19 @@ async function mapCanvasToPngBlob(canvas) {
   });
 }
 
+async function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    if (!blob) {
+      reject(new Error("No image blob was available."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Could not prepare image capture."));
+    reader.readAsDataURL(blob);
+  });
+}
+
 function mapBoundsToImageSourceCoordinates(map) {
   if (!map?.getBounds) return null;
   try {
@@ -3192,7 +3206,7 @@ async function renderPdfPageToImageFile(pdfFile, options = {}) {
     const baseViewport = page.getViewport({ scale: 1 });
     const nativeMax = Math.max(baseViewport.width || 1, baseViewport.height || 1);
     const targetScale = maxDimension / nativeMax;
-    const scale = Math.max(1, Math.min(4.5, targetScale));
+    const scale = Math.max(1, Math.min(9, targetScale));
     const viewport = page.getViewport({ scale });
 
     const canvas = document.createElement("canvas");
@@ -3429,37 +3443,6 @@ function getPreferred3dInsertBeforeId(map) {
   ]);
 }
 
-function readStoredWorkflowMode() {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(WORKFLOW_MODE_STORAGE_KEY);
-    if (raw === WORKFLOW_MODE_LOCATION || raw === WORKFLOW_MODE_PDF) {
-      return raw;
-    }
-  } catch {
-    /* intentionally ignore localStorage errors */
-  }
-  return null;
-}
-
-function buildProjectLibraryId(projectName) {
-  const normalized = String(projectName || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!normalized) return `untitled-${Date.now()}`;
-  return `name-${normalized}`;
-}
-
-function countProjectPayloadPolygons(payload) {
-  let count = 0;
-  for (const key of LAYER_KEYS) {
-    count += Array.isArray(payload?.layerFeatures?.[key]) ? payload.layerFeatures[key].length : 0;
-  }
-  return count;
-}
-
 function summarizePayloadMetrics(payload) {
   const summary = {
     polygons: 0,
@@ -3484,433 +3467,6 @@ function summarizePayloadMetrics(payload) {
     summary.byLayer[layer].sqft = sqft;
   }
   return summary;
-}
-
-function readStoredProjectLibrary() {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(PROJECT_LIBRARY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const out = [];
-    for (const entry of parsed) {
-      const payload = entry?.payload;
-      const hasValidPayload = isValidProjectPayload(payload);
-      const projectName =
-        String(entry?.projectName || payload?.projectName || "").trim() || "Untitled Project";
-      const id = String(entry?.id || buildProjectLibraryId(projectName)).trim();
-      if (!id) continue;
-      if (!hasValidPayload) {
-        const storageScope =
-          String(entry?.storageScope || "").trim().toLowerCase() === "shared"
-            ? "shared"
-            : "local";
-        if (storageScope !== "shared") continue;
-      }
-      out.push({
-        id,
-        projectName,
-        savedAt: String(entry?.savedAt || payload?.savedAt || new Date().toISOString()),
-        savedBy: String(entry?.savedBy || "").trim(),
-        lastEditedAt: String(entry?.lastEditedAt || entry?.savedAt || payload?.savedAt || "").trim(),
-        storageScope:
-          String(entry?.storageScope || "").trim().toLowerCase() === "shared" ? "shared" : "local",
-        workflowMode:
-          String(entry?.workflowMode || payload?.workflowMode || "").trim().toLowerCase() ===
-          WORKFLOW_MODE_PDF
-            ? WORKFLOW_MODE_PDF
-            : WORKFLOW_MODE_LOCATION,
-        folderName:
-          String(entry?.folderName || entry?.folder || "").trim() || DEFAULT_PROJECT_FOLDER_NAME,
-        polygonCount: Number.isFinite(Number(entry?.polygonCount))
-          ? Math.max(0, Number(entry.polygonCount))
-          : hasValidPayload
-          ? countProjectPayloadPolygons(payload)
-          : 0,
-        hasBoundary:
-          typeof entry?.hasBoundary === "boolean"
-            ? entry.hasBoundary
-            : hasValidPayload
-            ? !!payload?.boundary
-            : false,
-        payload: hasValidPayload ? payload : null,
-      });
-      if (out.length >= PROJECT_LIBRARY_MAX_ENTRIES) break;
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
-
-function readStoredProjectFolders() {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(PROJECT_FOLDER_LIBRARY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const out = [];
-    for (const entry of parsed) {
-      const name = String(entry?.name || entry?.folderName || "").trim();
-      if (!name) continue;
-      out.push({
-        name,
-        workflowMode:
-          String(entry?.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
-            ? WORKFLOW_MODE_PDF
-            : WORKFLOW_MODE_LOCATION,
-      });
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
-
-function readStoredProjectFolderCollapseState() {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(PROJECT_FOLDER_COLLAPSE_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return parsed;
-  } catch {
-    return {};
-  }
-}
-
-function buildProjectPayloadSignature(payload) {
-  if (!payload || typeof payload !== "object") return "";
-  try {
-    const stable = { ...payload };
-    delete stable.savedAt;
-    delete stable.autosavedAt;
-    delete stable.pdfPageSaveMeta;
-    delete stable.pdfSourceAsset;
-    return JSON.stringify(stable);
-  } catch {
-    return "";
-  }
-}
-
-function readStoredProjectVersionHistory() {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(PROJECT_VERSION_HISTORY_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    const out = {};
-    for (const [projectId, versions] of Object.entries(parsed)) {
-      if (!Array.isArray(versions) || !String(projectId || "").trim()) continue;
-      const normalized = [];
-      for (const version of versions) {
-        if (!isValidProjectPayload(version?.payload)) continue;
-        const savedAt = String(
-          version?.savedAt || version?.payload?.savedAt || new Date().toISOString()
-        ).trim();
-        const source = String(version?.source || "local").trim() || "local";
-        const savedBy = String(version?.savedBy || "").trim();
-        const id = String(version?.id || "").trim() || `${savedAt}-${Math.random().toString(36).slice(2, 8)}`;
-        const payload = version.payload;
-        normalized.push({
-          id,
-          savedAt,
-          source,
-          savedBy,
-          polygonCount: countProjectPayloadPolygons(payload),
-          hasBoundary: !!payload?.boundary,
-          signature: buildProjectPayloadSignature(payload),
-          payload,
-        });
-        if (normalized.length >= PROJECT_VERSION_HISTORY_MAX_PER_PROJECT) break;
-      }
-      if (normalized.length) out[projectId] = normalized;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function readStoredPinnedProjectIds() {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(HOME_PINNED_PROJECTS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((value) => String(value || "").trim())
-      .filter(Boolean)
-      .slice(0, 24);
-  } catch {
-    return [];
-  }
-}
-
-function readStoredResumeProject() {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(HOME_RESUME_PROJECT_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const projectId = String(parsed.projectId || "").trim();
-    const projectName = String(parsed.projectName || "").trim();
-    if (!projectId && !projectName) return null;
-    return {
-      projectId,
-      projectName: projectName || "Untitled Project",
-      workflowMode:
-        String(parsed.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
-          ? WORKFLOW_MODE_PDF
-          : WORKFLOW_MODE_LOCATION,
-      pdfPageNumber: Math.max(1, Math.round(Number(parsed.pdfPageNumber) || 1)),
-      lastEditedAt: String(parsed.lastEditedAt || parsed.savedAt || "").trim(),
-      savedBy: String(parsed.savedBy || "").trim(),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function readStoredHomeAppearance() {
-  if (typeof window === "undefined") return "dark";
-  try {
-    const raw = String(window.localStorage.getItem(HOME_APPEARANCE_STORAGE_KEY) || "")
-      .trim()
-      .toLowerCase();
-    return raw === "light" ? "light" : "dark";
-  } catch {
-    return "dark";
-  }
-}
-
-function normalizeSharedQueueOperation(op) {
-  const type = String(op?.op || "").toLowerCase();
-  if (type !== "upsert" && type !== "delete") return null;
-  const id = String(op?.id || "").trim();
-  if (!id) return null;
-  const base = {
-    op: type,
-    id,
-    enqueuedAt: String(op?.enqueuedAt || new Date().toISOString()),
-  };
-  if (type === "delete") return base;
-  const payload = op?.payload;
-  if (!isValidProjectPayload(payload)) return null;
-  return {
-    ...base,
-    projectName: String(op?.projectName || payload?.projectName || "").trim(),
-    savedAt: String(op?.savedAt || payload?.savedAt || new Date().toISOString()),
-    polygonCount: Number.isFinite(Number(op?.polygonCount))
-      ? Math.max(0, Number(op.polygonCount))
-      : countProjectPayloadPolygons(payload),
-    hasBoundary:
-      typeof op?.hasBoundary === "boolean" ? op.hasBoundary : !!payload?.boundary,
-    payload,
-  };
-}
-
-function readStoredSharedProjectQueue() {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(SHARED_PROJECT_QUEUE_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const out = [];
-    for (const item of parsed) {
-      const normalized = normalizeSharedQueueOperation(item);
-      if (!normalized) continue;
-      out.push(normalized);
-    }
-    return out.slice(0, 500);
-  } catch {
-    return [];
-  }
-}
-
-function readStoredSharedAuth() {
-  if (typeof window === "undefined") {
-    return { token: "", username: "", expiresAt: "" };
-  }
-  try {
-    const raw = window.localStorage.getItem(SHARED_AUTH_STORAGE_KEY);
-    if (!raw) return { token: "", username: "", expiresAt: "" };
-    const parsed = JSON.parse(raw);
-    const token = String(parsed?.token || "").trim();
-    const username = String(parsed?.username || "").trim();
-    const expiresAt = String(parsed?.expiresAt || "").trim();
-    return { token, username, expiresAt };
-  } catch {
-    return { token: "", username: "", expiresAt: "" };
-  }
-}
-
-function isAuthError(error) {
-  const text = String(error?.message || "").toLowerCase();
-  return (
-    text.includes("401") ||
-    text.includes("login required") ||
-    text.includes("session expired")
-  );
-}
-
-function upsertSharedQueueOperation(prevQueue, nextOp) {
-  const queue = Array.isArray(prevQueue) ? prevQueue : [];
-  const normalized = normalizeSharedQueueOperation(nextOp);
-  if (!normalized) return queue;
-  // Keep only the latest operation per project id.
-  const filtered = queue.filter((item) => String(item?.id) !== normalized.id);
-  return [...filtered, normalized].slice(-500);
-}
-
-function buildProjectLibraryEntryFromPayload(payload, fallbackProjectName = "", metadata = null) {
-  if (!isValidProjectPayload(payload)) return null;
-  const projectName =
-    String(payload?.projectName || fallbackProjectName || "").trim() || "Untitled Project";
-  const savedBy = String(metadata?.savedBy || "").trim();
-  const lastEditedAt = String(
-    metadata?.lastEditedAt || payload?.savedAt || new Date().toISOString()
-  ).trim();
-  const storageScope =
-    String(metadata?.storageScope || "").trim().toLowerCase() === "shared"
-      ? "shared"
-      : "local";
-  const workflowMode =
-    String(metadata?.workflowMode || payload?.workflowMode || "").trim().toLowerCase() ===
-    WORKFLOW_MODE_PDF
-      ? WORKFLOW_MODE_PDF
-      : WORKFLOW_MODE_LOCATION;
-  return {
-    id: buildProjectLibraryId(projectName),
-    projectName,
-    savedAt: String(payload?.savedAt || new Date().toISOString()),
-    savedBy,
-    lastEditedAt,
-    storageScope,
-    workflowMode,
-    folderName:
-      String(metadata?.folderName || metadata?.folder || "").trim() || DEFAULT_PROJECT_FOLDER_NAME,
-    polygonCount: countProjectPayloadPolygons(payload),
-    hasBoundary: !!payload?.boundary,
-    payload,
-  };
-}
-
-function upsertProjectLibraryEntries(
-  prevEntries,
-  payload,
-  fallbackProjectName = "",
-  metadata = null
-) {
-  const nextEntry = buildProjectLibraryEntryFromPayload(
-    payload,
-    fallbackProjectName,
-    metadata
-  );
-  if (!nextEntry) return Array.isArray(prevEntries) ? prevEntries : [];
-  const prev = Array.isArray(prevEntries) ? prevEntries : [];
-  const existing = prev.find((entry) => entry?.id === nextEntry.id);
-  const incomingFolder = String(metadata?.folderName || metadata?.folder || "").trim();
-  if (!nextEntry.savedBy && existing?.savedBy) {
-    nextEntry.savedBy = String(existing.savedBy).trim();
-  }
-  if (!nextEntry.lastEditedAt && existing?.lastEditedAt) {
-    nextEntry.lastEditedAt = String(existing.lastEditedAt).trim();
-  }
-  if (
-    !incomingFolder &&
-    String(existing?.folderName || "").trim() &&
-    String(nextEntry.folderName || "").trim() === DEFAULT_PROJECT_FOLDER_NAME
-  ) {
-    nextEntry.folderName = String(existing.folderName).trim();
-  }
-  if (
-    String(existing?.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF &&
-    String(nextEntry.workflowMode || "").trim().toLowerCase() !== WORKFLOW_MODE_PDF
-  ) {
-    nextEntry.workflowMode = WORKFLOW_MODE_PDF;
-  }
-  if (
-    String(existing?.storageScope || "").trim().toLowerCase() === "shared" &&
-    String(nextEntry.storageScope || "").trim().toLowerCase() !== "shared"
-  ) {
-    nextEntry.storageScope = "shared";
-  }
-  return [nextEntry, ...prev.filter((entry) => entry?.id !== nextEntry.id)].slice(
-    0,
-    PROJECT_LIBRARY_MAX_ENTRIES
-  );
-}
-
-function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
-  const previous = Array.isArray(prevEntries) ? prevEntries : [];
-  const remote = Array.isArray(remoteEntries) ? remoteEntries : [];
-  const localOnlyEntries = previous.filter(
-    (entry) => String(entry?.storageScope || "").trim().toLowerCase() !== "shared"
-  );
-  const payloadById = new Map(
-    previous
-      .filter((entry) => entry?.id && entry?.payload && isValidProjectPayload(entry.payload))
-      .map((entry) => [String(entry.id), entry.payload])
-  );
-  const previousById = new Map(
-    previous.filter((entry) => entry?.id).map((entry) => [String(entry.id), entry])
-  );
-
-  const merged = remote.map((entry) => {
-    const id = String(entry?.id || "").trim();
-    const projectName = String(entry?.project_name || entry?.projectName || "").trim();
-    const savedAt = String(entry?.saved_at || entry?.savedAt || new Date().toISOString());
-    const savedBy = String(entry?.saved_by || entry?.savedBy || "").trim();
-    const lastEditedAt = String(
-      entry?.last_edited_at || entry?.lastEditedAt || savedAt
-    ).trim();
-    const polygonCount = Number.isFinite(Number(entry?.polygon_count))
-      ? Math.max(0, Number(entry.polygon_count))
-      : Number.isFinite(Number(entry?.polygonCount))
-      ? Math.max(0, Number(entry.polygonCount))
-      : 0;
-    const hasBoundary =
-      typeof entry?.has_boundary === "boolean"
-        ? entry.has_boundary
-        : typeof entry?.hasBoundary === "boolean"
-        ? entry.hasBoundary
-        : false;
-
-    const previousEntry = previousById.get(id) || null;
-    const payload = payloadById.get(id) || previousEntry?.payload || null;
-    return {
-      id,
-      projectName: projectName || "Untitled Project",
-      savedAt,
-      savedBy,
-      lastEditedAt,
-      storageScope: "shared",
-      workflowMode:
-        String(previousEntry?.workflowMode || payload?.workflowMode || "").trim().toLowerCase() ===
-        WORKFLOW_MODE_PDF
-          ? WORKFLOW_MODE_PDF
-          : WORKFLOW_MODE_LOCATION,
-      folderName:
-        String(previousEntry?.folderName || previousEntry?.folder || "").trim() ||
-        DEFAULT_PROJECT_FOLDER_NAME,
-      polygonCount,
-      hasBoundary,
-      payload,
-    };
-  });
-
-  return [...merged.filter((entry) => !!entry.id), ...localOnlyEntries].slice(
-    0,
-    PROJECT_LIBRARY_MAX_ENTRIES
-  );
 }
 
 function createEmptyEstimateTemplates() {
@@ -4658,6 +4214,36 @@ function distanceMetersLngLat(aLng, aLat, bLng, bLat) {
   return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+function getTrue3DQualityProfile(preset, compactTouchUi) {
+  const requested = String(preset || "auto");
+  const name = requested === "auto" ? (compactTouchUi ? "performance" : "balanced") : requested;
+  if (name === "high") {
+    return {
+      name,
+      maximumScreenSpaceError: 8,
+      resolutionScale: 1.35,
+      cacheBytes: 640 * 1024 * 1024,
+      simplifyTolerance: 0,
+    };
+  }
+  if (name === "performance") {
+    return {
+      name,
+      maximumScreenSpaceError: 32,
+      resolutionScale: 0.8,
+      cacheBytes: 192 * 1024 * 1024,
+      simplifyTolerance: 0.000004,
+    };
+  }
+  return {
+    name: "balanced",
+    maximumScreenSpaceError: 16,
+    resolutionScale: 1,
+    cacheBytes: 384 * 1024 * 1024,
+    simplifyTolerance: 0.0000015,
+  };
+}
+
 export default function App() {
   const mapRef = useRef(null);
   const drawRef = useRef(null);
@@ -4678,6 +4264,18 @@ export default function App() {
   const [objects3d, setObjects3d] = useState(false);
   const [objects3dOpacity, setObjects3dOpacity] = useState(DEFAULT_3D_OBJECT_OPACITY);
   const [showBasemapContext, setShowBasemapContext] = useState(true);
+  const [googleHighDpi, setGoogleHighDpi] = useState(
+    () => typeof window !== "undefined" && Number(window.devicePixelRatio || 1) > 1.25
+  );
+  const [imageryCompareSource, setImageryCompareSource] = useState("google");
+  const [imageryCompareActive, setImageryCompareActive] = useState(false);
+  const [imageryDetailStatus, setImageryDetailStatus] = useState({
+    zoom: 0,
+    maxZoom: null,
+    provider: "maptiler",
+    copyright: "",
+    loading: false,
+  });
   const [userLocation, setUserLocation] = useState(null);
   const [userLocationTracking, setUserLocationTracking] = useState(false);
   const [userLocationLoading, setUserLocationLoading] = useState(false);
@@ -4689,6 +4287,10 @@ export default function App() {
   const [savedProjectSignature, setSavedProjectSignature] = useState("");
   const [showVersionHistory, setShowVersionHistory] = useState(false);
   const [versionCompareId, setVersionCompareId] = useState("");
+  const [versionSnapshotNote, setVersionSnapshotNote] = useState("");
+  const [sharedProjectVersions, setSharedProjectVersions] = useState([]);
+  const [sharedProjectVersionsStatus, setSharedProjectVersionsStatus] = useState("idle");
+  const [sharedVersionPayloadLoadingId, setSharedVersionPayloadLoadingId] = useState("");
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
   const [commandPaletteIndex, setCommandPaletteIndex] = useState(0);
@@ -4697,6 +4299,7 @@ export default function App() {
     id: "",
     lastEditedAt: "",
     savedBy: "",
+    revision: 0,
   });
   const [remoteSharedUpdateNotice, setRemoteSharedUpdateNotice] = useState(null);
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(
@@ -4717,6 +4320,7 @@ export default function App() {
   const [true3DLoading, setTrue3DLoading] = useState(false);
   const [true3DCapturing, setTrue3DCapturing] = useState(false);
   const [true3DStatus, setTrue3DStatus] = useState("");
+  const [true3DQualityPreset, setTrue3DQualityPreset] = useState("auto");
   const [true3DDiagnostics, setTrue3DDiagnostics] = useState({
     provider: "unknown",
     coverage: "unknown",
@@ -4737,6 +4341,8 @@ export default function App() {
   const streetViewCoverageMarkerRef = useRef(null);
   const streetViewCoverageLayerRef = useRef(null);
   const true3DViewerRef = useRef(null);
+  const true3DTilesetRef = useRef(null);
+  const true3DQualityRef = useRef(getTrue3DQualityProfile("auto", false));
   const true3DOverlayEntityIdsRef = useRef([]);
   const true3DEditEntityIdsRef = useRef([]);
   const true3DEventHandlerRef = useRef(null);
@@ -4760,6 +4366,11 @@ export default function App() {
   const [projectLibrary, setProjectLibrary] = useState(() => readStoredProjectLibrary());
   const [projectFolders, setProjectFolders] = useState(() => readStoredProjectFolders());
   const [homeProjectSearch, setHomeProjectSearch] = useState("");
+  const [polygonSearchQuery, setPolygonSearchQuery] = useState("");
+  const [clientReportNotes, setClientReportNotes] = useState("");
+  const [offlineCacheStatus, setOfflineCacheStatus] = useState("checking");
+  const [homeProjectRecoveries, setHomeProjectRecoveries] = useState([]);
+  const [homeRecoveryRefreshing, setHomeRecoveryRefreshing] = useState(false);
   const [homeProjectTab, setHomeProjectTab] = useState(WORKFLOW_MODE_LOCATION);
   const [homeFolderFilter, setHomeFolderFilter] = useState("all");
   const [homeNewFolderName, setHomeNewFolderName] = useState("");
@@ -4771,6 +4382,9 @@ export default function App() {
     readStoredProjectVersionHistory()
   );
   const [pinnedProjectIds, setPinnedProjectIds] = useState(() => readStoredPinnedProjectIds());
+  const [projectPreviewImages, setProjectPreviewImages] = useState(() =>
+    readStoredProjectPreviewImages()
+  );
   const [resumeProject, setResumeProject] = useState(() => readStoredResumeProject());
   const [homeAppearance, setHomeAppearance] = useState(() => readStoredHomeAppearance());
   const [sharedProjectQueue, setSharedProjectQueue] = useState(() =>
@@ -4796,9 +4410,6 @@ export default function App() {
   const [sharedProjectQueueSyncing, setSharedProjectQueueSyncing] = useState(false);
   const [securityAuditEvents, setSecurityAuditEvents] = useState([]);
   const [securityAuditSyncing, setSecurityAuditSyncing] = useState(false);
-  const [showLegalNotes, setShowLegalNotes] = useState(false);
-  const [showSecurityAdminCard, setShowSecurityAdminCard] = useState(false);
-  const [showAuditAdminCard, setShowAuditAdminCard] = useState(false);
   const sharedAccessToken = String(sharedAuth?.token || "").trim();
   const sharedAccessAuthenticated = !!sharedAccessToken;
   const [appScreen, setAppScreen] = useState(APP_SCREEN_HOME); // "home" | "location" | "pdf"
@@ -4874,7 +4485,7 @@ export default function App() {
   const [measurementType, setMeasurementType] = useState("lawn_area");
   const [knownDistanceFtInput, setKnownDistanceFtInput] = useState("20");
   const [knownDistancePixelsInput, setKnownDistancePixelsInput] = useState("100");
-  const [pdfAnnotationTool, setPdfAnnotationTool] = useState("select"); // select | pen | pencil | marker | crayon | shape | text | eraser
+  const [pdfAnnotationTool, setPdfAnnotationTool] = useState("select"); // select | pen | pencil | marker | highlighter | crayon | shape | text | eraser
   const [pdfShapeType, setPdfShapeType] = useState("rectangle");
   const [pdfAnnotationColor, setPdfAnnotationColor] = useState(PDF_ANNOT_DEFAULT_COLOR);
   const [pdfCustomColors, setPdfCustomColors] = useState(() => loadPdfCustomColors());
@@ -4905,6 +4516,13 @@ export default function App() {
   const [pdfPageJumpInput, setPdfPageJumpInput] = useState("1");
   const [pdfPageThumbnails, setPdfPageThumbnails] = useState({});
   const [pdfConverting, setPdfConverting] = useState(false);
+  const [pdfCanvasZoom, setPdfCanvasZoom] = useState(1);
+  const [pdfPanMode, setPdfPanMode] = useState(false);
+  const [pdfPanActive, setPdfPanActive] = useState(false);
+  const [pdfHighResolutionUrl, setPdfHighResolutionUrl] = useState("");
+  const [pdfHighResolutionPage, setPdfHighResolutionPage] = useState(0);
+  const [pdfHighResolutionDimension, setPdfHighResolutionDimension] = useState(0);
+  const [pdfHighResolutionLoading, setPdfHighResolutionLoading] = useState(false);
   const [planOverlay, setPlanOverlay] = useState(null);
   const [planOverlayEnabled, setPlanOverlayEnabled] = useState(false);
   const [planOverlayOpacity, setPlanOverlayOpacity] = useState(1);
@@ -4917,6 +4535,13 @@ export default function App() {
   const [pdfDraftAnnotation, setPdfDraftAnnotation] = useState(null);
   const [backendMeasurementResult, setBackendMeasurementResult] = useState(null);
   const [segmentationResult, setSegmentationResult] = useState(null);
+  const [segmentationStatus, setSegmentationStatus] = useState({
+    engine: "checking",
+    model_loaded: false,
+    model_version: null,
+    model_error: null,
+  });
+  const [showCvUncertainty, setShowCvUncertainty] = useState(true);
   const [measurementHistory, setMeasurementHistory] = useState([]);
   const [backendSubmitting, setBackendSubmitting] = useState(false);
   const [backendCalibrating, setBackendCalibrating] = useState(false);
@@ -5016,7 +4641,7 @@ export default function App() {
     try {
       window.localStorage.setItem(
         PROJECT_LIBRARY_STORAGE_KEY,
-        JSON.stringify((projectLibrary || []).slice(0, PROJECT_LIBRARY_MAX_ENTRIES))
+        JSON.stringify(Array.isArray(projectLibrary) ? projectLibrary : [])
       );
     } catch {
       /* intentionally ignore localStorage errors */
@@ -5074,6 +4699,27 @@ export default function App() {
       /* intentionally ignore localStorage errors */
     }
   }, [pinnedProjectIds]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const entries = Object.entries(
+        projectPreviewImages && typeof projectPreviewImages === "object"
+          ? projectPreviewImages
+          : {}
+      ).slice(0, 24);
+      window.localStorage.setItem(
+        HOME_PROJECT_PREVIEWS_STORAGE_KEY,
+        JSON.stringify(Object.fromEntries(entries))
+      );
+    } catch {
+      pushToast(
+        "That preview image could not be stored. Try a smaller image.",
+        "warn",
+        4600
+      );
+    }
+  }, [projectPreviewImages, pushToast]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -5215,7 +4861,7 @@ export default function App() {
       }
       if (!quiet) setSharedProjectLibrarySyncing(true);
       try {
-        const shared = await listSharedProjects(PROJECT_LIBRARY_MAX_ENTRIES);
+        const shared = await listSharedProjects(SHARED_PROJECT_LIBRARY_FETCH_LIMIT);
         setProjectLibrary((prev) => mergeSharedProjectLibrarySummaries(prev, shared));
         setSharedProjectLibraryStatus("connected");
         if (!quiet) {
@@ -5331,6 +4977,7 @@ export default function App() {
                 savedAt: op.savedAt || null,
                 polygonCount: Number(op.polygonCount || 0),
                 hasBoundary: !!op.hasBoundary,
+                baseRevision: op.baseRevision || null,
                 payload: op.payload,
               });
             }
@@ -5428,6 +5075,27 @@ export default function App() {
   }, [configuredApiBaseUrl]);
 
   useEffect(() => {
+    if (!aiEnabled) return undefined;
+    let cancelled = false;
+    getSegmentationStatus()
+      .then((status) => {
+        if (!cancelled && status) setSegmentationStatus(status);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setSegmentationStatus({
+          engine: "unavailable",
+          model_loaded: false,
+          model_version: null,
+          model_error: String(error?.message || "Segmentation status unavailable"),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [aiEnabled, configuredApiBaseUrl]);
+
+  useEffect(() => {
     if (!sharedAccessAuthenticated || sharedAuthChecking) return;
     if (!(sharedProjectQueue?.length > 0)) return;
     syncSharedProjectQueue({ quiet: true });
@@ -5451,7 +5119,7 @@ export default function App() {
     let canceled = false;
     const pollForRemoteChanges = async () => {
       try {
-        const shared = await listSharedProjects(PROJECT_LIBRARY_MAX_ENTRIES);
+        const shared = await listSharedProjects(SHARED_PROJECT_LIBRARY_FETCH_LIMIT);
         if (canceled) return;
         const match = (Array.isArray(shared) ? shared : []).find(
           (entry) => String(entry?.id || "").trim() === projectId
@@ -5460,10 +5128,15 @@ export default function App() {
         const remoteEditedAt = String(
           match?.last_edited_at || match?.lastEditedAt || match?.saved_at || match?.savedAt || ""
         ).trim();
+        const remoteRevision = Math.max(0, Number(match?.revision) || 0);
         if (!remoteEditedAt) return;
         const localMeta = activeSharedProjectMetaRef.current || {};
         const localEditedAt = String(localMeta?.lastEditedAt || "").trim();
-        if (localEditedAt && remoteEditedAt === localEditedAt) return;
+        const localRevision = Math.max(0, Number(localMeta?.revision) || 0);
+        if (
+          (remoteRevision && localRevision && remoteRevision === localRevision) ||
+          (localEditedAt && remoteEditedAt === localEditedAt)
+        ) return;
         const remoteSavedBy = String(match?.saved_by || match?.savedBy || "").trim();
         const currentUser = String(sharedAuth?.username || "").trim();
         if (remoteSavedBy && currentUser && remoteSavedBy === currentUser) {
@@ -5471,6 +5144,7 @@ export default function App() {
             ...prev,
             lastEditedAt: remoteEditedAt,
             savedBy: remoteSavedBy,
+            revision: remoteRevision,
           }));
           return;
         }
@@ -5720,6 +5394,37 @@ export default function App() {
       setObjects3d(true);
     }
   }, []);
+
+  const toggleImageryComparison = useCallback(() => {
+    if (imageryCompareActive) {
+      const original = imageryCompareOriginalRef.current;
+      if (original) handleBaseMapChange(original);
+      imageryCompareOriginalRef.current = "";
+      setImageryCompareActive(false);
+      return;
+    }
+    if (!imageryCompareSource || imageryCompareSource === baseMap) return;
+    imageryCompareOriginalRef.current = baseMap;
+    handleBaseMapChange(imageryCompareSource);
+    setImageryCompareActive(true);
+  }, [baseMap, handleBaseMapChange, imageryCompareActive, imageryCompareSource]);
+
+  const keepComparedImagery = useCallback(() => {
+    imageryCompareOriginalRef.current = "";
+    setImageryCompareActive(false);
+  }, []);
+
+  useEffect(() => {
+    const available = [
+      googleMapsKey ? "google" : "",
+      mapboxToken ? "mapbox" : "",
+      "maptiler",
+      azureMapsKey ? "azure" : "",
+    ].filter(Boolean);
+    if (!available.includes(imageryCompareSource)) {
+      setImageryCompareSource(available.find((value) => value !== baseMap) || "maptiler");
+    }
+  }, [azureMapsKey, baseMap, googleMapsKey, imageryCompareSource, mapboxToken]);
 
   const setMainMapFlatView = useCallback(() => {
     setTerrain3d(false);
@@ -6146,18 +5851,23 @@ export default function App() {
     const rect = imageEl.getBoundingClientRect();
     const naturalWidth = Math.max(1, Number(imageEl.naturalWidth) || 1);
     const naturalHeight = Math.max(1, Number(imageEl.naturalHeight) || 1);
-    const displayWidth = Math.max(1, rect.width || 1);
-    const displayHeight = Math.max(1, rect.height || 1);
+    const visualWidth = Math.max(1, rect.width || 1);
+    const visualHeight = Math.max(1, rect.height || 1);
+    const zoom = Math.max(PDF_CANVAS_ZOOM_MIN, Number(pdfCanvasZoom) || 1);
+    const displayWidth = Math.max(1, visualWidth / zoom);
+    const displayHeight = Math.max(1, visualHeight / zoom);
     return {
       rect,
       naturalWidth,
       naturalHeight,
       displayWidth,
       displayHeight,
-      xScale: naturalWidth / displayWidth,
-      yScale: naturalHeight / displayHeight,
+      visualWidth,
+      visualHeight,
+      xScale: naturalWidth / visualWidth,
+      yScale: naturalHeight / visualHeight,
     };
-  }, []);
+  }, [pdfCanvasZoom]);
 
   const syncPdfRenderMetrics = useCallback(() => {
     const metrics = getPdfRenderMetrics();
@@ -6197,8 +5907,8 @@ export default function App() {
       if (
         localX < 0 ||
         localY < 0 ||
-        localX > metrics.displayWidth ||
-        localY > metrics.displayHeight
+        localX > metrics.visualWidth ||
+        localY > metrics.visualHeight
       ) {
         return null;
       }
@@ -6449,7 +6159,7 @@ export default function App() {
     if (pdfAnnotationTool === "shape") {
       return getPdfToolOpacity("shape", pdfToolOpacities);
     }
-    if (!["pen", "pencil", "marker", "crayon"].includes(pdfAnnotationTool)) {
+    if (!["pen", "pencil", "marker", "highlighter", "crayon"].includes(pdfAnnotationTool)) {
       return PDF_ANNOT_TOOL_OPACITY_DEFAULTS.pen;
     }
     return getPdfToolOpacity(pdfAnnotationTool, pdfToolOpacities);
@@ -6963,8 +6673,20 @@ export default function App() {
 
   const activatePdfAnnotationTool = useCallback(
     (nextTool) => {
-      const allowed = ["select", "pen", "pencil", "marker", "crayon", "shape", "text", "eraser"];
+      const allowed = [
+        "select",
+        "pen",
+        "pencil",
+        "marker",
+        "highlighter",
+        "crayon",
+        "shape",
+        "text",
+        "eraser",
+      ];
       const tool = allowed.includes(nextTool) ? nextTool : "select";
+      setPdfPanMode(false);
+      setPdfPanActive(false);
       setPdfAnnotationTool(tool);
       if (tool !== "select" && measureModeRef.current) {
         setMeasureMode(false);
@@ -7044,14 +6766,18 @@ export default function App() {
   const pdfHistoryPrevSignatureRef = useRef(pdfAnnotationsSignature(pdfAnnotations));
   const pdfHistoryPrevAnnotationsRef = useRef(clonePdfAnnotations(pdfAnnotations));
   const pdfTouchPointerIdsRef = useRef(new Set());
+  const pdfInputMachineRef = useRef(createPointerInputMachine({ stylusOnly: true }));
+  const pdfScrollContainerRef = useRef(null);
   const pdfWorkspaceRef = useRef(null);
   const pdfWorkspaceImageRef = useRef(null);
   const pdfPointerSessionRef = useRef(null);
+  const pdfPanSessionRef = useRef(null);
   const pdfFloatingSidebarRef = useRef(null);
   const pdfFloatingSidebarDragRef = useRef(null);
   const touchPolygonModeSessionRef = useRef(null);
   const sharedPolygonAutosaveTimerRef = useRef(null);
   const queueSharedPolygonAutosaveRef = useRef(() => {});
+  const writeImmediateLocalAutosaveRef = useRef(() => {});
   const saveProjectInFlightRef = useRef(false);
   const initialSaveBaselineSetRef = useRef(false);
   const propertyLookupAbortRef = useRef(null);
@@ -7062,6 +6788,7 @@ export default function App() {
   const googleTileSessionRef = useRef(null);
   const googleTileSessionExpiryRef = useRef(0);
   const googleTileSessionPromiseRef = useRef(null);
+  const imageryCompareOriginalRef = useRef("");
   const userLocationWatchIdRef = useRef(null);
   const showBasemapContextRef = useRef(showBasemapContext);
   const baseMapRef = useRef(baseMap);
@@ -7100,11 +6827,132 @@ export default function App() {
   const pdfHistoryPrevSigByContextRef = useRef(new Map());
   const pdfHistoryTransactionRef = useRef(null);
   const pdfRenderRequestRef = useRef(0);
+  const pdfHighResolutionRequestRef = useRef(0);
+  const pdfHighResolutionObjectUrlRef = useRef("");
+  const pendingLocationSelectionRef = useRef(null);
 
   const layerFeaturesRef = useRef(layerFeatures);
   useEffect(() => {
     layerFeaturesRef.current = layerFeatures;
   }, [layerFeatures]);
+
+  const getLayerAutoNameBaseNumber = useCallback(
+    (layerKey, featuresByLayer = layerFeaturesRef.current, nameBaseOverride = "") => {
+      const layerLabel = String(
+        nameBaseOverride || LAYER_META[layerKey]?.name || layerKey || ""
+      ).trim();
+      if (!layerLabel) return 0;
+      const escapedLabel = layerLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const autoNamePattern = new RegExp(`^${escapedLabel}\\s+(\\d+)$`, "i");
+      let maxNumber = 0;
+      for (const feature of featuresByLayer?.[layerKey] || []) {
+        const rawName = String(feature?.properties?.name || "").trim();
+        if (!rawName) continue;
+        const match = rawName.match(autoNamePattern);
+        if (!match) continue;
+        const parsed = Number.parseInt(match[1], 10);
+        if (Number.isFinite(parsed) && parsed > maxNumber) {
+          maxNumber = parsed;
+        }
+      }
+      return maxNumber;
+    },
+    []
+  );
+
+  const getAutoNamingBounds = useCallback(
+    (featuresByLayer = layerFeaturesRef.current) => {
+      try {
+        if (boundary && isPolygonLike(boundary)) {
+          return turf.bbox(boundary);
+        }
+        const polygons = [];
+        for (const layerKey of LAYER_KEYS) {
+          for (const feature of featuresByLayer?.[layerKey] || []) {
+            if (isPolygonLike(feature)) polygons.push(feature);
+          }
+        }
+        if (!polygons.length) return null;
+        return turf.bbox(turf.featureCollection(polygons));
+      } catch {
+        return null;
+      }
+    },
+    [boundary]
+  );
+
+  const getFeatureSectionLabel = useCallback(
+    (feature, featuresByLayer = layerFeaturesRef.current) => {
+      if (!isPolygonLike(feature)) return "";
+      const bounds = getAutoNamingBounds(featuresByLayer);
+      if (!Array.isArray(bounds) || bounds.length !== 4) return "";
+      const [minX, minY, maxX, maxY] = bounds.map((value) => Number(value));
+      const width = maxX - minX;
+      const height = maxY - minY;
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+        return "";
+      }
+
+      let center = null;
+      try {
+        center = turf.centerOfMass(to2DFeature(feature));
+      } catch {
+        center = null;
+      }
+      const coords = center?.geometry?.coordinates;
+      const cx = Number(coords?.[0]);
+      const cy = Number(coords?.[1]);
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) return "";
+
+      const xNorm = Math.max(0, Math.min(1, (cx - minX) / width));
+      const yNorm = Math.max(0, Math.min(1, (maxY - cy) / height));
+
+      const vertical =
+        yNorm <= 0.24 ? "Front" : yNorm >= 0.76 ? "Rear" : yNorm <= 0.42 ? "Upper" : yNorm >= 0.58 ? "Lower" : "";
+      const horizontal =
+        xNorm <= 0.24 ? "Left" : xNorm >= 0.76 ? "Right" : xNorm <= 0.42 ? "West" : xNorm >= 0.58 ? "East" : "";
+
+      const label = [vertical, horizontal].filter(Boolean).join(" ").trim();
+      return label || "Center";
+    },
+    [getAutoNamingBounds]
+  );
+
+  const getFeatureAutoNameBase = useCallback(
+    (layerKey, feature, featuresByLayer = layerFeaturesRef.current) => {
+      const layerLabel = String(LAYER_META[layerKey]?.name || layerKey || "").trim();
+      const sectionLabel = getFeatureSectionLabel(feature, featuresByLayer);
+      return [sectionLabel, layerLabel].filter(Boolean).join(" ").trim() || layerLabel;
+    },
+    [getFeatureSectionLabel]
+  );
+
+  const getNextAutoNameForFeature = useCallback(
+    (
+      layerKey,
+      feature,
+      featuresByLayer = layerFeaturesRef.current,
+      pendingBaseCounts = null
+    ) => {
+      const nameBase = getFeatureAutoNameBase(layerKey, feature, featuresByLayer);
+      const pendingKey = `${layerKey}::${nameBase}`;
+      const pendingCount =
+        pendingBaseCounts && pendingBaseCounts.has(pendingKey)
+          ? Number(pendingBaseCounts.get(pendingKey) || 0)
+          : 0;
+      const existingCount = getLayerAutoNameBaseNumber(layerKey, featuresByLayer, nameBase);
+      const nextCount = Math.max(existingCount, pendingCount) + 1;
+      if (pendingBaseCounts) {
+        pendingBaseCounts.set(pendingKey, nextCount);
+      }
+      return {
+        base: nameBase,
+        count: nextCount,
+        name: `${nameBase} ${nextCount}`,
+      };
+    },
+    [getFeatureAutoNameBase, getLayerAutoNameBaseNumber]
+  );
 
   useEffect(() => {
     isCompactTouchUiRef.current = isCompactTouchUi;
@@ -7126,6 +6974,7 @@ export default function App() {
       id: "",
       lastEditedAt: "",
       savedBy: "",
+      revision: 0,
     };
   }, [activeSharedProjectMeta]);
 
@@ -7273,6 +7122,12 @@ export default function App() {
   }, [planOverlay?.url, syncPdfRenderMetrics, workflowMode]);
 
   useEffect(() => {
+    if (workflowMode !== WORKFLOW_MODE_PDF || !planOverlay?.url) return undefined;
+    const frame = requestAnimationFrame(() => syncPdfRenderMetrics());
+    return () => cancelAnimationFrame(frame);
+  }, [pdfCanvasZoom, planOverlay?.url, syncPdfRenderMetrics, workflowMode]);
+
+  useEffect(() => {
     setPdfDraftAnnotation(null);
     pdfPointerSessionRef.current = null;
   }, [pdfPageNumber, workflowMode]);
@@ -7342,6 +7197,10 @@ export default function App() {
 
   useEffect(() => {
     applePencilModeRef.current = applePencilMode;
+    pdfInputMachineRef.current?.cancel?.();
+    pdfInputMachineRef.current = createPointerInputMachine({
+      stylusOnly: applePencilMode,
+    });
   }, [applePencilMode]);
 
   const clampPdfFloatingSidebarPosition = useCallback((candidate, dims = null) => {
@@ -8403,6 +8262,9 @@ export default function App() {
     setMeasureMode((prev) => {
       const next = !prev;
       if (next) {
+        setPdfPanMode(false);
+        setPdfPanActive(false);
+        pdfPanSessionRef.current = null;
         if (
           workflowModeRef.current === WORKFLOW_MODE_PDF &&
           pdfAnnotationToolRef.current !== "select"
@@ -8604,8 +8466,42 @@ export default function App() {
     if (announce) pushToast("Plan overlay loaded on map.", "info", 4500);
   }, [pushToast]);
 
+  const clearPdfHighResolutionPreview = useCallback(() => {
+    pdfHighResolutionRequestRef.current += 1;
+    const previousUrl = pdfHighResolutionObjectUrlRef.current;
+    if (previousUrl) {
+      try {
+        URL.revokeObjectURL(previousUrl);
+      } catch {
+        /* intentionally ignore non-critical cleanup errors */
+      }
+    }
+    pdfHighResolutionObjectUrlRef.current = "";
+    setPdfHighResolutionUrl("");
+    setPdfHighResolutionPage(0);
+    setPdfHighResolutionDimension(0);
+    setPdfHighResolutionLoading(false);
+  }, []);
+
+  useEffect(
+    () => () => {
+      pdfHighResolutionRequestRef.current += 1;
+      const currentUrl = pdfHighResolutionObjectUrlRef.current;
+      if (currentUrl) {
+        try {
+          URL.revokeObjectURL(currentUrl);
+        } catch {
+          /* intentionally ignore non-critical cleanup errors */
+        }
+      }
+      pdfHighResolutionObjectUrlRef.current = "";
+    },
+    []
+  );
+
   const resetPdfSourceState = useCallback((clearImage = false) => {
     pdfRenderRequestRef.current += 1;
+    clearPdfHighResolutionPreview();
     pdfPageCacheRef.current = new Map();
     for (const url of pdfPageThumbnailUrlsRef.current.values()) {
       try {
@@ -8628,8 +8524,12 @@ export default function App() {
     setPdfPageCount(0);
     setPdfPageNumber(1);
     setPdfPageJumpInput("1");
+    setPdfCanvasZoom(1);
+    setPdfPanMode(false);
+    setPdfPanActive(false);
+    pdfPanSessionRef.current = null;
     if (clearImage) setMeasurementImageFile(null);
-  }, []);
+  }, [clearPdfHighResolutionPreview]);
 
   const buildPdfPageCacheKey = useCallback((sourceFile, pageNumber, maxDimension = 2400) => {
     if (!sourceFile) return "";
@@ -8660,7 +8560,12 @@ export default function App() {
         pdfPageCount > 0 ? Math.min(pdfPageCount, roundedTarget) : roundedTarget
       );
 
+      setPdfCanvasZoom(1);
+      setPdfPanMode(false);
+      setPdfPanActive(false);
+      pdfPanSessionRef.current = null;
       const requestId = ++pdfRenderRequestRef.current;
+      clearPdfHighResolutionPreview();
       setPdfConverting(true);
       try {
         const cacheKey = buildPdfPageCacheKey(sourceFile, boundedTarget, maxDimension);
@@ -8684,6 +8589,10 @@ export default function App() {
         setPdfPageCount(nextCount);
         setPdfPageNumber(nextPage);
         setPdfPageJumpInput(String(nextPage));
+        setPdfCanvasZoom(1);
+        setPdfPanMode(false);
+        setPdfPanActive(false);
+        pdfPanSessionRef.current = null;
         setMeasurementImageFile(nextImageFile);
         applyUploadedPlanOverlay(nextImageFile, false);
 
@@ -8710,7 +8619,13 @@ export default function App() {
         if (requestId === pdfRenderRequestRef.current) setPdfConverting(false);
       }
     },
-    [applyUploadedPlanOverlay, buildPdfPageCacheKey, pdfPageCount, pushToast]
+    [
+      applyUploadedPlanOverlay,
+      buildPdfPageCacheKey,
+      clearPdfHighResolutionPreview,
+      pdfPageCount,
+      pushToast,
+    ]
   );
 
   const jumpToPdfPage = useCallback(
@@ -8774,9 +8689,103 @@ export default function App() {
     };
   }, [buildPdfPageCacheKey, pdfThumbnailPages, pdfSourceFile, pdfPageCount]);
 
+  useEffect(() => {
+    const requestId = ++pdfHighResolutionRequestRef.current;
+    const sourceFile = pdfSourceFileRef.current;
+    const pageNumber = Math.max(1, Math.round(Number(pdfPageNumber) || 1));
+    if (
+      workflowMode !== WORKFLOW_MODE_PDF ||
+      !sourceFile ||
+      !isPdfFile(sourceFile) ||
+      pdfCanvasZoom < PDF_HIGH_QUALITY_ZOOM_THRESHOLD
+    ) {
+      setPdfHighResolutionLoading(false);
+      return undefined;
+    }
+
+    const targetDimension =
+      pdfCanvasZoom >= 3
+        ? isCompactTouchUi
+          ? PDF_TOUCH_ULTRA_QUALITY_RENDER_DIMENSION
+          : PDF_ULTRA_QUALITY_RENDER_DIMENSION
+        : isCompactTouchUi
+        ? PDF_TOUCH_HIGH_QUALITY_RENDER_DIMENSION
+        : PDF_HIGH_QUALITY_RENDER_DIMENSION;
+    if (
+      pdfHighResolutionUrl &&
+      pdfHighResolutionPage === pageNumber &&
+      pdfHighResolutionDimension >= targetDimension
+    ) {
+      setPdfHighResolutionLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setPdfHighResolutionLoading(true);
+    (async () => {
+      try {
+        const cacheKey = buildPdfPageCacheKey(sourceFile, pageNumber, targetDimension);
+        let rendered = cacheKey ? pdfPageCacheRef.current.get(cacheKey) : null;
+        if (!rendered) {
+          rendered = await renderPdfPageToImageFile(sourceFile, {
+            pageNumber,
+            maxDimension: targetDimension,
+          });
+          if (cacheKey) pdfPageCacheRef.current.set(cacheKey, rendered);
+        }
+        if (
+          cancelled ||
+          requestId !== pdfHighResolutionRequestRef.current ||
+          pdfSourceFileRef.current !== sourceFile ||
+          Math.max(1, Math.round(Number(pdfPageNumberRef.current) || 1)) !== pageNumber
+        ) {
+          return;
+        }
+        const highResolutionFile = rendered?.imageFile;
+        if (!highResolutionFile) return;
+        const nextUrl = URL.createObjectURL(highResolutionFile);
+        const previousUrl = pdfHighResolutionObjectUrlRef.current;
+        pdfHighResolutionObjectUrlRef.current = nextUrl;
+        if (previousUrl) {
+          try {
+            URL.revokeObjectURL(previousUrl);
+          } catch {
+            /* intentionally ignore non-critical cleanup errors */
+          }
+        }
+        setPdfHighResolutionUrl(nextUrl);
+        setPdfHighResolutionPage(pageNumber);
+        setPdfHighResolutionDimension(targetDimension);
+      } catch (error) {
+        if (!cancelled && requestId === pdfHighResolutionRequestRef.current) {
+          console.warn("High-resolution PDF render failed:", error);
+        }
+      } finally {
+        if (!cancelled && requestId === pdfHighResolutionRequestRef.current) {
+          setPdfHighResolutionLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    buildPdfPageCacheKey,
+    isCompactTouchUi,
+    pdfCanvasZoom,
+    pdfHighResolutionDimension,
+    pdfHighResolutionPage,
+    pdfHighResolutionUrl,
+    pdfPageNumber,
+    pdfSourceFile,
+    workflowMode,
+  ]);
+
   const clearUploadedPlanOverlay = useCallback((clearFile = false, options = {}) => {
     const resetPdfState = options.resetPdfState ?? clearFile;
     pdfRenderRequestRef.current += 1;
+    clearPdfHighResolutionPreview();
     setPdfConverting(false);
     setPlanOverlayEnabled(false);
     setPlanOverlay(null);
@@ -8791,7 +8800,7 @@ export default function App() {
     }
     if (clearFile) setMeasurementImageFile(null);
     if (resetPdfState) resetPdfSourceState(false);
-  }, [resetPdfSourceState]);
+  }, [clearPdfHighResolutionPreview, resetPdfSourceState]);
 
   const reanchorPlanOverlay = useCallback(() => {
     const map = mapRef.current;
@@ -8954,9 +8963,35 @@ export default function App() {
     (event) => {
       if (workflowModeRef.current !== WORKFLOW_MODE_PDF) return;
       if (!planOverlay?.url) return;
+      if (pdfPanMode && pdfCanvasZoom > 1) {
+        if (Number(event.button) > 0) return;
+        const scrollContainer = pdfScrollContainerRef.current;
+        if (!scrollContainer) return;
+        cancelPdfPointerSession();
+        setPdfToolCursorBadge(null);
+        pdfPanSessionRef.current = {
+          pointerId: event.pointerId,
+          startX: Number(event.clientX) || 0,
+          startY: Number(event.clientY) || 0,
+          scrollLeft: scrollContainer.scrollLeft,
+          scrollTop: scrollContainer.scrollTop,
+        };
+        setPdfPanActive(true);
+        event.preventDefault();
+        event.currentTarget?.setPointerCapture?.(event.pointerId);
+        return;
+      }
       const originalEvent = event?.nativeEvent || event;
+      const inputSession = pdfInputMachineRef.current.begin(
+        event.pointerId,
+        originalEvent
+      );
       const pointerKind = getEventPointerKind(event);
-      if (applePencilModeRef.current && pointerKind === "touch") {
+      if (
+        applePencilModeRef.current &&
+        (inputSession === INPUT_SESSION.FINGER_PAN ||
+          inputSession === INPUT_SESSION.PINCH_ZOOM)
+      ) {
         const touchCount = getRawTouchCount(originalEvent);
         cancelPdfPointerSession();
         setPdfToolCursorBadge(null);
@@ -9116,14 +9151,36 @@ export default function App() {
       selectedPdfFeatureBounds,
       workflowModeRef,
       cancelPdfPointerSession,
+      pdfCanvasZoom,
+      pdfPanMode,
     ]
   );
 
   const handlePdfSurfacePointerMove = useCallback(
     (event) => {
+      const panSession = pdfPanSessionRef.current;
+      if (panSession && panSession.pointerId === event.pointerId) {
+        const scrollContainer = pdfScrollContainerRef.current;
+        if (scrollContainer) {
+          scrollContainer.scrollLeft =
+            panSession.scrollLeft - ((Number(event.clientX) || 0) - panSession.startX);
+          scrollContainer.scrollTop =
+            panSession.scrollTop - ((Number(event.clientY) || 0) - panSession.startY);
+        }
+        event.preventDefault();
+        return;
+      }
       const originalEvent = event?.nativeEvent || event;
+      const inputSession = pdfInputMachineRef.current.update(
+        event.pointerId,
+        originalEvent
+      );
       const pointerKind = getEventPointerKind(event);
-      if (applePencilModeRef.current && pointerKind === "touch") {
+      if (
+        applePencilModeRef.current &&
+        (inputSession === INPUT_SESSION.FINGER_PAN ||
+          inputSession === INPUT_SESSION.PINCH_ZOOM)
+      ) {
         cancelPdfPointerSession();
         setPdfToolCursorBadge(null);
         setPdfStylusDrawingActive(false);
@@ -9390,7 +9447,20 @@ export default function App() {
   ]);
 
   const handlePdfSurfacePointerUp = useCallback((event) => {
+    const panSession = pdfPanSessionRef.current;
+    if (panSession && panSession.pointerId === event.pointerId) {
+      pdfPanSessionRef.current = null;
+      setPdfPanActive(false);
+      try {
+        event.currentTarget?.releasePointerCapture?.(event.pointerId);
+      } catch {
+        /* intentionally ignore capture release errors */
+      }
+      pdfInputMachineRef.current.end(event.pointerId);
+      return;
+    }
     const pointerKind = getEventPointerKind(event);
+    pdfInputMachineRef.current.end(event.pointerId);
     if (applePencilModeRef.current && pointerKind === "touch") {
       pdfTouchPointerIdsRef.current.delete(event.pointerId);
       setPdfTouchGestureActive(false);
@@ -9415,7 +9485,9 @@ export default function App() {
 
   const handlePdfSurfacePointerLeave = useCallback((event) => {
     setPdfToolCursorBadge(null);
+    if (pdfPanSessionRef.current?.pointerId === event.pointerId) return;
     const pointerKind = getEventPointerKind(event);
+    pdfInputMachineRef.current.end(event.pointerId);
     if (applePencilModeRef.current && pointerKind === "touch") {
       pdfTouchPointerIdsRef.current.delete(event.pointerId);
       return;
@@ -9440,7 +9512,19 @@ export default function App() {
 
   const handlePdfSurfacePointerCancel = useCallback((event) => {
     setPdfToolCursorBadge(null);
+    if (pdfPanSessionRef.current?.pointerId === event.pointerId) {
+      pdfPanSessionRef.current = null;
+      setPdfPanActive(false);
+      try {
+        event.currentTarget?.releasePointerCapture?.(event.pointerId);
+      } catch {
+        /* intentionally ignore capture release errors */
+      }
+      pdfInputMachineRef.current.end(event.pointerId);
+      return;
+    }
     const pointerKind = getEventPointerKind(event);
+    pdfInputMachineRef.current.end(event.pointerId);
     if (applePencilModeRef.current && pointerKind === "touch") {
       pdfTouchPointerIdsRef.current.delete(event.pointerId);
       setPdfTouchGestureActive(false);
@@ -9750,6 +9834,7 @@ export default function App() {
         boundaryGeojson: boundaryFeature?.geometry || null,
       });
       setSegmentationResult(result);
+      if (result?.diagnostics) setSegmentationStatus(result.diagnostics);
 
       const layerByClass = {
         plowable: "plowable",
@@ -9924,6 +10009,52 @@ export default function App() {
         turf: [],
         mulch: [],
       };
+      const uncertaintyFeatures = [];
+      for (const polygon of result?.uncertain_polygons || []) {
+        const ring = [];
+        for (const pt of polygon || []) {
+          const sx = (Number(pt.x) / imageWidth) * unprojectWidth;
+          const sy = (Number(pt.y) / imageHeight) * unprojectHeight;
+          const lngLat = map.unproject([sx, sy]);
+          ring.push([lngLat.lng, lngLat.lat]);
+        }
+        if (ring.length < 3) continue;
+        const first = ring[0];
+        const last = ring[ring.length - 1];
+        if (first[0] !== last[0] || first[1] !== last[1]) ring.push([...first]);
+        const raw = {
+          type: "Feature",
+          properties: { role: "cv-uncertainty" },
+          geometry: { type: "Polygon", coordinates: [ring] },
+        };
+        const clipped = boundaryFeature ? safeIntersect(raw, boundaryFeature) : raw;
+        if (clipped && isPolygonLike(clipped)) uncertaintyFeatures.push(clipped);
+      }
+      const uncertaintyData = turf.featureCollection(uncertaintyFeatures);
+      const uncertaintySource = map.getSource("cv-uncertainty");
+      if (uncertaintySource?.setData) {
+        uncertaintySource.setData(uncertaintyData);
+      } else if (map.isStyleLoaded?.()) {
+        map.addSource("cv-uncertainty", { type: "geojson", data: uncertaintyData });
+        map.addLayer({
+          id: "cv-uncertainty-fill",
+          type: "fill",
+          source: "cv-uncertainty",
+          layout: { visibility: showCvUncertainty ? "visible" : "none" },
+          paint: { "fill-color": "#ffb020", "fill-opacity": 0.2 },
+        });
+        map.addLayer({
+          id: "cv-uncertainty-line",
+          type: "line",
+          source: "cv-uncertainty",
+          layout: { visibility: showCvUncertainty ? "visible" : "none" },
+          paint: {
+            "line-color": "#ffd166",
+            "line-width": 2,
+            "line-dasharray": [2, 1.5],
+          },
+        });
+      }
 
       for (const classKey of requestedClassKeys) {
         const targetLayer = layerByClass[classKey];
@@ -10108,7 +10239,28 @@ export default function App() {
     } finally {
       setSegmentingImage(false);
     }
-  }, [aiEnabled, boundary, measurementImageFile, pdfConverting, pushToast, workflowMode]);
+  }, [
+    aiEnabled,
+    boundary,
+    measurementImageFile,
+    pdfConverting,
+    pushToast,
+    showCvUncertainty,
+    workflowMode,
+  ]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map?.isStyleLoaded?.()) return;
+    for (const layerId of ["cv-uncertainty-fill", "cv-uncertainty-line"]) {
+      if (!map.getLayer(layerId)) continue;
+      try {
+        map.setLayoutProperty(layerId, "visibility", showCvUncertainty ? "visible" : "none");
+      } catch {
+        /* intentionally ignore non-critical map overlay errors */
+      }
+    }
+  }, [showCvUncertainty]);
 
   const ensureGoogleTileSession = useCallback(async (forceRefresh = false) => {
     if (!googleMapsKey) {
@@ -10138,6 +10290,8 @@ export default function App() {
           mapType: "satellite",
           language: "en-US",
           region: "US",
+          scale: googleHighDpi ? "scaleFactor2x" : "scaleFactor1x",
+          highDpi: !!googleHighDpi,
         }),
       });
       if (!response.ok) {
@@ -10174,7 +10328,7 @@ export default function App() {
         googleTileSessionPromiseRef.current = null;
       }
     }
-  }, [googleMapsKey]);
+  }, [googleHighDpi, googleMapsKey]);
 
   const ensureGoogleBasemapLayer = useCallback(async (map, forceRefresh = false) => {
     if (!map || !map.isStyleLoaded?.() || !googleMapsKey) return false;
@@ -10204,12 +10358,29 @@ export default function App() {
           type: "raster",
           source: "google_sat",
           layout: { visibility: "none" },
+          paint: {
+            "raster-resampling": "linear",
+            "raster-fade-duration": 80,
+          },
         },
         getPreferred3dInsertBeforeId(map)
       );
     }
     return true;
   }, [ensureGoogleTileSession, googleMapsKey]);
+
+  useEffect(() => {
+    googleTileSessionRef.current = null;
+    googleTileSessionExpiryRef.current = 0;
+    googleTileSessionPromiseRef.current = null;
+    const map = mapRef.current;
+    if (!map || baseMapRef.current !== "google") return;
+    ensureGoogleTileSession(true)
+      .then(() => ensureGoogleBasemapLayer(map, true))
+      .catch((error) => {
+        pushToast(`Google imagery refresh failed: ${error?.message || "unknown error"}.`, "warn", 5000);
+      });
+  }, [ensureGoogleBasemapLayer, ensureGoogleTileSession, googleHighDpi, pushToast]);
 
   // Basemap layer visibility toggler
   const applyBaseMapVisibility = useCallback((map, which) => {
@@ -11044,7 +11215,13 @@ export default function App() {
           }
         }
 
-        const nextCounters = { ...nameCountersRef.current };
+        const nextCounters = {
+          plowable: getLayerAutoNameBaseNumber("plowable", prev),
+          sidewalks: getLayerAutoNameBaseNumber("sidewalks", prev),
+          turf: getLayerAutoNameBaseNumber("turf", prev),
+          mulch: getLayerAutoNameBaseNumber("mulch", prev),
+        };
+        const pendingAutoNameCounts = new Map();
         let anyWarned = false;
 
         const normalizeIncoming = (f, layerKey) => {
@@ -11054,8 +11231,14 @@ export default function App() {
           // only autogenerate if missing in both new+old
           let name = f.properties?.name || old?.properties?.name || "";
           if (!name) {
-            nextCounters[layerKey] = (nextCounters[layerKey] || 0) + 1;
-            name = `${LAYER_META[layerKey].name} ${nextCounters[layerKey]}`;
+            const autoName = getNextAutoNameForFeature(
+              layerKey,
+              snapped,
+              prev,
+              pendingAutoNameCounts
+            );
+            nextCounters[layerKey] = Math.max(nextCounters[layerKey] || 0, autoName.count);
+            name = autoName.name;
           }
 
           const outside =
@@ -11131,7 +11314,14 @@ export default function App() {
         return next;
       });
     },
-    [boundary, pushToast, snapPolygonFeatureToEdges, warnOutsideBoundary]
+    [
+      boundary,
+      getNextAutoNameForFeature,
+      getLayerAutoNameBaseNumber,
+      pushToast,
+      snapPolygonFeatureToEdges,
+      warnOutsideBoundary,
+    ]
   );
 
   // Rename feature (active layer)
@@ -11144,8 +11334,15 @@ export default function App() {
           ? { ...f, properties: { ...(f.properties || {}), name: newName } }
           : f
       );
-      return { ...prev, [layerKey]: updated };
+      const nextFeatures = { ...prev, [layerKey]: updated };
+      layerFeaturesRef.current = nextFeatures;
+      return nextFeatures;
     });
+    try {
+      writeImmediateLocalAutosaveRef.current();
+    } catch {
+      /* intentionally ignore non-critical map/draw errors */
+    }
 
     const d = drawRef.current;
     if (d) {
@@ -11155,14 +11352,6 @@ export default function App() {
       /* intentionally ignore non-critical map/draw errors */
     }
     }
-  }, []);
-
-  // Zoom to feature
-  const zoomToFeature = useCallback((feature) => {
-    const map = mapRef.current;
-    if (!map) return;
-    const bbox = turf.bbox(feature);
-    map.fitBounds(bbox, { padding: 60, duration: 500 });
   }, []);
 
   const fitMapToProject = useCallback((nextBoundary, nextLayers) => {
@@ -11312,6 +11501,7 @@ export default function App() {
         }
         refreshDraftDimensionsOverlayRaf();
       });
+      writeImmediateLocalAutosaveRef.current();
       queueSharedPolygonAutosave(autosaveDelay);
       return true;
     },
@@ -11345,6 +11535,52 @@ export default function App() {
       });
     },
     []
+  );
+
+  const selectLocationFeatureById = useCallback((featureId) => {
+    const targetId = String(featureId || "").trim();
+    if (!targetId) return;
+    const draw = drawRef.current;
+    selectedDrawFeatureIdRef.current = targetId;
+    setSelectedLocationFeatureIds([targetId]);
+    if (!draw) return;
+    try {
+      draw.changeMode("simple_select", { featureIds: [targetId] });
+    } catch {
+      /* intentionally ignore non-critical map/draw errors */
+    }
+  }, []);
+
+  const focusLocationFeature = useCallback(
+    (layerKey, feature, { zoom = true } = {}) => {
+      const targetLayer = LAYER_KEYS.includes(layerKey) ? layerKey : activeLayerRef.current;
+      const targetFeature = feature && typeof feature === "object" ? feature : null;
+      const targetId = String(targetFeature?.id || "").trim();
+      if (!targetFeature || !targetId) return;
+      pendingLocationSelectionRef.current = {
+        layerKey: targetLayer,
+        featureId: targetId,
+      };
+      if (zoom) {
+        const map = mapRef.current;
+        if (map) {
+          try {
+            const bbox = turf.bbox(targetFeature);
+            map.fitBounds(bbox, { padding: 60, duration: 500 });
+          } catch {
+            /* intentionally ignore non-critical map/draw errors */
+          }
+        }
+      }
+      if (targetLayer !== activeLayerRef.current) {
+        switchActiveLayer(targetLayer);
+        return;
+      }
+      requestAnimationFrame(() => {
+        selectLocationFeatureById(targetId);
+      });
+    },
+    [selectLocationFeatureById, switchActiveLayer]
   );
 
   const cycleActiveLayer = useCallback(() => {
@@ -11694,10 +11930,77 @@ export default function App() {
     warnOutsideBoundary,
   ]);
 
+  useEffect(() => {
+    writeImmediateLocalAutosaveRef.current = () => {
+      try {
+        const autosavedAt = new Date().toISOString();
+        const payload = { ...buildProjectPayload(), autosavedAt };
+        const nextPdfPageSaveMeta = updatePdfPageSaveMeta(
+          payload.pdfPageSaveMeta,
+          payload.pdfAnnotations,
+          {
+            timestamp: autosavedAt,
+            mode: "autosave",
+            currentContextKey: workflowMode === WORKFLOW_MODE_PDF ? currentPdfContextKey : "",
+            currentSignature: workflowMode === WORKFLOW_MODE_PDF ? currentPdfPageSignature : "",
+            savedMeasurements: payload.pdfSavedMeasurements,
+          }
+        );
+        payload.pdfPageSaveMeta = nextPdfPageSaveMeta;
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+        void queueProjectRecoverySnapshot(payload, {
+          projectId: buildProjectLibraryId(payload.projectName || "Untitled Project"),
+          reason: "polygon-change",
+        });
+        setAutosaveDraftAvailable(true);
+        if (workflowMode === WORKFLOW_MODE_PDF) {
+          setPdfPageSaveMeta(nextPdfPageSaveMeta);
+        }
+      } catch {
+        /* intentionally ignore non-critical map/draw errors */
+      }
+    };
+    return () => {
+      writeImmediateLocalAutosaveRef.current = () => {};
+    };
+  }, [buildProjectPayload, currentPdfContextKey, currentPdfPageSignature, workflowMode]);
+
   const currentProjectLibraryId = useMemo(
     () => buildProjectLibraryId(projectName || "Untitled Project"),
     [projectName]
   );
+  const sharedVersionProjectId = useMemo(
+    () => String(activeSharedProjectMeta?.id || currentProjectLibraryId || "").trim(),
+    [activeSharedProjectMeta?.id, currentProjectLibraryId]
+  );
+
+  useEffect(() => {
+    let canceled = false;
+    if (!showVersionHistory || !sharedAccessAuthenticated || !sharedVersionProjectId) {
+      setSharedProjectVersions([]);
+      setSharedProjectVersionsStatus("idle");
+      return () => {
+        canceled = true;
+      };
+    }
+
+    setSharedProjectVersionsStatus("loading");
+    listSharedProjectVersions(sharedVersionProjectId, 100)
+      .then((versions) => {
+        if (canceled) return;
+        setSharedProjectVersions(Array.isArray(versions) ? versions : []);
+        setSharedProjectVersionsStatus("ready");
+      })
+      .catch(() => {
+        if (canceled) return;
+        setSharedProjectVersions([]);
+        setSharedProjectVersionsStatus("error");
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [sharedAccessAuthenticated, sharedVersionProjectId, showVersionHistory]);
 
   const markProjectSavedBaseline = useCallback((payload, savedAtOverride = "") => {
     const signature = buildProjectPayloadSignature(payload);
@@ -11711,7 +12014,7 @@ export default function App() {
   }, []);
 
   const appendProjectVersionSnapshot = useCallback(
-    (projectId, payload, { source = "local", savedBy = "" } = {}) => {
+    (projectId, payload, { source = "local", savedBy = "", note = "" } = {}) => {
       const targetId = String(projectId || "").trim();
       if (!targetId || !isValidProjectPayload(payload)) return;
       const savedAt = String(payload?.savedAt || new Date().toISOString()).trim();
@@ -11721,6 +12024,7 @@ export default function App() {
         savedAt,
         source: String(source || "local").trim() || "local",
         savedBy: String(savedBy || "").trim(),
+        note: String(note || "").trim(),
         polygonCount: countProjectPayloadPolygons(payload),
         hasBoundary: !!payload?.boundary,
         signature,
@@ -11729,7 +12033,12 @@ export default function App() {
       setProjectVersionHistory((prev) => {
         const prevMap = prev && typeof prev === "object" ? prev : {};
         const existing = Array.isArray(prevMap[targetId]) ? prevMap[targetId] : [];
-        if (existing.length && existing[0]?.signature && existing[0].signature === signature) {
+        if (
+          String(source || "local").trim().toLowerCase() !== "manual" &&
+          existing.length &&
+          existing[0]?.signature &&
+          existing[0].signature === signature
+        ) {
           return prevMap;
         }
         return {
@@ -11775,6 +12084,11 @@ export default function App() {
       }
     );
     payload.pdfPageSaveMeta = nextPdfPageSaveMeta;
+    void queueProjectRecoverySnapshot(payload, {
+      projectId: buildProjectLibraryId(payload.projectName || "Untitled Project"),
+      reason: sharedOnly ? "shared-autosave" : "manual-save",
+      forceCheckpoint: !sharedOnly,
+    });
     if (!sharedOnly) {
       setPdfPageSaveMeta(nextPdfPageSaveMeta);
     }
@@ -11790,6 +12104,10 @@ export default function App() {
             (projectLibrary || []).find((entry) => entry?.id === localEntry?.id)?.lastEditedAt ||
               ""
           ).trim();
+    const baseRevision =
+      activeSharedProjectMetaRef.current?.id === localEntry?.id
+        ? Math.max(0, Number(activeSharedProjectMetaRef.current?.revision) || 0)
+        : 0;
 
     if (!sharedOnly) {
       setLayerFeatures(payload.layerFeatures);
@@ -11833,6 +12151,7 @@ export default function App() {
           polygonCount: localEntry.polygonCount,
           hasBoundary: localEntry.hasBoundary,
           baseLastEditedAt,
+          baseRevision: baseRevision || null,
           forceOverwrite,
           payload,
         });
@@ -11851,6 +12170,7 @@ export default function App() {
               sharedSummary?.saved_by || sharedSummary?.savedBy || sharedAuth?.username || ""
             ).trim(),
             lastEditedAt: sharedSavedAt || payload.savedAt,
+            revision: Math.max(1, Number(sharedSummary?.revision) || 1),
           })
         );
         setSharedProjectLibraryStatus("connected");
@@ -11860,6 +12180,7 @@ export default function App() {
           savedBy: String(
             sharedSummary?.saved_by || sharedSummary?.savedBy || sharedAuth?.username || ""
           ).trim(),
+          revision: Math.max(1, Number(sharedSummary?.revision) || 1),
         });
         if (sharedSavedAt) {
           markProjectSavedBaseline(
@@ -11952,6 +12273,7 @@ export default function App() {
             savedAt: localEntry.savedAt,
             polygonCount: localEntry.polygonCount,
             hasBoundary: localEntry.hasBoundary,
+            baseRevision: baseRevision || null,
             payload,
           })
         );
@@ -11991,6 +12313,33 @@ export default function App() {
     workflowMode,
   ]);
 
+  const saveManualVersionSnapshot = useCallback(() => {
+    const payload = buildProjectPayload();
+    const projectId = String(
+      currentProjectLibraryId || buildProjectLibraryId(projectName || "Untitled Project")
+    ).trim();
+    if (!projectId) {
+      pushToast("Name the project first so the snapshot can be stored.", "warn", 3600);
+      return;
+    }
+    appendProjectVersionSnapshot(projectId, payload, {
+      source: "manual",
+      savedBy: String(sharedAuth?.username || "").trim(),
+      note: versionSnapshotNote,
+    });
+    setVersionCompareId("");
+    setVersionSnapshotNote("");
+    pushToast("Snapshot saved to version history.", "info", 3200);
+  }, [
+    appendProjectVersionSnapshot,
+    buildProjectPayload,
+    currentProjectLibraryId,
+    projectName,
+    pushToast,
+    sharedAuth?.username,
+    versionSnapshotNote,
+  ]);
+
   const togglePinnedProject = useCallback((projectId) => {
     const normalizedId = String(projectId || "").trim();
     if (!normalizedId) return;
@@ -12002,6 +12351,28 @@ export default function App() {
       return [normalizedId, ...current].slice(0, 24);
     });
   }, []);
+
+  const updateProjectPreviewImage = useCallback(
+    (projectId, imageDataUrl) => {
+      const normalizedId = String(projectId || "").trim();
+      if (!normalizedId) return;
+      const normalizedImage = String(imageDataUrl || "").trim();
+      setProjectPreviewImages((previous) => {
+        const next = {
+          ...(previous && typeof previous === "object" ? previous : {}),
+        };
+        if (normalizedImage) next[normalizedId] = normalizedImage;
+        else delete next[normalizedId];
+        return next;
+      });
+      pushToast(
+        normalizedImage ? "Pinned-site preview image saved." : "Pinned-site preview image removed.",
+        "info",
+        3200
+      );
+    },
+    [pushToast]
+  );
 
   useEffect(() => {
     queueSharedPolygonAutosaveRef.current = (delayMs = 900) => {
@@ -12031,9 +12402,10 @@ export default function App() {
 
     if (!props.name) {
       const nextCounters = { ...nameCountersRef.current };
-      nextCounters[layerKey] = (nextCounters[layerKey] || 0) + 1;
+      const autoName = getNextAutoNameForFeature(layerKey, f);
+      nextCounters[layerKey] = Math.max(nextCounters[layerKey] || 0, autoName.count);
       nameCountersRef.current = nextCounters;
-      props.name = `${LAYER_META[layerKey].name} ${nextCounters[layerKey]}`;
+      props.name = autoName.name;
     }
 
     const outside =
@@ -12041,7 +12413,7 @@ export default function App() {
     props.outside = outside;
 
     return { ...f, properties: props };
-  }, [boundary]);
+  }, [boundary, getNextAutoNameForFeature]);
 
   const duplicateSelectedFeatures = useCallback(() => {
     const selected = getSelectedLocationFeaturesSnapshot().filter(({ feature }) =>
@@ -12380,6 +12752,10 @@ export default function App() {
         savedBy: String(
           sharedMeta?.savedBy || data?.savedBy || data?.saved_by || ""
         ).trim(),
+        revision: Math.max(
+          0,
+          Number(sharedMeta?.revision || data?.revision) || 0
+        ),
       };
       setActiveSharedProjectMeta(nextSharedMeta);
       setRemoteSharedUpdateNotice(null);
@@ -12472,7 +12848,7 @@ export default function App() {
       setPdfAnnotationTool("select");
       setPdfShapeType("rectangle");
       clearUploadedPlanOverlay(true);
-      setActiveSharedProjectMeta({ id: "", lastEditedAt: "", savedBy: "" });
+      setActiveSharedProjectMeta({ id: "", lastEditedAt: "", savedBy: "", revision: 0 });
       setRemoteSharedUpdateNotice(null);
       setSavedProjectSignature("");
       setLastManualSaveAt("");
@@ -12546,14 +12922,18 @@ export default function App() {
     [applyProjectPayload, pushToast]
   );
 
-  const restoreAutosave = useCallback(() => {
+  const restoreAutosave = useCallback(async () => {
     try {
       const raw = localStorage.getItem(AUTOSAVE_KEY);
-      if (!raw) {
+      let data = raw ? JSON.parse(raw) : null;
+      if (!isValidProjectPayload(data)) {
+        const recovery = await getLatestProjectRecovery();
+        data = recovery?.payload || null;
+      }
+      if (!data) {
         pushToast("No autosave draft found.", "warn");
         return;
       }
-      const data = JSON.parse(raw);
       if (!isValidProjectPayload(data)) {
         pushToast("Autosave draft is invalid.", "error");
         return;
@@ -12570,18 +12950,169 @@ export default function App() {
     }
   }, [applyProjectPayload, pushToast]);
 
-  const clearAutosave = useCallback(() => {
+  const clearAutosave = useCallback(async () => {
     try {
       localStorage.removeItem(AUTOSAVE_KEY);
+      await clearProjectRecovery();
       setAutosaveDraftAvailable(false);
+      setHomeProjectRecoveries([]);
       pushToast("Autosave draft cleared.", "info");
     } catch {
       pushToast("Could not clear autosave draft.", "error");
     }
   }, [pushToast]);
 
+  const refreshHomeProjectRecoveries = useCallback(async ({ quiet = true } = {}) => {
+    setHomeRecoveryRefreshing(true);
+    let storageError = null;
+    let records = [];
+    try {
+      const storageStatus = await getRecoveryStorageStatus();
+      setOfflineCacheStatus(storageStatus.state);
+      records = await listProjectRecoveries(100);
+    } catch (error) {
+      storageError = error;
+      setOfflineCacheStatus("unavailable");
+    }
+
+    try {
+      const raw = localStorage.getItem(AUTOSAVE_KEY);
+      const payload = raw ? JSON.parse(raw) : null;
+      if (isValidProjectPayload(payload)) {
+        const projectName = String(payload.projectName || "Recovered Project").trim();
+        const projectId = buildProjectLibraryId(projectName || "Untitled Project");
+        const browserRecord = {
+          projectId,
+          projectName: projectName || "Recovered Project",
+          savedAt: String(payload.autosavedAt || payload.savedAt || ""),
+          reason: "browser-autosave",
+          polygonCount: countProjectPayloadPolygons(payload),
+          recoverySource: "browser-autosave",
+        };
+        const matchingIndex = records.findIndex(
+          (record) => String(record?.projectId || "") === projectId
+        );
+        if (matchingIndex < 0) {
+          records = [browserRecord, ...records];
+        } else if (
+          String(browserRecord.savedAt || "") > String(records[matchingIndex]?.savedAt || "")
+        ) {
+          records = records.map((record, index) =>
+            index === matchingIndex ? browserRecord : record
+          );
+        }
+      }
+    } catch {
+      /* The IndexedDB summaries remain usable when the localStorage fallback is invalid. */
+    }
+
+    const ordered = [...records].sort((a, b) =>
+      String(b?.savedAt || "").localeCompare(String(a?.savedAt || ""))
+    );
+    setHomeProjectRecoveries(ordered);
+    setHomeRecoveryRefreshing(false);
+    if (!quiet) {
+      if (storageError && !ordered.length) {
+        pushToast("Device recovery storage is unavailable in this browser.", "warn", 4600);
+      } else {
+        pushToast(
+          `Recovery Center refreshed${ordered.length ? `: ${ordered.length} snapshot${ordered.length === 1 ? "" : "s"}` : ""}.`,
+          "info",
+          3200
+        );
+      }
+    }
+    return ordered;
+  }, [pushToast]);
+
+  const restoreHomeProjectRecovery = useCallback(async (record) => {
+    if (String(record?.recoverySource || "") === "browser-autosave") {
+      await restoreAutosave();
+      return;
+    }
+    const projectId = String(record?.projectId || "").trim();
+    if (!projectId) {
+      pushToast("That recovery snapshot is unavailable.", "error", 4200);
+      return;
+    }
+    try {
+      const recovery = await getLatestProjectRecovery(projectId);
+      if (!isValidProjectPayload(recovery?.payload)) {
+        throw new Error("Recovery payload is invalid");
+      }
+      applyProjectPayload(recovery.payload, {
+        fallbackProjectName: String(recovery.projectName || record?.projectName || "Recovered Project"),
+        successToast: "Recovery snapshot restored. Review it, then save to sync your changes.",
+        switchToWorkspace: true,
+        markAutosaveAvailable: true,
+        storeInLibrary: true,
+      });
+    } catch {
+      pushToast("That recovery snapshot could not be restored.", "error", 5200);
+    }
+  }, [applyProjectPayload, pushToast, restoreAutosave]);
+
+  useEffect(() => {
+    if (appScreen !== APP_SCREEN_HOME) return undefined;
+    let active = true;
+    const refresh = async () => {
+      if (!active) return;
+      await refreshHomeProjectRecoveries({ quiet: true });
+    };
+    void refresh();
+    const intervalId = window.setInterval(refresh, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [appScreen, refreshHomeProjectRecoveries]);
+
   const restoreVersionSnapshot = useCallback(
-    (versionId) => {
+    async (versionId) => {
+      const normalizedVersionId = String(versionId || "");
+      const sharedRevisionMatch = /^shared-revision-(\d+)$/.exec(normalizedVersionId);
+      if (sharedRevisionMatch) {
+        if (!sharedAccessAuthenticated || !sharedVersionProjectId) {
+          pushToast("Log in to restore a shared project revision.", "warn", 4200);
+          return;
+        }
+        setSharedVersionPayloadLoadingId(normalizedVersionId);
+        try {
+          const record = await getSharedProjectVersion(
+            sharedVersionProjectId,
+            Number(sharedRevisionMatch[1])
+          );
+          if (!record?.payload || !isValidProjectPayload(record.payload)) {
+            throw new Error("Shared revision payload is invalid.");
+          }
+          setSharedProjectVersions((prev) =>
+            (Array.isArray(prev) ? prev : []).map((version) =>
+              Number(version?.revision) === Number(sharedRevisionMatch[1])
+                ? { ...version, payload: record.payload }
+                : version
+            )
+          );
+          applyProjectPayload(record.payload, {
+            fallbackProjectName: projectName || "Recovered Project",
+            successToast: `Shared revision ${sharedRevisionMatch[1]} restored.`,
+            switchToWorkspace: true,
+            markAutosaveAvailable: true,
+            storeInLibrary: true,
+          });
+          setVersionCompareId(normalizedVersionId);
+          setShowVersionHistory(false);
+        } catch (error) {
+          pushToast(
+            `Could not restore shared revision: ${error?.message || "revision unavailable"}.`,
+            "error",
+            5600
+          );
+        } finally {
+          setSharedVersionPayloadLoadingId("");
+        }
+        return;
+      }
+
       const targetId = String(currentProjectLibraryId || "").trim();
       const versionsForProject =
         targetId && Array.isArray(projectVersionHistory?.[targetId])
@@ -12610,6 +13141,8 @@ export default function App() {
       projectName,
       projectVersionHistory,
       pushToast,
+      sharedAccessAuthenticated,
+      sharedVersionProjectId,
     ]
   );
 
@@ -12627,10 +13160,10 @@ export default function App() {
       return;
     }
     askConfirm({
-      title: "Clear Version History",
+      title: "Clear Device Version History",
       message:
-        "Remove all saved snapshots for this project? Current map data stays unchanged.",
-      confirmText: "Clear History",
+        "Remove snapshots stored on this device? Durable shared revisions stay available on the server.",
+      confirmText: "Clear Device History",
       cancelText: "Cancel",
       danger: true,
       onConfirm: () => {
@@ -12642,7 +13175,7 @@ export default function App() {
         setVersionCompareId("");
         setShowVersionHistory(false);
         setConfirm(null);
-        pushToast("Version history cleared for this project.", "info", 3500);
+        pushToast("Device version history cleared for this project.", "info", 3500);
       },
     });
   }, [
@@ -12714,6 +13247,7 @@ export default function App() {
               id: String(entry.id || "").trim(),
               lastEditedAt: String(entry.lastEditedAt || entry.savedAt || "").trim(),
               savedBy: String(entry.savedBy || "").trim(),
+              revision: Math.max(0, Number(entry.revision) || 0),
             },
           });
           return;
@@ -12746,6 +13280,7 @@ export default function App() {
               remoteProject.last_edited_at || remoteProject.saved_at || ""
             ).trim(),
             savedBy: String(remoteProject.saved_by || "").trim(),
+            revision: Math.max(1, Number(remoteProject.revision) || 1),
           },
         });
         setProjectLibrary((prev) =>
@@ -12759,6 +13294,7 @@ export default function App() {
               lastEditedAt: String(
                 remoteProject.last_edited_at || remoteProject.saved_at || ""
               ).trim(),
+              revision: Math.max(1, Number(remoteProject.revision) || 1),
             }
           )
         );
@@ -12809,20 +13345,30 @@ export default function App() {
 
   const createHomeFolder = useCallback(() => {
     const normalized = String(homeNewFolderName || "").trim();
-    if (!normalized) return;
-    setProjectFolders((prev) => {
-      const current = Array.isArray(prev) ? prev : [];
-      const exists = current.some(
-        (entry) =>
-          String(entry?.name || "").trim() === normalized &&
-          String(entry?.workflowMode || "").trim().toLowerCase() === homeProjectTab
-      );
-      if (exists) return current;
-      return [...current, { name: normalized, workflowMode: homeProjectTab }];
-    });
+    if (!normalized) {
+      pushToast("Enter a folder name first.", "warn", 2800);
+      return;
+    }
+    const existingFolder = (Array.isArray(projectFolders) ? projectFolders : []).find(
+      (entry) =>
+        String(entry?.name || "").trim().toLowerCase() === normalized.toLowerCase() &&
+        String(entry?.workflowMode || "").trim().toLowerCase() === homeProjectTab
+    );
+    if (existingFolder) {
+      const existingName = String(existingFolder.name || normalized).trim();
+      setHomeFolderFilter(existingName);
+      setHomeNewFolderName("");
+      pushToast(`Folder "${existingName}" already exists.`, "info", 2800);
+      return;
+    }
+    setProjectFolders((previous) => [
+      ...(Array.isArray(previous) ? previous : []),
+      { name: normalized, workflowMode: homeProjectTab },
+    ]);
     setHomeFolderFilter(normalized);
     setHomeNewFolderName("");
-  }, [homeNewFolderName, homeProjectTab]);
+    pushToast(`Folder "${normalized}" created.`, "info", 2800);
+  }, [homeNewFolderName, homeProjectTab, projectFolders, pushToast]);
 
   const toggleHomeFolderCollapsed = useCallback((workflowMode, folderName) => {
     const normalizedFolder = String(folderName || "").trim();
@@ -13021,10 +13567,9 @@ export default function App() {
 
   const visibleProjectLibrary = useMemo(() => {
     const entries = Array.isArray(projectLibrary) ? projectLibrary : [];
-    if (!sharedAccessAuthenticated) return [];
+    if (sharedAccessAuthenticated) return entries;
     return entries.filter(
-      (entry) =>
-        String(entry?.storageScope || "").trim().toLowerCase() === "shared"
+      (entry) => String(entry?.storageScope || "").trim().toLowerCase() !== "shared"
     );
   }, [projectLibrary, sharedAccessAuthenticated]);
 
@@ -13218,32 +13763,6 @@ export default function App() {
     pinnedHomeProjects.length,
   ]);
 
-  const isHomeDarkMode = homeAppearance !== "light";
-  const homeShellBackground = isHomeDarkMode
-    ? "radial-gradient(1000px 560px at 12% 2%, rgba(72,140,198,0.26), transparent 56%), radial-gradient(860px 500px at 86% 10%, rgba(52,120,96,0.22), transparent 54%), linear-gradient(180deg, #08111a 0%, #0b1520 26%, #0d1822 72%, #081018 100%)"
-    : "radial-gradient(1100px 620px at 14% 6%, rgba(132,205,255,0.42), transparent 58%), radial-gradient(900px 540px at 86% 12%, rgba(178,229,207,0.4), transparent 56%), linear-gradient(180deg, #f7fbff 0%, #eef6fb 34%, #fcfeff 72%, #f1f7fb 100%)";
-  const homeShellOverlay = isHomeDarkMode
-    ? "radial-gradient(circle at 22% 20%, rgba(255,255,255,0.14) 0 2px, transparent 2px 100%), repeating-linear-gradient(115deg, rgba(129,182,218,0.06) 0 1px, transparent 1px 34px), repeating-linear-gradient(180deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 52px)"
-    : "radial-gradient(circle at 20% 24%, rgba(255,255,255,0.52) 0 2px, transparent 2px 100%), repeating-linear-gradient(115deg, rgba(80,140,176,0.06) 0 1px, transparent 1px 34px), repeating-linear-gradient(180deg, rgba(255,255,255,0.22) 0 1px, transparent 1px 52px)";
-  const homeWorkspaceBandBackground = isHomeDarkMode
-    ? "linear-gradient(180deg, rgba(14,26,38,0.96) 0%, rgba(12,22,33,0.98) 52%, rgba(12,24,22,0.96) 100%)"
-    : "linear-gradient(180deg, rgba(255,255,255,0.56) 0%, rgba(243,249,253,0.6) 52%, rgba(241,248,243,0.58) 100%)";
-  const homeWorkspaceBandBorder = isHomeDarkMode
-    ? "1px solid rgba(106,150,180,0.18)"
-    : "1px solid rgba(137,176,198,0.18)";
-  const homeWorkspaceBandShadow = isHomeDarkMode
-    ? "0 28px 64px rgba(22,47,66,0.28)"
-    : "0 22px 48px rgba(94,138,166,0.14)";
-  const homeWorkspaceBandOverlay = isHomeDarkMode
-    ? "radial-gradient(520px 220px at 18% 0%, rgba(112,186,255,0.1), transparent 72%), radial-gradient(460px 220px at 90% 8%, rgba(123,214,173,0.08), transparent 72%), repeating-linear-gradient(120deg, rgba(255,255,255,0.02) 0 1px, transparent 1px 44px)"
-    : "radial-gradient(520px 220px at 18% 0%, rgba(112,186,255,0.1), transparent 72%), radial-gradient(460px 220px at 90% 8%, rgba(123,214,173,0.08), transparent 72%), repeating-linear-gradient(120deg, rgba(110,160,188,0.04) 0 1px, transparent 1px 44px)";
-  const homeBrandTextColor = isHomeDarkMode ? "#edf6ff" : "#21435e";
-
-  useEffect(() => {
-    if (qcOverlapScanNonce === 0) return;
-    setQcOverlapScanNonce(0);
-  }, [layerFeatures, qcOverlapScanNonce]);
-
   const resumeLastProjectFromHome = useCallback(async () => {
     if (hasCurrentProjectData && appScreen === APP_SCREEN_HOME) {
       openMeasurementScreen(workflowMode);
@@ -13269,13 +13788,79 @@ export default function App() {
     workflowMode,
   ]);
 
-  const currentProjectVersions = useMemo(() => {
+  const currentDeviceProjectVersions = useMemo(() => {
     const all = projectVersionHistory && typeof projectVersionHistory === "object"
       ? projectVersionHistory
       : {};
     const byId = Array.isArray(all[currentProjectLibraryId]) ? all[currentProjectLibraryId] : [];
     return byId;
   }, [currentProjectLibraryId, projectVersionHistory]);
+
+  const currentProjectVersions = useMemo(() => {
+    const remote = (Array.isArray(sharedProjectVersions) ? sharedProjectVersions : []).map(
+      (version) => ({
+        id: `shared-revision-${Math.max(1, Number(version?.revision) || 1)}`,
+        savedAt: String(version?.created_at || ""),
+        source: `shared r${Math.max(1, Number(version?.revision) || 1)}`,
+        savedBy: String(version?.saved_by || ""),
+        note: "Durable server revision",
+        polygonCount: Math.max(0, Number(version?.polygon_count) || 0),
+        hasBoundary: !!version?.has_boundary,
+        sharedRevision: Math.max(1, Number(version?.revision) || 1),
+        payload: version?.payload || null,
+      })
+    );
+    const local = remote.length
+      ? currentDeviceProjectVersions.filter(
+          (version) => String(version?.source || "").trim().toLowerCase() !== "shared"
+        )
+      : currentDeviceProjectVersions;
+    return [...remote, ...local].sort((a, b) =>
+      String(b?.savedAt || "").localeCompare(String(a?.savedAt || ""))
+    );
+  }, [currentDeviceProjectVersions, sharedProjectVersions]);
+
+  const selectVersionForCompare = useCallback(
+    async (version) => {
+      const versionId = String(version?.id || "");
+      if (!versionId) return;
+      if (version?.payload || !version?.sharedRevision) {
+        setVersionCompareId(versionId);
+        return;
+      }
+      if (!sharedAccessAuthenticated || !sharedVersionProjectId) {
+        pushToast("Log in to load that shared revision.", "warn", 4200);
+        return;
+      }
+      setSharedVersionPayloadLoadingId(versionId);
+      try {
+        const record = await getSharedProjectVersion(
+          sharedVersionProjectId,
+          version.sharedRevision
+        );
+        if (!record?.payload || !isValidProjectPayload(record.payload)) {
+          throw new Error("Shared revision payload is invalid.");
+        }
+        setSharedProjectVersions((prev) =>
+          (Array.isArray(prev) ? prev : []).map((item) =>
+            Number(item?.revision) === Number(version.sharedRevision)
+              ? { ...item, payload: record.payload }
+              : item
+          )
+        );
+        setVersionCompareId(versionId);
+      } catch (error) {
+        pushToast(
+          `Could not load shared revision: ${error?.message || "revision unavailable"}.`,
+          "error",
+          5600
+        );
+      } finally {
+        setSharedVersionPayloadLoadingId("");
+      }
+    },
+    [pushToast, sharedAccessAuthenticated, sharedVersionProjectId]
+  );
 
   const selectedVersionForCompare = useMemo(
     () =>
@@ -13294,6 +13879,39 @@ export default function App() {
     () => summarizePayloadMetrics(selectedVersionForCompare?.payload || null),
     [selectedVersionForCompare]
   );
+
+  const polygonSearchResults = useMemo(() => {
+    const query = String(polygonSearchQuery || "").trim().toLowerCase();
+    if (!query) return [];
+    const results = [];
+    for (const layerKey of LAYER_KEYS) {
+      for (const feature of layerFeatures[layerKey] || []) {
+        if (!isPolygonLike(feature)) continue;
+        const name = String(feature?.properties?.name || "").trim() || "(unnamed)";
+        const haystack = [
+          name,
+          layerKey,
+          LAYER_META[layerKey]?.name || layerKey,
+          String(feature?.id || ""),
+        ]
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(query)) continue;
+        results.push({
+          layerKey,
+          feature,
+          name,
+          sqft: Math.round(featureSqft(feature)),
+        });
+      }
+    }
+    results.sort((left, right) => {
+      const sameLayer = String(left.layerKey).localeCompare(String(right.layerKey));
+      if (sameLayer !== 0) return sameLayer;
+      return String(left.name).localeCompare(String(right.name));
+    });
+    return results.slice(0, 80);
+  }, [layerFeatures, polygonSearchQuery]);
 
   const activeOperations = useMemo(() => {
     const ops = [];
@@ -13419,6 +14037,7 @@ export default function App() {
       }
       true3DViewerRef.current = null;
     }
+    true3DTilesetRef.current = null;
   }, []);
 
   const clearTrue3DEntitiesByIds = useCallback((viewer, idListRef) => {
@@ -13496,6 +14115,39 @@ export default function App() {
     }
   }, []);
 
+  const applyTrue3DQuality = useCallback((viewer, tileset = true3DTilesetRef.current) => {
+    if (!viewer) return;
+    const profile = true3DQualityRef.current;
+    try {
+      const deviceRatio = Math.max(1, Number(window.devicePixelRatio || 1));
+      viewer.resolutionScale = Math.min(deviceRatio, profile.resolutionScale);
+      if (viewer.scene) {
+        viewer.scene.fxaa = profile.name !== "performance";
+      }
+      if (tileset) {
+        tileset.maximumScreenSpaceError = profile.maximumScreenSpaceError;
+        tileset.dynamicScreenSpaceError = true;
+        tileset.dynamicScreenSpaceErrorFactor =
+          profile.name === "performance" ? 32 : profile.name === "high" ? 12 : 24;
+        tileset.cacheBytes = profile.cacheBytes;
+        tileset.maximumCacheOverflowBytes = Math.round(profile.cacheBytes * 0.5);
+        tileset.preloadFlightDestinations = true;
+      }
+      viewer.scene?.requestRender?.();
+    } catch {
+      /* intentionally ignore unsupported Cesium quality properties */
+    }
+  }, []);
+
+  useEffect(() => {
+    true3DQualityRef.current = getTrue3DQualityProfile(
+      true3DQualityPreset,
+      isCompactTouchUi
+    );
+    const viewer = true3DViewerRef.current;
+    if (viewer) applyTrue3DQuality(viewer);
+  }, [applyTrue3DQuality, isCompactTouchUi, true3DQualityPreset]);
+
   const captureTrue3DScreenshot = useCallback(async () => {
     const viewer = true3DViewerRef.current;
     const canvas = viewer?.scene?.canvas;
@@ -13571,6 +14223,15 @@ export default function App() {
         mulch: 0.3,
       };
       const selectedFeatureId = String(true3DSelectedFeatureIdRef.current || "");
+      const cameraHeight = Number(viewer.camera?.positionCartographic?.height || 0);
+      const profileTolerance = Number(true3DQualityRef.current?.simplifyTolerance || 0);
+      const distanceTolerance =
+        cameraHeight > 1800
+          ? Math.max(
+              profileTolerance,
+              Math.min(0.000008, (cameraHeight / 1800) * 0.00000125)
+            )
+          : profileTolerance;
       for (const key of layerOrder) {
         const fillHex = LAYER_COLORS[key]?.fill || "#00ffff";
         const lineHex = LAYER_COLORS[key]?.line || fillHex;
@@ -13581,8 +14242,25 @@ export default function App() {
         for (const feature of layerFeaturesRef.current[key] || []) {
           const featureId = String(feature?.id || "");
           const isSelected = key === activeLayerRef.current && featureId === selectedFeatureId;
+          let overlayFeature = feature;
+          const simplifyTolerance = distanceTolerance;
+          if (
+            !isSelected &&
+            simplifyTolerance > 0 &&
+            countPolygonVertices(feature) > 80
+          ) {
+            try {
+              overlayFeature = turf.simplify(to2DFeature(feature), {
+                tolerance: simplifyTolerance,
+                highQuality: false,
+                mutate: false,
+              });
+            } catch {
+              overlayFeature = feature;
+            }
+          }
           const beforeCount = overlayIds.length;
-          addCesiumPolygonEntities(viewer, Cesium, `takeoff-${key}`, feature, {
+          addCesiumPolygonEntities(viewer, Cesium, `takeoff-${key}`, overlayFeature, {
             material: isSelected ? lineColor.withAlpha(0.32) : fillColor,
             outlineColor: isSelected
               ? Cesium.Color.WHITE.withAlpha(1)
@@ -13992,6 +14670,78 @@ export default function App() {
     return { lat: Number(lat), lng: Number(lng) };
   }, [boundary]);
 
+  const getTrue3DProjectBounds = useCallback(() => {
+    const features = [];
+    if (boundary && isPolygonLike(boundary)) features.push(to2DFeature(boundary));
+    for (const key of LAYER_KEYS) {
+      for (const feature of layerFeaturesRef.current[key] || []) {
+        if (isPolygonLike(feature)) features.push(to2DFeature(feature));
+      }
+    }
+    if (!features.length) return null;
+    try {
+      const bounds = turf.bbox(turf.featureCollection(features));
+      if (bounds.length !== 4 || bounds.some((value) => !Number.isFinite(Number(value)))) {
+        return null;
+      }
+      return bounds.map(Number);
+    } catch {
+      return null;
+    }
+  }, [boundary]);
+
+  const flyTrue3DCamera = useCallback((preset = "fit") => {
+    const viewer = true3DViewerRef.current;
+    const Cesium = window.Cesium;
+    if (!viewer || !Cesium) return;
+    const bounds = getTrue3DProjectBounds();
+    const fallbackCenter = getCurrentCenterLatLng();
+    if (!bounds && !fallbackCenter) return;
+
+    try {
+      if (bounds && preset === "flat") {
+        viewer.camera.flyTo({
+          destination: Cesium.Rectangle.fromDegrees(...bounds),
+          orientation: {
+            heading: 0,
+            pitch: Cesium.Math.toRadians(-90),
+            roll: 0,
+          },
+          duration: 1.1,
+        });
+        return;
+      }
+
+      const center = bounds
+        ? { lng: (bounds[0] + bounds[2]) / 2, lat: (bounds[1] + bounds[3]) / 2 }
+        : fallbackCenter;
+      const diagonalMeters = bounds
+        ? distanceMetersLngLat(bounds[0], bounds[1], bounds[2], bounds[3])
+        : 500;
+      const altitude = Math.max(220, Math.min(12000, diagonalMeters * 2.05));
+      const cameraPreset = {
+        fit: { heading: 0, pitch: -58, altitude: altitude * 1.2 },
+        angled: { heading: 35, pitch: -43, altitude },
+        north: { heading: 0, pitch: -58, altitude },
+      }[preset] || { heading: 0, pitch: -58, altitude };
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(
+          center.lng,
+          center.lat,
+          cameraPreset.altitude
+        ),
+        orientation: {
+          heading: Cesium.Math.toRadians(cameraPreset.heading),
+          pitch: Cesium.Math.toRadians(cameraPreset.pitch),
+          roll: 0,
+        },
+        duration: 1.1,
+      });
+    } catch {
+      /* intentionally ignore non-critical camera preset errors */
+    }
+  }, [getCurrentCenterLatLng, getTrue3DProjectBounds]);
+
   const launchStreetView = useCallback(() => {
     if (!googleMapsKey) {
       pushToast("Google Maps key is missing. Street View is unavailable.", "warn", 5000);
@@ -14236,6 +14986,15 @@ export default function App() {
           showRenderLoopErrors: false,
         });
         true3DViewerRef.current = viewer;
+        applyTrue3DQuality(viewer, null);
+        let overlayDistanceBand = -1;
+        viewer.camera.moveEnd.addEventListener(() => {
+          const height = Number(viewer.camera?.positionCartographic?.height || 0);
+          const nextBand = height > 5000 ? 2 : height > 1800 ? 1 : 0;
+          if (nextBand === overlayDistanceBand) return;
+          overlayDistanceBand = nextBand;
+          renderTrue3DOverlays(viewer, Cesium);
+        });
         try {
           if (viewer.cesiumWidget) viewer.cesiumWidget.showRenderLoopErrors = false;
         } catch {
@@ -14329,6 +15088,8 @@ export default function App() {
             const tileset = await Cesium.createGooglePhotorealistic3DTileset();
             if (!cancelled) {
               viewer.scene.primitives.add(tileset);
+              true3DTilesetRef.current = tileset;
+              applyTrue3DQuality(viewer, tileset);
               usingGoogleTiles = true;
               setTrue3DStatus("Google photorealistic 3D loaded.");
               updateTrue3DDiagnostics({
@@ -14382,6 +15143,8 @@ export default function App() {
             if (typeof Cesium.createOsmBuildingsAsync === "function") {
               const osmBuildings = await Cesium.createOsmBuildingsAsync();
               viewer.scene.primitives.add(osmBuildings);
+              true3DTilesetRef.current = osmBuildings;
+              applyTrue3DQuality(viewer, osmBuildings);
             }
           } catch {
             /* intentionally ignore non-critical map/draw errors */
@@ -14391,15 +15154,7 @@ export default function App() {
         renderTrue3DOverlays(viewer, Cesium);
         rebuildTrue3DEditHandles(viewer, Cesium);
 
-        viewer.camera.flyTo({
-          destination: Cesium.Cartesian3.fromDegrees(center.lng, center.lat, 1200),
-          orientation: {
-            heading: 0,
-            pitch: Cesium.Math.toRadians(-55),
-            roll: 0,
-          },
-          duration: 1.4,
-        });
+        flyTrue3DCamera("fit");
       } catch (error) {
         updateTrue3DDiagnostics({
           provider: "error",
@@ -14421,6 +15176,8 @@ export default function App() {
       cancelled = true;
     };
   }, [
+    applyTrue3DQuality,
+    flyTrue3DCamera,
     getCurrentCenterLatLng,
     googleMapsKey,
     pushToast,
@@ -14446,6 +15203,7 @@ export default function App() {
     rebuildTrue3DEditHandles,
     showTrue3DViewer,
     true3DEditMode,
+    true3DQualityPreset,
     true3DSelectedFeatureId,
   ]);
 
@@ -15324,105 +16082,20 @@ export default function App() {
     return features;
   }, [layerFeatures]);
 
-  // Totals per layer
-  const totals = useMemo(() => {
-    const out = {};
-    for (const k of LAYER_KEYS) {
-      let sqm = 0;
-      for (const f of layerFeatures[k] || []) {
-        try {
-          sqm += turf.area(f);
-        } catch {
-      /* intentionally ignore non-critical map/draw errors */
-    }
-      }
-      const sqft = sqm * SQM_TO_SQFT;
-      out[k] = { sqft: Math.round(sqft), acres: sqft / 43560 };
-    }
-    return out;
-  }, [layerFeatures]);
-
-  // Rows for polygon list export
-  const polygonRows = useMemo(() => {
-    const rows = [];
-
-    for (const layerKey of LAYER_KEYS) {
-      for (const f of layerFeatures[layerKey] || []) {
-        if (!isPolygonLike(f)) continue;
-
-        const sqft = featureSqft(f);
-        const acres = sqft / 43560;
-
-        rows.push({
-          layer: LAYER_META[layerKey].name,
-          name: f.properties?.name || "(unnamed)",
-          sqft: Math.round(sqft),
-          acres: Number(acres.toFixed(4)),
-          id: f.id || "",
-          outside: !!f.properties?.outside,
-        });
-      }
-    }
-
-    rows.sort((a, b) => (a.layer + a.name).localeCompare(b.layer + b.name));
-    return rows;
-  }, [layerFeatures]);
+  const {
+    totals,
+    polygonRows,
+    qcSummary,
+  } = useGeometryAnalysis({
+    layerFeatures,
+    boundary,
+    overlapScanNonce: qcOverlapScanNonce,
+  });
 
   const estimateTemplateTokens = useMemo(
     () => buildEstimateTemplateTokens(projectName, totals),
     [projectName, totals]
   );
-
-  const qcSummary = useMemo(() => {
-    const all = [];
-    for (const key of LAYER_KEYS) {
-      for (const feature of layerFeatures[key] || []) {
-        if (!isPolygonLike(feature)) continue;
-        all.push({ layer: key, feature });
-      }
-    }
-
-    let outsideCount = 0;
-    let tinyCount = 0;
-    let invalidAreaCount = 0;
-    for (const item of all) {
-      const f = item.feature;
-      const outside = boundary ? isOutsideBoundary(f, boundary) : !!f?.properties?.outside;
-      if (outside) outsideCount += 1;
-      const sqft = featureSqft(f);
-      if (!Number.isFinite(sqft) || sqft <= 0) invalidAreaCount += 1;
-      if (Number.isFinite(sqft) && sqft > 0 && sqft < TINY_POLYGON_SQFT) tinyCount += 1;
-    }
-
-    const overlapScanDeferred = all.length > AUTO_QC_OVERLAP_LIMIT;
-    let overlapCount = 0;
-    let overlapSqft = 0;
-    if (!overlapScanDeferred || qcOverlapScanNonce > 0) {
-      for (let i = 0; i < all.length; i += 1) {
-        for (let j = i + 1; j < all.length; j += 1) {
-          const left = all[i].feature;
-          const right = all[j].feature;
-          const inter = safeIntersectFeature(left, right);
-          if (!inter || !isPolygonLike(inter)) continue;
-          const area = featureSqft(inter);
-          if (!Number.isFinite(area) || area <= 1) continue;
-          overlapCount += 1;
-          overlapSqft += area;
-        }
-      }
-    }
-
-    return {
-      polygons: all.length,
-      overlaps: overlapCount,
-      overlapSqft: Math.round(overlapSqft),
-      outside: outsideCount,
-      tiny: tinyCount,
-      invalidArea: invalidAreaCount,
-      overlapScanDeferred,
-      overlapScanThreshold: AUTO_QC_OVERLAP_LIMIT,
-    };
-  }, [boundary, layerFeatures, qcOverlapScanNonce]);
 
   const qcHasIssues = useMemo(
     () =>
@@ -15487,6 +16160,8 @@ export default function App() {
       // Required for reliable canvas exports (training ZIP / CV snapshot).
       // Without this, WebGL snapshots can be all-black on some GPUs/browsers.
       preserveDrawingBuffer: true,
+      maxTileCacheZoomLevels: 4,
+      refreshExpiredTiles: true,
       style: {
         version: 8,
         sources: {
@@ -15554,7 +16229,12 @@ export default function App() {
             layout: { visibility: "none" },
             paint: { "background-color": "#0b0b0b" },
           },
-          { id: "bm-maptiler", type: "raster", source: "mt_sat" },
+          {
+            id: "bm-maptiler",
+            type: "raster",
+            source: "mt_sat",
+            paint: { "raster-resampling": "linear", "raster-fade-duration": 80 },
+          },
           ...(mapboxToken
             ? [
                 {
@@ -15562,6 +16242,7 @@ export default function App() {
                   type: "raster",
                   source: "mb_sat",
                   layout: { visibility: "none" },
+                  paint: { "raster-resampling": "linear", "raster-fade-duration": 80 },
                 },
               ]
             : []),
@@ -15572,6 +16253,7 @@ export default function App() {
                   type: "raster",
                   source: "az_imagery",
                   layout: { visibility: "none" },
+                  paint: { "raster-resampling": "linear", "raster-fade-duration": 80 },
                 },
                 {
                   id: "bm-azure-hybrid",
@@ -15803,7 +16485,7 @@ export default function App() {
     const baseDrawModes = MapboxDraw.modes || {};
     const touchPanDrawPolygonMode = createTouchPanDrawPolygonMode(baseDrawModes.draw_polygon, {
         stylusOnlyRef: applePencilModeRef,
-        allowFingerPanInStylusOnly: false,
+        allowFingerPanInStylusOnly: true,
         compactTouchUiRef: isCompactTouchUiRef,
         sessionRef: touchPolygonModeSessionRef,
         onDraftChange: (payload) => {
@@ -15823,6 +16505,7 @@ export default function App() {
       });
     const touchDrawLineMode = createTouchDrawLineMode(baseDrawModes.draw_line_string, {
       stylusOnlyRef: applePencilModeRef,
+      allowFingerPanInStylusOnly: true,
     });
     const drawModes = {
       ...baseDrawModes,
@@ -16578,6 +17261,88 @@ export default function App() {
     refreshPdfAnnotationsSource,
   ]);
 
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !isWorkspaceScreen) return undefined;
+    let cancelled = false;
+    let timer = null;
+
+    const refreshImageryDetail = async () => {
+      const zoom = Number(map.getZoom?.() || 0);
+      const provider = String(baseMapRef.current || "maptiler");
+      if (provider !== "google" || !googleMapsKey) {
+        const maxZoom = provider === "azure" ? 19 : 22;
+        if (!cancelled) {
+          setImageryDetailStatus({
+            zoom,
+            maxZoom,
+            provider,
+            copyright: "",
+            loading: false,
+          });
+        }
+        return;
+      }
+
+      if (!cancelled) {
+        setImageryDetailStatus((prev) => ({ ...prev, zoom, provider, loading: true }));
+      }
+      try {
+        const session = await ensureGoogleTileSession();
+        const bounds = map.getBounds?.();
+        if (!bounds) throw new Error("Map bounds unavailable");
+        const params = new URLSearchParams({
+          session,
+          key: googleMapsKey,
+          zoom: String(Math.max(0, Math.min(22, Math.floor(zoom)))),
+          north: String(bounds.getNorth()),
+          south: String(bounds.getSouth()),
+          east: String(bounds.getEast()),
+          west: String(bounds.getWest()),
+        });
+        const response = await fetch(
+          `https://tile.googleapis.com/tile/v1/viewport?${params.toString()}`
+        );
+        if (!response.ok) throw new Error(`Viewport metadata failed (${response.status})`);
+        const payload = await response.json();
+        const availableZooms = (payload?.maxZoomRects || [])
+          .map((item) => Number(item?.maxZoom))
+          .filter(Number.isFinite);
+        if (!cancelled) {
+          setImageryDetailStatus({
+            zoom,
+            maxZoom: availableZooms.length ? Math.max(...availableZooms) : null,
+            provider,
+            copyright: String(payload?.copyright || ""),
+            loading: false,
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setImageryDetailStatus({
+            zoom,
+            maxZoom: null,
+            provider,
+            copyright: "© Google",
+            loading: false,
+          });
+        }
+      }
+    };
+
+    const scheduleRefresh = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(refreshImageryDetail, 180);
+    };
+    map.on("moveend", scheduleRefresh);
+    scheduleRefresh();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      map.off("moveend", scheduleRefresh);
+    };
+  }, [baseMap, ensureGoogleTileSession, googleMapsKey, isWorkspaceScreen]);
+
   // React to basemap changes
   useEffect(() => {
     const map = mapRef.current;
@@ -16719,11 +17484,34 @@ export default function App() {
 
   // Autosave draft availability on startup.
   useEffect(() => {
+    let cancelled = false;
     try {
-      setAutosaveDraftAvailable(!!localStorage.getItem(AUTOSAVE_KEY));
+      const hasLocalStorageDraft = !!localStorage.getItem(AUTOSAVE_KEY);
+      setAutosaveDraftAvailable(hasLocalStorageDraft);
+      if (!hasLocalStorageDraft) {
+        void hasProjectRecovery().then((available) => {
+          if (!cancelled) setAutosaveDraftAvailable(available);
+        });
+      }
     } catch {
-      setAutosaveDraftAvailable(false);
+      void hasProjectRecovery().then((available) => {
+        if (!cancelled) setAutosaveDraftAvailable(available);
+      });
     }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setOfflineCacheStatus("checking");
+    void getRecoveryStorageStatus().then((status) => {
+      if (!cancelled) setOfflineCacheStatus(status.state);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -16750,6 +17538,11 @@ export default function App() {
         );
         payload.pdfPageSaveMeta = nextPdfPageSaveMeta;
         localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+        void queueProjectRecoverySnapshot(payload, {
+          projectId: buildProjectLibraryId(payload.projectName || "Untitled Project"),
+          reason: "interval-autosave",
+          forceCheckpoint: true,
+        });
         setPdfPageSaveMeta(nextPdfPageSaveMeta);
         setAutosaveDraftAvailable(true);
       } catch {
@@ -16915,6 +17708,11 @@ export default function App() {
         if (e.key === "m" || e.key === "M") {
           e.preventDefault();
           activatePdfAnnotationTool("marker");
+          return;
+        }
+        if (e.key === "g" || e.key === "G") {
+          e.preventDefault();
+          activatePdfAnnotationTool("highlighter");
           return;
         }
         if (e.key === "c" || e.key === "C") {
@@ -17104,7 +17902,12 @@ export default function App() {
         map.doubleClickZoom?.disable?.();
         map.keyboard?.disable?.();
         map.dragRotate?.disable?.();
-        map.touchZoomRotate?.disable?.();
+        if (inPdfMode) {
+          map.touchZoomRotate?.disable?.();
+        } else {
+          map.touchZoomRotate?.enable?.();
+          map.touchZoomRotate?.disableRotation?.();
+        }
       } else {
         map.dragPan?.enable?.();
         map.boxZoom?.enable?.();
@@ -17132,6 +17935,22 @@ export default function App() {
   useEffect(() => {
     reloadDrawForActiveLayer();
   }, [activeLayer, layerVisible, reloadDrawForActiveLayer]);
+
+  useEffect(() => {
+    const pending = pendingLocationSelectionRef.current;
+    if (!pending) return;
+    if (String(pending.layerKey || "") !== String(activeLayer || "")) return;
+    const exists = (layerFeatures[activeLayer] || []).some(
+      (feature) => String(feature?.id || "") === String(pending.featureId || "")
+    );
+    if (!exists) return;
+    const targetId = String(pending.featureId || "");
+    const rafId = requestAnimationFrame(() => {
+      selectLocationFeatureById(targetId);
+      pendingLocationSelectionRef.current = null;
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [activeLayer, layerFeatures, selectLocationFeatureById]);
 
   // Guarantee non-active layer overlays redraw on layer switch.
   useEffect(() => {
@@ -18093,6 +18912,149 @@ export default function App() {
     workflowMode,
   ]);
 
+  const captureClientReportMapDataUrl = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map) throw new Error("Map not ready yet.");
+
+    const originalCenter = map.getCenter?.();
+    const originalZoom = Number(map.getZoom?.() || 0);
+    const originalBearing = Number(map.getBearing?.() || 0);
+    const originalPitch = Number(map.getPitch?.() || 0);
+    const originalBaseMap = String(baseMapRef.current || "maptiler");
+    const originalContextVisible = !!showBasemapContextRef.current;
+    const originalObjects3d = !!objects3dRef.current;
+    const originalObjects3dOpacity = Number(objects3dOpacityRef.current || DEFAULT_3D_OBJECT_OPACITY);
+    const originalTerrain3d = !!terrain3dRef.current;
+    const originalTerrainExaggeration = Number(
+      terrainExaggerationRef.current || DEFAULT_TERRAIN_EXAGGERATION
+    );
+
+    try {
+      try {
+        applyBaseMapVisibility(map, originalBaseMap);
+        applyBasemapContextVisibility(map, false);
+        applyObject3dMode(map, false, originalObjects3dOpacity);
+        applyTerrainMode(map, false, originalTerrainExaggeration);
+      } catch {
+        /* intentionally ignore non-critical map/draw errors */
+      }
+
+      try {
+        if (originalCenter) {
+          map.jumpTo({
+            center: [Number(originalCenter.lng), Number(originalCenter.lat)],
+            zoom: originalZoom,
+            bearing: 0,
+            pitch: 0,
+          });
+        }
+      } catch {
+        /* intentionally ignore non-critical map/draw errors */
+      }
+
+      try {
+        if (boundary && isPolygonLike(boundary)) {
+          map.fitBounds(turf.bbox(boundary), {
+            padding: 70,
+            duration: 0,
+            maxZoom: 19,
+          });
+        } else {
+          const features = [];
+          for (const layerKey of LAYER_KEYS) {
+            for (const feature of layerFeaturesRef.current[layerKey] || []) {
+              if (isPolygonLike(feature)) features.push(feature);
+            }
+          }
+          if (features.length) {
+            map.fitBounds(turf.bbox(turf.featureCollection(features)), {
+              padding: 70,
+              duration: 0,
+              maxZoom: 19,
+            });
+          }
+        }
+      } catch {
+        /* intentionally ignore non-critical map/draw errors */
+      }
+
+      await waitForMapIdle(map);
+      map.triggerRepaint?.();
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve))
+      );
+
+      const imageBlob = await captureMapImageBlob(map, {
+        hideOverlays: false,
+        failOnBlank: true,
+      });
+      return await blobToDataUrl(imageBlob);
+    } finally {
+      try {
+        applyBaseMapVisibility(map, originalBaseMap);
+        applyBasemapContextVisibility(map, originalContextVisible);
+        applyObject3dMode(map, originalObjects3d, originalObjects3dOpacity);
+        applyTerrainMode(map, originalTerrain3d, originalTerrainExaggeration);
+        if (originalCenter) {
+          map.jumpTo({
+            center: [Number(originalCenter.lng), Number(originalCenter.lat)],
+            zoom: originalZoom,
+            bearing: originalBearing,
+            pitch: originalPitch,
+          });
+          map.triggerRepaint?.();
+        }
+      } catch {
+        /* intentionally ignore non-critical map/draw errors */
+      }
+    }
+  }, [
+    applyBaseMapVisibility,
+    applyBasemapContextVisibility,
+    applyObject3dMode,
+    applyTerrainMode,
+    boundary,
+  ]);
+
+  const exportClientReportSafe = useCallback(async () => {
+    if (workflowMode === WORKFLOW_MODE_PDF) {
+      pushToast("Client-ready report export is currently available in location mode.", "warn", 3600);
+      return;
+    }
+    const map = mapRef.current;
+    if (!map) {
+      pushToast("Map not ready yet.", "warn", 3200);
+      return;
+    }
+    try {
+      const { exportClientReportPDF } = await loadExportModule();
+      let mapImageDataUrl = "";
+      try {
+        mapImageDataUrl = await captureClientReportMapDataUrl();
+      } catch {
+        mapImageDataUrl = "";
+      }
+      await exportClientReportPDF({
+        projectName,
+        totals,
+        mapImageDataUrl,
+        reportNotes: clientReportNotes,
+        savedAt: lastManualSaveAt || new Date().toISOString(),
+      });
+      pushToast("Client-ready PDF report saved.", "info", 3600);
+    } catch (error) {
+      pushToast(`Client report export failed: ${error?.message || "unknown error"}.`, "error", 5000);
+    }
+  }, [
+    captureClientReportMapDataUrl,
+    clientReportNotes,
+    lastManualSaveAt,
+    projectName,
+    pushToast,
+    totals,
+    workflowMode,
+  ]);
+
   const _uploadEstimateTemplate = useCallback(
     async (templateKind, e) => {
       const file = e?.target?.files?.[0];
@@ -18535,6 +19497,32 @@ export default function App() {
             : null,
       };
 
+      let correctionSync = null;
+      if (exportKind === "cv_marked_wrong") {
+        try {
+          correctionSync = await saveSegmentationCorrection({
+            imageBlob,
+            maskBlob,
+            metadata,
+          });
+          metadata.correction_sync = {
+            saved: true,
+            sample_id: correctionSync?.sample_id || "",
+            stored_at: correctionSync?.stored_at || "",
+          };
+        } catch (error) {
+          metadata.correction_sync = {
+            saved: false,
+            error: String(error?.message || "Correction sync failed"),
+          };
+          pushToast(
+            "Correction could not reach the training inbox; the downloaded ZIP is still a complete backup.",
+            "warn",
+            6500
+          );
+        }
+      }
+
       const [imageBuf, maskBuf] = await Promise.all([
         imageBlob.arrayBuffer(),
         maskBlob.arrayBuffer(),
@@ -18552,7 +19540,9 @@ export default function App() {
       );
       if (exportKind === "cv_marked_wrong") {
         pushToast(
-          "CV correction export complete: ZIP includes current corrected polygons + feedback metadata.",
+          correctionSync?.sample_id
+            ? `Correction saved to training inbox (${correctionSync.sample_id}) and backup ZIP downloaded.`
+            : "Correction backup ZIP downloaded.",
           "info",
           6500
         );
@@ -18912,1467 +19902,90 @@ export default function App() {
   // ---------- Render ----------
   if (appScreen === APP_SCREEN_HOME) {
     return (
-      <div
-        style={{
-          minHeight: "100vh",
-          width: "100vw",
-          color: homeBrandTextColor,
-          fontFamily: '"Avenir Next", "SF Pro Display", "Segoe UI", sans-serif',
-          background: homeShellBackground,
-          position: "relative",
-          overflow: "auto",
-        }}
-      >
+      <>
         <Toasts toasts={toasts} onClose={closeToast} />
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            pointerEvents: "none",
-            background: homeShellOverlay,
-            opacity: 0.75,
-          }}
+        <HomeDashboard
+          theme={homeAppearance}
+          onToggleTheme={() =>
+            setHomeAppearance((previous) => (previous === "light" ? "dark" : "light"))
+          }
+          resumeCard={homeResumeCard}
+          onResume={resumeLastProjectFromHome}
+          stats={homeProjectStats}
+          projects={visibleProjectLibrary}
+          groupedProjects={groupedHomeProjectLibrary}
+          pinnedProjects={pinnedHomeProjects}
+          pinnedProjectIds={pinnedProjectIdSet}
+          projectPreviewImages={projectPreviewImages}
+          onSetProjectPreviewImage={updateProjectPreviewImage}
+          projectTab={homeProjectTab}
+          onProjectTabChange={setHomeProjectTab}
+          projectSearch={homeProjectSearch}
+          onProjectSearchChange={setHomeProjectSearch}
+          folderFilter={homeFolderFilter}
+          onFolderFilterChange={setHomeFolderFilter}
+          folderOptions={homeFolderOptions}
+          newFolderName={homeNewFolderName}
+          onNewFolderNameChange={setHomeNewFolderName}
+          collapsedFolders={homeCollapsedFolders}
+          onToggleFolder={toggleHomeFolderCollapsed}
+          onCreateFolder={createHomeFolder}
+          onRenameFolder={renameHomeFolder}
+          onDeleteFolder={deleteHomeFolder}
+          onAssignFolder={assignProjectLibraryFolder}
+          onOpenProject={loadProjectFromLibrary}
+          onTogglePinned={togglePinnedProject}
+          onRemoveProject={removeProjectFromLibrary}
+          onNewLocation={() => startNewProject(WORKFLOW_MODE_LOCATION)}
+          onNewPdf={() => startNewProject(WORKFLOW_MODE_PDF)}
+          onImportProject={loadProjectFile}
+          sharedAuthenticated={sharedAccessAuthenticated}
+          sharedAuthChecking={sharedAuthChecking}
+          sharedUsername={sharedAuth?.username || ""}
+          sharedExpiresAt={sharedAuth?.expiresAt || ""}
+          loginUsername={sharedLoginUsername}
+          onLoginUsernameChange={setSharedLoginUsername}
+          loginPassword={sharedLoginPassword}
+          onLoginPasswordChange={setSharedLoginPassword}
+          loginSubmitting={sharedLoginSubmitting}
+          onLogin={handleSharedLogin}
+          onLogout={handleSharedLogout}
+          sharedStatusLabel={sharedStatusUi.label}
+          sharedQueueCount={sharedProjectQueue.length}
+          sharedQueue={sharedProjectQueue}
+          sharedConnectionState={sharedProjectLibraryStatus}
+          conflictProjectId={String(remoteSharedUpdateNotice?.id || "").trim()}
+          sharedRefreshing={sharedProjectLibrarySyncing}
+          sharedSyncing={sharedProjectQueueSyncing}
+          onRefreshShared={() => refreshSharedProjectLibrary({ quiet: false })}
+          onSyncShared={() => syncSharedProjectQueue({ quiet: false })}
+          recoveryRecords={homeProjectRecoveries}
+          recoveryStorageState={offlineCacheStatus}
+          recoveryRefreshing={homeRecoveryRefreshing}
+          onRefreshRecoveries={() => refreshHomeProjectRecoveries({ quiet: false })}
+          onRestoreRecovery={restoreHomeProjectRecovery}
+          auditEvents={securityAuditEvents}
+          auditSyncing={securityAuditSyncing}
+          onRefreshAudit={() => refreshSecurityAuditEvents({ quiet: false })}
         />
-
-        <div style={{ position: "relative", zIndex: 1, maxWidth: 1180, margin: "0 auto", padding: "28px 22px 32px" }}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 12,
-              marginBottom: 26,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <img
-                src="/logo.png"
-                alt="McKenna Site Management"
-                style={{
-                  width: 86,
-                  height: 86,
-                  objectFit: "contain",
-                  borderRadius: 18,
-                  border: isHomeDarkMode
-                    ? "1px solid rgba(115,165,198,0.2)"
-                    : "1px solid rgba(73,130,169,0.16)",
-                  background: isHomeDarkMode ? "rgba(16,33,48,0.82)" : "rgba(255,255,255,0.65)",
-                  padding: 6,
-                  boxShadow: isHomeDarkMode
-                    ? "0 16px 28px rgba(0,0,0,0.24)"
-                    : "0 14px 28px rgba(76,130,168,0.12)",
-                }}
-              />
-              <div style={{ lineHeight: 1.1 }}>
-                <div style={{ fontSize: 12, letterSpacing: 1.4, textTransform: "uppercase", opacity: isHomeDarkMode ? 0.74 : 0.62 }}>
-                  McKenna Site Management
-                </div>
-                <div style={{ fontSize: 22, fontWeight: 900 }}>Snow + Landscape Takeoff</div>
-              </div>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <div style={{ fontSize: 12, opacity: 0.64, textAlign: "right" }}>
-                Brighter project hub
-              </div>
-              <button
-                type="button"
-                onClick={() => setHomeAppearance((prev) => (prev === "light" ? "dark" : "light"))}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 999,
-                  border: isHomeDarkMode
-                    ? "1px solid rgba(126,183,219,0.24)"
-                    : "1px solid rgba(116,154,180,0.24)",
-                  background: isHomeDarkMode ? "rgba(9,20,30,0.98)" : "rgba(255,255,255,0.78)",
-                  color: isHomeDarkMode ? "#eef8ff" : "#234761",
-                  cursor: "pointer",
-                  fontWeight: 800,
-                  fontSize: 12,
-                  boxShadow: isHomeDarkMode
-                    ? "0 10px 24px rgba(25,48,64,0.18)"
-                    : "0 10px 24px rgba(100,154,194,0.12)",
-                }}
-              >
-                {isHomeDarkMode ? "Dark Home" : "Light Home"}
-              </button>
-            </div>
-          </div>
-
-          <div
-            style={{
-              position: "relative",
-              borderRadius: 32,
-              padding: "22px 22px 20px",
-              background: homeWorkspaceBandBackground,
-              boxShadow: homeWorkspaceBandShadow,
-              border: homeWorkspaceBandBorder,
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                pointerEvents: "none",
-                background: homeWorkspaceBandOverlay,
-                opacity: 0.9,
-              }}
-            />
-            <div style={{ position: "relative", zIndex: 1 }}>
-
-          {homeResumeCard ? (
-            <div
-              style={{
-                borderRadius: 24,
-                border: isHomeDarkMode
-                  ? "1px solid rgba(107,166,204,0.18)"
-                  : "1px solid rgba(108,164,198,0.24)",
-                background: isHomeDarkMode
-                  ? "linear-gradient(140deg, rgba(20,36,50,0.96) 0%, rgba(17,31,44,0.96) 100%)"
-                  : "linear-gradient(140deg, rgba(255,255,255,0.88) 0%, rgba(236,246,252,0.9) 100%)",
-                boxShadow: isHomeDarkMode
-                  ? "0 20px 38px rgba(0,0,0,0.28)"
-                  : "0 20px 38px rgba(95,136,170,0.12)",
-                backdropFilter: "blur(12px)",
-                padding: "20px 20px 18px",
-                marginBottom: 18,
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 14,
-                  flexWrap: "wrap",
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 800,
-                      letterSpacing: 1.2,
-                      textTransform: "uppercase",
-                      color: isHomeDarkMode ? "#89aeca" : "#4c708d",
-                      marginBottom: 6,
-                    }}
-                  >
-                    Resume Where I Left Off
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 24,
-                      fontWeight: 900,
-                      color: isHomeDarkMode ? "#f3f8fd" : "#15334b",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {homeResumeCard.title}
-                  </div>
-                  <div
-                    style={{
-                      marginTop: 8,
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: 8,
-                      fontSize: 12,
-                      color: isHomeDarkMode ? "#9cb8ce" : "#547189",
-                    }}
-                  >
-                    <span>
-                      Mode: {homeResumeCard.workflowMode === WORKFLOW_MODE_PDF ? "PDF/Image" : "Location"}
-                    </span>
-                    <span>•</span>
-                    <span>{homeResumeCard.pageLabel}</span>
-                    {homeResumeCard.lastEditedAt ? (
-                      <>
-                        <span>•</span>
-                        <span>
-                          Last edited: {new Date(homeResumeCard.lastEditedAt).toLocaleString()}
-                        </span>
-                      </>
-                    ) : null}
-                    {homeResumeCard.savedBy ? (
-                      <>
-                        <span>•</span>
-                        <span>By: {homeResumeCard.savedBy}</span>
-                      </>
-                    ) : null}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={resumeLastProjectFromHome}
-                  style={{
-                    padding: "11px 16px",
-                    borderRadius: 999,
-                    border: isHomeDarkMode
-                      ? "1px solid rgba(118,182,219,0.24)"
-                      : "1px solid rgba(74,141,179,0.34)",
-                    background: isHomeDarkMode
-                      ? "linear-gradient(120deg, rgba(38,83,113,0.88), rgba(30,89,72,0.82))"
-                      : "linear-gradient(120deg, #e0f3ff, #dff6ef)",
-                    color: isHomeDarkMode ? "#eef8ff" : "#15405d",
-                    cursor: "pointer",
-                    fontWeight: 800,
-                    whiteSpace: "nowrap",
-                    boxShadow: isHomeDarkMode
-                      ? "0 10px 24px rgba(0,0,0,0.26)"
-                      : "0 10px 24px rgba(100,154,194,0.18)",
-                  }}
-                >
-                  {homeResumeCard.buttonLabel}
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          <div
-            style={{
-              borderRadius: 28,
-              border: isHomeDarkMode
-                ? "1px solid rgba(104,164,200,0.16)"
-                : "1px solid rgba(120,168,194,0.24)",
-              background: isHomeDarkMode
-                ? "linear-gradient(150deg, rgba(16,30,44,0.98) 0%, rgba(15,27,40,0.96) 58%, rgba(17,36,33,0.96) 100%)"
-                : "linear-gradient(150deg, rgba(255,255,255,0.92) 0%, rgba(237,248,255,0.94) 58%, rgba(230,244,238,0.96) 100%)",
-              boxShadow: isHomeDarkMode
-                ? "0 30px 56px rgba(0,0,0,0.3)"
-                : "0 30px 56px rgba(80,124,156,0.16)",
-              padding: "28px 26px 24px",
-              marginBottom: 18,
-              overflow: "hidden",
-              position: "relative",
-            }}
-          >
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                pointerEvents: "none",
-                background: isHomeDarkMode
-                  ? "radial-gradient(420px 220px at 82% 18%, rgba(86,152,196,0.18), transparent 70%), linear-gradient(180deg, transparent 0%, rgba(255,255,255,0.03) 100%)"
-                  : "radial-gradient(420px 220px at 82% 18%, rgba(182,224,255,0.45), transparent 70%), linear-gradient(180deg, transparent 0%, rgba(255,255,255,0.22) 100%)",
-              }}
-            />
-            <div style={{ position: "relative", zIndex: 1 }}>
-            <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", color: isHomeDarkMode ? "#8eafc9" : "#5a7b93", marginBottom: 10 }}>
-              Winter Workflow Home
-            </div>
-            <div style={{ fontSize: 42, lineHeight: 1.02, fontWeight: 900, letterSpacing: 0.2, marginBottom: 10, color: isHomeDarkMode ? "#f5fbff" : "#15344d", maxWidth: 740 }}>
-              Measure snow sites and landscape plans from a brighter, faster home base.
-            </div>
-            <div style={{ fontSize: 15, color: isHomeDarkMode ? "#9bb8cd" : "#58758c", maxWidth: 760, marginBottom: 22, lineHeight: 1.55 }}>
-              Start fresh in map or plan mode, jump back into the last property your team touched,
-              and keep the busiest jobs pinned at the top. Shared project work stays front and center,
-              while admin tools stay quieter below.
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10, marginBottom: 10 }}>
-              <button
-                type="button"
-                onClick={() => startNewProject(WORKFLOW_MODE_LOCATION)}
-                style={{
-                  padding: "14px 16px",
-                  borderRadius: 14,
-                  border: isHomeDarkMode
-                    ? "1px solid rgba(118,182,219,0.22)"
-                    : "1px solid rgba(88,151,186,0.34)",
-                  background: isHomeDarkMode
-                    ? "linear-gradient(120deg, rgba(35,79,106,0.92), rgba(24,78,64,0.9))"
-                    : "linear-gradient(120deg, #dff1ff, #d8f0e5)",
-                  color: isHomeDarkMode ? "#eef8ff" : "#173a53",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  fontSize: 14,
-                  boxShadow: "0 14px 24px rgba(112,170,199,0.18)",
-                }}
-              >
-                Measure Location Page
-              </button>
-
-              <button
-                type="button"
-                onClick={() => startNewProject(WORKFLOW_MODE_PDF)}
-                style={{
-                  padding: "14px 16px",
-                  borderRadius: 14,
-                  border: isHomeDarkMode
-                    ? "1px solid rgba(118,182,219,0.22)"
-                    : "1px solid rgba(102,148,201,0.34)",
-                  background: isHomeDarkMode
-                    ? "linear-gradient(120deg, rgba(34,66,104,0.92), rgba(46,66,122,0.88))"
-                    : "linear-gradient(120deg, #edf5ff, #e1edff)",
-                  color: isHomeDarkMode ? "#eef8ff" : "#173a53",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  fontSize: 14,
-                  boxShadow: "0 14px 24px rgba(112,170,199,0.14)",
-                }}
-              >
-                Measure PDF/Image Page
-              </button>
-            </div>
-
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-              <label
-                style={{
-                  padding: "10px 14px",
-                  borderRadius: 12,
-                  border: isHomeDarkMode
-                    ? "1px solid rgba(118,182,219,0.18)"
-                    : "1px solid rgba(114,152,178,0.2)",
-                  background: isHomeDarkMode ? "rgba(19,36,50,0.88)" : "rgba(255,255,255,0.6)",
-                  color: isHomeDarkMode ? "#dcecff" : "#23445d",
-                  cursor: "pointer",
-                  fontWeight: 700,
-                  textAlign: "center",
-                  fontSize: 12,
-                }}
-              >
-                Import Project JSON
-                <input
-                  type="file"
-                  accept=".json,application/json"
-                  onChange={loadProjectFile}
-                  style={{ display: "none" }}
-                />
-              </label>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setAppScreen(APP_SCREEN_LOCATION);
-                  setShowWorkflowPicker(true);
-                }}
-                style={{
-                  padding: "10px 14px",
-                  borderRadius: 12,
-                  border: isHomeDarkMode
-                    ? "1px solid rgba(118,182,219,0.18)"
-                    : "1px solid rgba(114,152,178,0.2)",
-                  background: isHomeDarkMode ? "rgba(19,36,50,0.88)" : "rgba(255,255,255,0.6)",
-                  color: isHomeDarkMode ? "#dcecff" : "#23445d",
-                  cursor: "pointer",
-                  fontWeight: 700,
-                  fontSize: 12,
-                }}
-              >
-                Pick Mode
-              </button>
-            </div>
-            <div
-              style={{
-                marginTop: 18,
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
-                gap: 10,
-              }}
-            >
-              {[
-                {
-                  label: "Today’s Work",
-                  value: `${homeProjectStats.totalVisible} visible`,
-                  detail: `${homeProjectStats.activeModeLabel} projects in this view`,
-                },
-                {
-                  label: "Pinned Jobs",
-                  value: `${homeProjectStats.pinnedCount}`,
-                  detail: "favorite sites stay near the top",
-                },
-                {
-                  label: homeProjectTab === WORKFLOW_MODE_PDF ? "Saved Pages" : "Tracked Polygons",
-                  value: homeProjectTab === WORKFLOW_MODE_PDF
-                    ? `${homeProjectStats.activePolygonCount}`
-                    : Number(homeProjectStats.activePolygonCount || 0).toLocaleString(),
-                  detail: homeProjectTab === WORKFLOW_MODE_PDF ? "PDF/image pages in saved jobs" : "measured areas across this view",
-                },
-                {
-                  label: "Folders",
-                  value: `${homeProjectStats.folderCount}`,
-                  detail: "organize routes, clients, and properties",
-                },
-              ].map((item) => (
-                <div
-                  key={item.label}
-                  style={{
-                    borderRadius: 16,
-                    border: isHomeDarkMode
-                      ? "1px solid rgba(111,170,205,0.14)"
-                      : "1px solid rgba(121,170,196,0.18)",
-                    background: isHomeDarkMode ? "rgba(19,34,47,0.84)" : "rgba(255,255,255,0.56)",
-                    padding: "14px 14px 12px",
-                    backdropFilter: "blur(8px)",
-                  }}
-                >
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.1, textTransform: "uppercase", color: isHomeDarkMode ? "#89aeca" : "#64829a", marginBottom: 6 }}>
-                    {item.label}
-                  </div>
-                  <div style={{ fontSize: 24, fontWeight: 900, color: isHomeDarkMode ? "#f2f8fc" : "#16344d", marginBottom: 3 }}>
-                    {item.value}
-                  </div>
-                  <div style={{ fontSize: 12, color: isHomeDarkMode ? "#95b2c8" : "#60809a", lineHeight: 1.4 }}>{item.detail}</div>
-                </div>
-              ))}
-            </div>
-            </div>
-          </div>
-
-          <div
-            style={{
-              borderRadius: 24,
-              border: isHomeDarkMode
-                ? "1px solid rgba(104,164,200,0.14)"
-                : "1px solid rgba(124,166,194,0.18)",
-              background: isHomeDarkMode ? "rgba(14,28,40,0.9)" : "rgba(255,255,255,0.66)",
-              boxShadow: isHomeDarkMode
-                ? "0 20px 42px rgba(0,0,0,0.28)"
-                : "0 20px 42px rgba(89,129,157,0.11)",
-              backdropFilter: "blur(10px)",
-              padding: "18px 18px 16px",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.3, textTransform: "uppercase", color: isHomeDarkMode ? "#8baeca" : "#66849b", marginBottom: 5 }}>
-                  Project Library
-                </div>
-                <div style={{ fontSize: 24, fontWeight: 900, color: isHomeDarkMode ? "#f3f8fc" : "#173750" }}>Recent, pinned, and shared work</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ fontSize: 12, color: isHomeDarkMode ? "#95b2c8" : "#64839a" }}>
-                  {filteredHomeProjectLibrary.length} shown
-                </div>
-                <div
-                  style={{
-                    fontSize: 11,
-                    padding: "3px 7px",
-                    borderRadius: 999,
-                    border: sharedStatusUi.border,
-                    background: sharedStatusUi.background,
-                    color: isHomeDarkMode ? "#f3f8fc" : "#173750",
-                    fontWeight: 700,
-                  }}
-                >
-                  {sharedStatusUi.label}
-                </div>
-                {sharedProjectQueue.length > 0 && (
-                  <div
-                    style={{
-                      fontSize: 11,
-                      padding: "3px 7px",
-                      borderRadius: 999,
-                    border: isHomeDarkMode ? "1px solid rgba(191,158,73,0.34)" : "1px solid rgba(220,170,74,0.4)",
-                    background: isHomeDarkMode ? "rgba(92,74,20,0.6)" : "rgba(255,239,196,0.72)",
-                    color: "#7b5c14",
-                      fontWeight: 700,
-                    }}
-                  >
-                    Pending sync: {sharedProjectQueue.length}
-                  </div>
-                )}
-                <button
-                  type="button"
-                  onClick={() => refreshSharedProjectLibrary({ quiet: false })}
-                  disabled={
-                    sharedProjectLibrarySyncing ||
-                    sharedAuthChecking ||
-                    !sharedAccessAuthenticated
-                  }
-                  style={{
-                    padding: "5px 8px",
-                    borderRadius: 8,
-                    border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.24)",
-                    background: isHomeDarkMode ? "rgba(20,38,52,0.9)" : "rgba(255,255,255,0.72)",
-                    color: isHomeDarkMode ? "#dcecff" : "#234761",
-                    cursor:
-                      sharedProjectLibrarySyncing ||
-                      sharedAuthChecking ||
-                      !sharedAccessAuthenticated
-                        ? "not-allowed"
-                        : "pointer",
-                    opacity:
-                      sharedProjectLibrarySyncing ||
-                      sharedAuthChecking ||
-                      !sharedAccessAuthenticated
-                        ? 0.6
-                        : 1,
-                    fontWeight: 700,
-                    fontSize: 11,
-                  }}
-                >
-                  {sharedProjectLibrarySyncing ? "Refreshing..." : "Refresh"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => syncSharedProjectQueue({ quiet: false })}
-                  disabled={
-                    sharedProjectQueueSyncing ||
-                    sharedProjectQueue.length === 0 ||
-                    sharedAuthChecking ||
-                    !sharedAccessAuthenticated
-                  }
-                  style={{
-                    padding: "5px 8px",
-                    borderRadius: 8,
-                    border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.24)",
-                    background: isHomeDarkMode ? "rgba(20,38,52,0.9)" : "rgba(255,255,255,0.72)",
-                    color: isHomeDarkMode ? "#dcecff" : "#234761",
-                    cursor:
-                      sharedProjectQueueSyncing ||
-                      sharedProjectQueue.length === 0 ||
-                      sharedAuthChecking ||
-                      !sharedAccessAuthenticated
-                        ? "not-allowed"
-                        : "pointer",
-                    opacity:
-                      sharedProjectQueueSyncing ||
-                      sharedProjectQueue.length === 0 ||
-                      sharedAuthChecking ||
-                      !sharedAccessAuthenticated
-                        ? 0.6
-                        : 1,
-                    fontWeight: 700,
-                    fontSize: 11,
-                  }}
-                >
-                  {sharedProjectQueueSyncing ? "Syncing..." : "Sync Queue"}
-                </button>
-              </div>
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 8,
-                marginBottom: 10,
-              }}
-            >
-              {[
-                { key: WORKFLOW_MODE_LOCATION, label: "Location Projects" },
-                { key: WORKFLOW_MODE_PDF, label: "PDF/Image Projects" },
-              ].map((tab) => {
-                const active = homeProjectTab === tab.key;
-                return (
-                  <button
-                    key={tab.key}
-                    type="button"
-                    onClick={() => {
-                      setHomeProjectTab(tab.key);
-                      setHomeFolderFilter("all");
-                    }}
-                    style={{
-                      padding: "8px 12px",
-                      borderRadius: 10,
-                      border: active
-                        ? "1px solid rgba(87,150,189,0.42)"
-                        : "1px solid rgba(116,154,180,0.18)",
-                      background: active
-                        ? isHomeDarkMode
-                          ? "rgba(33,73,102,0.92)"
-                          : "rgba(213,239,255,0.95)"
-                        : isHomeDarkMode
-                          ? "rgba(19,36,50,0.84)"
-                          : "rgba(255,255,255,0.64)",
-                      color: active
-                        ? isHomeDarkMode
-                          ? "#eef8ff"
-                          : "#163b57"
-                        : isHomeDarkMode
-                          ? "#9dbbd0"
-                          : "#4c6b83",
-                      cursor: "pointer",
-                      fontWeight: 700,
-                      fontSize: 12,
-                    }}
-                  >
-                    {tab.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "minmax(220px, 1fr) minmax(160px, 220px) auto",
-                gap: 8,
-                marginBottom: 10,
-              }}
-            >
-              <input
-                type="text"
-                value={homeProjectSearch}
-                onChange={(event) => setHomeProjectSearch(event.target.value)}
-                placeholder={`Search ${
-                  homeProjectTab === WORKFLOW_MODE_PDF ? "PDF/image" : "location"
-                } projects`}
-                style={{
-                  minWidth: 0,
-                  padding: "9px 11px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(255,255,255,0.18)",
-                  background: isHomeDarkMode ? "rgba(11,23,33,0.92)" : "rgba(247,251,255,0.96)",
-                  color: isHomeDarkMode ? "#edf6ff" : "#173750",
-                }}
-              />
-              <select
-                value={homeFolderFilter}
-                onChange={(event) => setHomeFolderFilter(event.target.value)}
-                style={{
-                  minWidth: 0,
-                  padding: "9px 11px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(255,255,255,0.18)",
-                  background: isHomeDarkMode ? "rgba(11,23,33,0.92)" : "rgba(247,251,255,0.96)",
-                  color: isHomeDarkMode ? "#edf6ff" : "#173750",
-                }}
-              >
-                <option value="all">All folders</option>
-                {homeFolderOptions.map((folderName) => (
-                  <option key={folderName} value={folderName}>
-                    {folderName}
-                  </option>
-                ))}
-              </select>
-              <div style={{ display: "flex", gap: 8 }}>
-                <input
-                  type="text"
-                  value={homeNewFolderName}
-                  onChange={(event) => setHomeNewFolderName(event.target.value)}
-                  placeholder="New folder"
-                  style={{
-                    minWidth: 0,
-                    width: 140,
-                    padding: "9px 11px",
-                    borderRadius: 10,
-                    border: "1px solid rgba(255,255,255,0.18)",
-                    background: isHomeDarkMode ? "rgba(11,23,33,0.92)" : "rgba(247,251,255,0.96)",
-                    color: isHomeDarkMode ? "#edf6ff" : "#173750",
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={createHomeFolder}
-                  style={{
-                    padding: "9px 11px",
-                    borderRadius: 10,
-                    border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.24)",
-                    background: isHomeDarkMode ? "rgba(20,38,52,0.9)" : "rgba(255,255,255,0.74)",
-                    color: isHomeDarkMode ? "#dcecff" : "#234761",
-                    cursor: "pointer",
-                    fontWeight: 700,
-                    fontSize: 12,
-                  }}
-                >
-                  Create Folder
-                </button>
-              </div>
-            </div>
-
-            {!sharedAccessAuthenticated ? (
-              <form
-                onSubmit={handleSharedLogin}
-                style={{
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  borderRadius: 12,
-                  padding: 12,
-                  marginBottom: 10,
-                  background: isHomeDarkMode ? "rgba(17,32,45,0.96)" : "rgba(244,249,253,0.95)",
-                }}
-              >
-                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: isHomeDarkMode ? "#f0f7fc" : "#173750" }}>
-                  Log in to access shared files
-                </div>
-                <div style={{ fontSize: 12, color: isHomeDarkMode ? "#94b0c5" : "#68839a", marginBottom: 8 }}>
-                  Shared project library is locked until authenticated. Each team member can use their own login.
-                </div>
-                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr auto" }}>
-                  <input
-                    type="text"
-                    value={sharedLoginUsername}
-                    onChange={(event) => setSharedLoginUsername(event.target.value)}
-                    placeholder="Username"
-                    autoComplete="username"
-                    style={{
-                      minWidth: 0,
-                      padding: "8px 10px",
-                      borderRadius: 10,
-                      border: "1px solid rgba(255,255,255,0.18)",
-                      background: isHomeDarkMode ? "rgba(10,21,31,0.96)" : "#fff",
-                      color: isHomeDarkMode ? "#edf6ff" : "#173750",
-                    }}
-                  />
-                  <input
-                    type="password"
-                    value={sharedLoginPassword}
-                    onChange={(event) => setSharedLoginPassword(event.target.value)}
-                    placeholder="Password"
-                    autoComplete="current-password"
-                    style={{
-                      minWidth: 0,
-                      padding: "8px 10px",
-                      borderRadius: 10,
-                      border: "1px solid rgba(255,255,255,0.18)",
-                      background: isHomeDarkMode ? "rgba(10,21,31,0.96)" : "#fff",
-                      color: isHomeDarkMode ? "#edf6ff" : "#173750",
-                    }}
-                  />
-                  <button
-                    type="submit"
-                    disabled={sharedLoginSubmitting || sharedAuthChecking}
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 10,
-                      border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.2)" : "1px solid rgba(87,150,189,0.34)",
-                      background: isHomeDarkMode ? "linear-gradient(120deg, rgba(36,79,108,0.92), rgba(32,67,98,0.9))" : "linear-gradient(120deg, #dff1ff, #edf8ff)",
-                      color: isHomeDarkMode ? "#eef8ff" : "#173b56",
-                      cursor:
-                        sharedLoginSubmitting || sharedAuthChecking ? "not-allowed" : "pointer",
-                      opacity: sharedLoginSubmitting || sharedAuthChecking ? 0.65 : 1,
-                      fontWeight: 700,
-                    }}
-                  >
-                    {sharedLoginSubmitting ? "Signing in..." : "Sign In"}
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <div
-                style={{
-                  border: "1px solid rgba(89,226,143,0.4)",
-                  borderRadius: 12,
-                  padding: "10px 12px",
-                  marginBottom: 10,
-                  background: "rgba(226,246,233,0.9)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 10,
-                }}
-              >
-                <div style={{ fontSize: 12, color: "#285d42" }}>
-                  Signed in as <b>{sharedAuth?.username || "Shared user"}</b>
-                  {sharedAuth?.expiresAt ? (
-                    <span style={{ opacity: 0.8 }}>
-                      {" "}
-                      • session expires {new Date(sharedAuth.expiresAt).toLocaleString()}
-                    </span>
-                  ) : null}
-                </div>
-                <button
-                  type="button"
-                  onClick={handleSharedLogout}
-                  style={{
-                    padding: "7px 10px",
-                    borderRadius: 10,
-                    border: "1px solid rgba(88,144,110,0.18)",
-                    background: "rgba(255,255,255,0.68)",
-                    color: "#285d42",
-                    cursor: "pointer",
-                    fontWeight: 700,
-                    fontSize: 12,
-                  }}
-                >
-                  Log Out
-                </button>
-              </div>
-            )}
-
-            {!sharedAccessAuthenticated ? (
-              <div style={{ fontSize: 13, opacity: 0.72, lineHeight: 1.4 }}>
-                Log in to view shared projects.
-              </div>
-            ) : pinnedHomeProjects.length > 0 ? (
-              <div style={{ display: "grid", gap: 10, marginBottom: 12 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: "#41657f" }}>
-                  Pinned Projects
-                </div>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-                    gap: 10,
-                  }}
-                >
-                  {pinnedHomeProjects.map((entry) => (
-                    <div
-                      key={`pinned-${entry.id}`}
-                      style={{
-                        border: isHomeDarkMode
-                          ? "1px solid rgba(104,164,200,0.16)"
-                          : "1px solid rgba(124,214,255,0.20)",
-                        borderRadius: 16,
-                        padding: "14px 14px 12px",
-                        background: isHomeDarkMode
-                          ? "linear-gradient(160deg, rgba(16,31,44,0.96), rgba(18,35,48,0.94))"
-                          : "linear-gradient(160deg, rgba(255,255,255,0.88), rgba(237,247,253,0.9))",
-                        boxShadow: isHomeDarkMode
-                          ? "0 12px 26px rgba(0,0,0,0.26)"
-                          : "0 12px 26px rgba(108,154,186,0.08)",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          gap: 8,
-                          alignItems: "start",
-                        }}
-                      >
-                        <div style={{ minWidth: 0 }}>
-                          <div
-                            style={{
-                              fontWeight: 900,
-                              color: isHomeDarkMode ? "#eef8ff" : "#173750",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {entry.projectName || "Untitled Project"}
-                          </div>
-                          <div style={{ marginTop: 4, fontSize: 12, color: isHomeDarkMode ? "#8eafc7" : "#6a869b" }}>
-                            {String(entry.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME}
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => togglePinnedProject(entry.id)}
-                          style={{
-                            padding: "5px 8px",
-                            borderRadius: 8,
-                            border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.24)",
-                            background: isHomeDarkMode ? "rgba(18,36,49,0.88)" : "rgba(255,255,255,0.72)",
-                            color: isHomeDarkMode ? "#dcecff" : "#234761",
-                            cursor: "pointer",
-                            fontWeight: 700,
-                            fontSize: 11,
-                            flexShrink: 0,
-                          }}
-                        >
-                          Unpin
-                        </button>
-                      </div>
-                      <div
-                        style={{
-                          marginTop: 8,
-                          fontSize: 12,
-                          color: isHomeDarkMode ? "#93afc5" : "#62819a",
-                          display: "flex",
-                          flexWrap: "wrap",
-                          gap: 6,
-                        }}
-                      >
-                        <span>{entry.workflowMode === WORKFLOW_MODE_PDF ? "PDF/Image" : "Location"}</span>
-                        <span>•</span>
-                        <span>
-                          Last edited:{" "}
-                          {entry.lastEditedAt
-                            ? new Date(entry.lastEditedAt).toLocaleString()
-                            : new Date(entry.savedAt).toLocaleString()}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => loadProjectFromLibrary(entry.id)}
-                        style={{
-                          marginTop: 10,
-                          padding: "8px 10px",
-                          borderRadius: 10,
-                          border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.2)" : "1px solid rgba(87,150,189,0.34)",
-                          background: isHomeDarkMode ? "linear-gradient(120deg, rgba(34,77,106,0.92), rgba(30,63,96,0.9))" : "linear-gradient(120deg, #dff1ff, #edf8ff)",
-                          color: isHomeDarkMode ? "#eef8ff" : "#173b56",
-                          cursor: "pointer",
-                          fontWeight: 700,
-                        }}
-                      >
-                        Open
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {!sharedAccessAuthenticated ? null : groupedHomeProjectLibrary.length === 0 ? (
-              <div style={{ fontSize: 13, opacity: 0.72, lineHeight: 1.4 }}>
-                {homeProjectSearch.trim()
-                  ? "No projects matched your search."
-                  : `No ${
-                      homeProjectTab === WORKFLOW_MODE_PDF ? "PDF/image" : "location"
-                    } projects in this view yet.`}
-              </div>
-            ) : (
-              <div style={{ display: "grid", gap: 10 }}>
-                {groupedHomeProjectLibrary.map(([folderName, entries]) => {
-                  const collapseKey = `${homeProjectTab}:${folderName}`;
-                  const collapsed = Boolean(homeCollapsedFolders?.[collapseKey]);
-                  return (
-                    <div
-                      key={folderName}
-                      style={{
-                        border: isHomeDarkMode
-                          ? "1px solid rgba(104,164,200,0.14)"
-                          : "1px solid rgba(121,170,196,0.14)",
-                        borderRadius: 18,
-                        padding: "12px 12px 10px",
-                        background: isHomeDarkMode ? "rgba(16,31,43,0.92)" : "rgba(248,252,255,0.72)",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          marginBottom: collapsed ? 0 : 8,
-                        }}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => toggleHomeFolderCollapsed(homeProjectTab, folderName)}
-                          style={{
-                            flex: 1,
-                            minWidth: 0,
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: 10,
-                            padding: 0,
-                            background: "transparent",
-                            border: "none",
-                            color: isHomeDarkMode ? "#edf6ff" : "#183852",
-                            cursor: "pointer",
-                            textAlign: "left",
-                          }}
-                        >
-                          <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                            minWidth: 0,
-                          }}
-                        >
-                          <span
-                            style={{
-                              width: 32,
-                              height: 32,
-                              borderRadius: 10,
-                              display: "inline-flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              background: "linear-gradient(160deg, rgba(255,244,200,0.95), rgba(242,215,122,0.9))",
-                              border: "1px solid rgba(186,149,55,0.24)",
-                              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.55)",
-                              flexShrink: 0,
-                              fontSize: 18,
-                              lineHeight: 1,
-                            }}
-                          >
-                            {collapsed ? "📁" : "📂"}
-                          </span>
-                          <span style={{ fontSize: 13, lineHeight: 1, color: isHomeDarkMode ? "#8faec8" : "#6f8aa1" }}>
-                            {collapsed ? "▸" : "▾"}
-                          </span>
-                          <span
-                            style={{
-                              fontSize: 15,
-                              fontWeight: 900,
-                              color: isHomeDarkMode ? "#f2f8fc" : "#173750",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {folderName}
-                          </span>
-                          </div>
-                          <div style={{ fontSize: 11, color: isHomeDarkMode ? "#8eaec6" : "#6b879b", flexShrink: 0 }}>
-                            {entries.length} project{entries.length === 1 ? "" : "s"}
-                          </div>
-                        </button>
-                        {folderName !== DEFAULT_PROJECT_FOLDER_NAME ? (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => renameHomeFolder(homeProjectTab, folderName)}
-                              style={{
-                                padding: "6px 8px",
-                                borderRadius: 8,
-                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.22)",
-                                background: isHomeDarkMode ? "rgba(18,36,49,0.88)" : "rgba(255,255,255,0.74)",
-                                color: isHomeDarkMode ? "#dcecff" : "#234761",
-                                cursor: "pointer",
-                                fontSize: 11,
-                                fontWeight: 700,
-                                flexShrink: 0,
-                              }}
-                            >
-                              Rename
-                            </button>
-                            <button
-                              type="button"
-                              disabled={entries.length > 0}
-                              onClick={() => deleteHomeFolder(homeProjectTab, folderName)}
-                              style={{
-                                padding: "6px 8px",
-                                borderRadius: 8,
-                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.22)",
-                                background:
-                                  entries.length > 0
-                                    ? isHomeDarkMode
-                                      ? "rgba(28,43,55,0.72)"
-                                      : "rgba(255,255,255,0.45)"
-                                    : isHomeDarkMode
-                                      ? "rgba(18,36,49,0.88)"
-                                      : "rgba(255,255,255,0.74)",
-                                color: isHomeDarkMode ? "#dcecff" : "#234761",
-                                cursor: entries.length > 0 ? "not-allowed" : "pointer",
-                                fontSize: 11,
-                                fontWeight: 700,
-                                opacity: entries.length > 0 ? 0.45 : 1,
-                                flexShrink: 0,
-                              }}
-                              title={
-                                entries.length > 0
-                                  ? "Move projects out before deleting this folder."
-                                  : "Delete empty folder"
-                              }
-                            >
-                              Delete
-                            </button>
-                          </>
-                        ) : null}
-                      </div>
-
-                      {!collapsed ? (
-                        <div style={{ display: "grid", gap: 8 }}>
-                          {entries.length === 0 ? (
-                            <div
-                              style={{
-                                border: "1px dashed rgba(255,255,255,0.16)",
-                                borderRadius: 12,
-                                padding: "12px 14px",
-                                background: isHomeDarkMode ? "rgba(15,29,41,0.9)" : "rgba(255,255,255,0.6)",
-                                fontSize: 12,
-                                color: isHomeDarkMode ? "#8daec7" : "#67849b",
-                              }}
-                            >
-                              No projects in this folder yet.
-                            </div>
-                          ) : (
-                            entries.map((entry) => (
-                              <div
-                                key={entry.id}
-                                style={{
-                                  display: "grid",
-                                  gridTemplateColumns: "1fr auto auto auto",
-                                  gap: 10,
-                                  alignItems: "center",
-                                  border: isHomeDarkMode
-                                    ? "1px solid rgba(104,164,200,0.14)"
-                                    : "1px solid rgba(121,170,196,0.16)",
-                                  borderRadius: 16,
-                                  padding: "12px 14px",
-                                  background: isHomeDarkMode
-                                    ? "linear-gradient(160deg, rgba(14,28,40,0.96), rgba(17,33,47,0.94))"
-                                    : "linear-gradient(160deg, rgba(255,255,255,0.9), rgba(241,248,253,0.92))",
-                                  boxShadow: isHomeDarkMode
-                                    ? "0 10px 22px rgba(0,0,0,0.22)"
-                                    : "0 10px 22px rgba(111,157,186,0.08)",
-                                }}
-                              >
-                            <div style={{ minWidth: 0 }}>
-                              <div
-                                style={{
-                                  fontWeight: 900,
-                                  color: isHomeDarkMode ? "#f2f8fc" : "#173750",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap",
-                                }}
-                              >
-                                {entry.projectName || "Untitled Project"}
-                              </div>
-                              <div
-                                style={{
-                                  fontSize: 12,
-                                  color: isHomeDarkMode ? "#93afc5" : "#64829b",
-                                  display: "flex",
-                                  flexWrap: "wrap",
-                                  gap: 6,
-                                }}
-                              >
-                                <span>
-                                  {homeProjectTab === WORKFLOW_MODE_PDF
-                                    ? "PDF/Image"
-                                    : `${Number(entry.polygonCount || 0).toLocaleString()} polygons`}
-                                </span>
-                                <span>•</span>
-                                <span>Boundary: {entry.hasBoundary ? "Yes" : "No"}</span>
-                                <span>•</span>
-                                <span>Saved by: {entry.savedBy || "local"}</span>
-                                <span>•</span>
-                                <span>
-                                  Last edited:{" "}
-                                  {entry.lastEditedAt
-                                    ? new Date(entry.lastEditedAt).toLocaleString()
-                                    : new Date(entry.savedAt).toLocaleString()}
-                                </span>
-                              </div>
-                              <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
-                                <span style={{ fontSize: 11, color: isHomeDarkMode ? "#90aec7" : "#7892a5" }}>Folder</span>
-                                <select
-                                  value={String(entry.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME}
-                                  onChange={(event) =>
-                                    assignProjectLibraryFolder(entry.id, event.target.value)
-                                  }
-                                  style={{
-                                    minWidth: 150,
-                                    padding: "6px 9px",
-                                    borderRadius: 9,
-                                    border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.16)" : "1px solid rgba(116,154,180,0.18)",
-                                    background: isHomeDarkMode ? "rgba(10,21,31,0.96)" : "#fff",
-                                    color: isHomeDarkMode ? "#edf6ff" : "#173750",
-                                    fontSize: 12,
-                                  }}
-                                >
-                                  {homeFolderOptions.map((option) => (
-                                    <option key={option} value={option}>
-                                      {option}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => loadProjectFromLibrary(entry.id)}
-                              style={{
-                                padding: "8px 10px",
-                                borderRadius: 10,
-                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.2)" : "1px solid rgba(87,150,189,0.34)",
-                                background: isHomeDarkMode ? "linear-gradient(120deg, rgba(34,77,106,0.92), rgba(30,63,96,0.9))" : "linear-gradient(120deg, #dff1ff, #edf8ff)",
-                                color: isHomeDarkMode ? "#eef8ff" : "#173b56",
-                                cursor: "pointer",
-                                fontWeight: 700,
-                              }}
-                            >
-                              Open
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => togglePinnedProject(entry.id)}
-                              style={{
-                                padding: "8px 10px",
-                                borderRadius: 10,
-                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.22)",
-                                background: pinnedProjectIdSet.has(String(entry.id || "").trim())
-                                  ? isHomeDarkMode
-                                    ? "rgba(94,76,22,0.68)"
-                                    : "rgba(255,232,180,0.82)"
-                                  : isHomeDarkMode
-                                    ? "rgba(18,36,49,0.88)"
-                                    : "rgba(255,255,255,0.72)",
-                                color: isHomeDarkMode ? "#e7f2fb" : "#234761",
-                                cursor: "pointer",
-                                fontWeight: 700,
-                              }}
-                            >
-                              {pinnedProjectIdSet.has(String(entry.id || "").trim()) ? "Pinned" : "Pin"}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => removeProjectFromLibrary(entry.id)}
-                              style={{
-                                padding: "8px 10px",
-                                borderRadius: 10,
-                                border: isHomeDarkMode ? "1px solid rgba(118,182,219,0.18)" : "1px solid rgba(116,154,180,0.22)",
-                                background: isHomeDarkMode ? "rgba(18,36,49,0.88)" : "rgba(255,255,255,0.72)",
-                                color: isHomeDarkMode ? "#dcecff" : "#234761",
-                                cursor: "pointer",
-                                fontWeight: 700,
-                              }}
-                            >
-                              Remove
-                            </button>
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <div
-            style={{
-              marginTop: 14,
-              display: "grid",
-              gap: 12,
-              gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-            }}
-          >
-            <div
-              style={{
-                borderRadius: 22,
-                border: "1px solid rgba(121,170,196,0.14)",
-                background: "rgba(255,255,255,0.58)",
-                padding: "14px 14px 12px",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginBottom: 10,
-                  gap: 10,
-                }}
-              >
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.2, textTransform: "uppercase", color: "#708ba0", marginBottom: 3 }}>
-                    Admin
-                  </div>
-                  <div style={{ fontSize: 16, fontWeight: 900, color: "#173750" }}>Security & Legal</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowSecurityAdminCard((prev) => !prev)}
-                  style={{
-                    padding: "6px 9px",
-                    borderRadius: 9,
-                    border: "1px solid rgba(116,154,180,0.22)",
-                    background: "rgba(255,255,255,0.74)",
-                    color: "#234761",
-                    cursor: "pointer",
-                    fontWeight: 700,
-                    fontSize: 11,
-                  }}
-                >
-                  {showSecurityAdminCard ? "Collapse" : "Expand"}
-                </button>
-              </div>
-              {showSecurityAdminCard ? (
-                <>
-                  <div style={{ fontSize: 12, color: "#5f7f96", lineHeight: 1.45 }}>
-                    Access requires login. Project changes are audit-logged (user, action, time, device/IP metadata).
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowLegalNotes((prev) => !prev)}
-                    style={{
-                      marginTop: 10,
-                      padding: "6px 9px",
-                      borderRadius: 9,
-                      border: "1px solid rgba(116,154,180,0.22)",
-                      background: "rgba(255,255,255,0.74)",
-                      color: "#234761",
-                      cursor: "pointer",
-                      fontWeight: 700,
-                      fontSize: 11,
-                    }}
-                  >
-                    {showLegalNotes ? "Hide Policy" : "Show Policy"}
-                  </button>
-                </>
-              ) : (
-                <div style={{ fontSize: 12, color: "#7b95a8", lineHeight: 1.45 }}>
-                  Hidden by default so the project workspace stays front and center.
-                </div>
-              )}
-              {showSecurityAdminCard && showLegalNotes ? (
-                <div
-                  style={{
-                    marginTop: 10,
-                    borderRadius: 12,
-                    border: "1px solid rgba(121,170,196,0.14)",
-                    background: "rgba(255,255,255,0.7)",
-                    padding: "10px 11px",
-                    fontSize: 12,
-                    lineHeight: 1.48,
-                    color: "#48667f",
-                  }}
-                >
-                  <div style={{ fontWeight: 800, marginBottom: 4 }}>Terms of Use</div>
-                  Authorized business use only. Do not upload protected data unless you have rights to process it.
-                  <div style={{ fontWeight: 800, marginTop: 8, marginBottom: 4 }}>Privacy Notice</div>
-                  Shared login events and project actions are logged for accountability and security review.
-                  <div style={{ fontWeight: 800, marginTop: 8, marginBottom: 4 }}>Data Retention</div>
-                  Audit events are retained by backend policy (`AUTO_MEASURE_AUDIT_RETENTION_DAYS`,
-                  default 180 days). Shared project files remain until deleted by a logged-in user.
-                </div>
-              ) : null}
-            </div>
-
-            <div
-              style={{
-                borderRadius: 22,
-                border: "1px solid rgba(121,170,196,0.14)",
-                background: "rgba(255,255,255,0.58)",
-                padding: "14px 14px 12px",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginBottom: 10,
-                  gap: 8,
-                }}
-              >
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.2, textTransform: "uppercase", color: "#708ba0", marginBottom: 3 }}>
-                    Admin
-                  </div>
-                  <div style={{ fontSize: 16, fontWeight: 900, color: "#173750" }}>Access Audit Log</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAuditAdminCard((prev) => !prev);
-                    if (!showAuditAdminCard && sharedAccessAuthenticated && !sharedAuthChecking) {
-                      refreshSecurityAuditEvents({ quiet: true });
-                    }
-                  }}
-                  style={{
-                    padding: "6px 9px",
-                    borderRadius: 9,
-                    border: "1px solid rgba(116,154,180,0.22)",
-                    background: "rgba(255,255,255,0.74)",
-                    color: "#234761",
-                    cursor: "pointer",
-                    opacity: 1,
-                    fontWeight: 700,
-                    fontSize: 11,
-                  }}
-                >
-                  {showAuditAdminCard ? "Collapse" : "Expand"}
-                </button>
-              </div>
-              {!showAuditAdminCard ? (
-                <div style={{ fontSize: 12, color: "#7b95a8" }}>
-                  Hidden by default so audit activity does not crowd the project list.
-                </div>
-              ) : !sharedAccessAuthenticated ? (
-                <div style={{ fontSize: 12, color: "#62809a" }}>
-                  Sign in above to view audit events.
-                </div>
-              ) : securityAuditEvents.length === 0 ? (
-                <div style={{ fontSize: 12, color: "#62809a" }}>
-                  No audit events yet.
-                </div>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => refreshSecurityAuditEvents({ quiet: false })}
-                    disabled={!sharedAccessAuthenticated || sharedAuthChecking || securityAuditSyncing}
-                    style={{
-                      marginBottom: 10,
-                      padding: "6px 9px",
-                      borderRadius: 9,
-                      border: "1px solid rgba(116,154,180,0.22)",
-                      background: "rgba(255,255,255,0.74)",
-                      color: "#234761",
-                      cursor:
-                        !sharedAccessAuthenticated || sharedAuthChecking || securityAuditSyncing
-                          ? "not-allowed"
-                          : "pointer",
-                      opacity:
-                        !sharedAccessAuthenticated || sharedAuthChecking || securityAuditSyncing
-                          ? 0.6
-                          : 1,
-                      fontWeight: 700,
-                      fontSize: 11,
-                    }}
-                  >
-                    {securityAuditSyncing ? "Refreshing..." : "Refresh Log"}
-                  </button>
-                  <div
-                    style={{
-                      maxHeight: 250,
-                      overflow: "auto",
-                      border: "1px solid rgba(121,170,196,0.14)",
-                      borderRadius: 10,
-                      background: "rgba(246,250,253,0.88)",
-                    }}
-                  >
-                    {securityAuditEvents.slice(0, 80).map((event) => (
-                      <div
-                        key={event.id}
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "120px 1fr",
-                          gap: 8,
-                          padding: "8px 10px",
-                          borderBottom: "1px solid rgba(255,255,255,0.08)",
-                          fontSize: 12,
-                          lineHeight: 1.35,
-                        }}
-                      >
-                        <div style={{ opacity: 0.7 }}>
-                          {event.created_at
-                            ? new Date(event.created_at).toLocaleString()
-                            : "Unknown"}
-                        </div>
-                        <div>
-                          <span style={{ fontWeight: 800 }}>{event.username || "unknown"}</span>{" "}
-                          <span style={{ opacity: 0.9 }}>{event.action || "action"}</span>{" "}
-                          <span
-                            style={{
-                              opacity: 0.95,
-                              color:
-                                event.outcome === "success"
-                                  ? "#7febad"
-                                  : event.outcome === "failure"
-                                  ? "#ff8a8a"
-                                  : "#ffd786",
-                            }}
-                          >
-                            ({event.outcome || "unknown"})
-                          </span>
-                          {event.resource ? <span style={{ opacity: 0.75 }}> • {event.resource}</span> : null}
-                          {event.ip_address ? (
-                            <span style={{ opacity: 0.62 }}> • {event.ip_address}</span>
-                          ) : null}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      </>
     );
   }
+
 
   const hideSidebarForPdfFocus =
     workflowMode === WORKFLOW_MODE_PDF && pdfFocusMode;
   const pdfToolbarCollapsed = false;
   const showCompactPdfQuickBar =
-    workflowMode === WORKFLOW_MODE_PDF && (isCompactTouchUi || pdfFocusMode);
+    workflowMode === WORKFLOW_MODE_PDF && pdfFocusMode;
   const pdfCanvasViewportMaxWidth =
     workflowMode !== WORKFLOW_MODE_PDF
       ? "100vw"
       : hideSidebarForPdfFocus
       ? "calc(100vw - 36px)"
       : isCompactTouchUi
-      ? "calc(100vw - 356px)"
-      : "calc(100vw - 436px)";
+      ? "calc(100vw - 326px)"
+      : "calc(100vw - 376px)";
   const pdfCanvasViewportMaxHeight =
     workflowMode === WORKFLOW_MODE_PDF && showCompactPdfQuickBar
       ? "calc(100vh - 88px)"
@@ -20382,8 +19995,8 @@ export default function App() {
       ? Math.max(0.78, Math.min(1.18, pdfRenderMetrics.displayWidth / 1000))
       : 1;
   const floatingPdfSidebarWidth = isCompactTouchUi
-    ? Math.round(96 * pdfSidebarScale)
-    : Math.round(114 * pdfSidebarScale);
+    ? Math.round(276 * pdfSidebarScale)
+    : Math.round(316 * pdfSidebarScale);
   const floatingPdfSidebarMaxHeight = showCompactPdfQuickBar
     ? "calc(100vh - 108px)"
     : "calc(100vh - 24px)";
@@ -20447,26 +20060,57 @@ export default function App() {
                 <div style={{ fontSize: 12, opacity: 0.72 }}>
                   {projectName || "Untitled Project"} • {currentProjectVersions.length} snapshot
                   {currentProjectVersions.length === 1 ? "" : "s"}
+                  {sharedProjectVersionsStatus === "loading" ? " • loading server history" : ""}
+                  {sharedProjectVersionsStatus === "error" ? " • server history unavailable" : ""}
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  value={versionSnapshotNote}
+                  onChange={(e) => setVersionSnapshotNote(e.target.value)}
+                  placeholder="Optional snapshot note"
+                  style={{
+                    minWidth: 200,
+                    padding: "7px 9px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(255,255,255,0.08)",
+                    color: "#fff",
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={saveManualVersionSnapshot}
+                  style={{
+                    padding: "7px 10px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(124,214,255,0.38)",
+                    background: "rgba(0,140,255,0.18)",
+                    color: "#fff",
+                    cursor: "pointer",
+                    fontWeight: 700,
+                    fontSize: 12,
+                  }}
+                >
+                  Save Snapshot
+                </button>
                 <button
                   type="button"
                   onClick={clearCurrentProjectVersionHistory}
-                  disabled={!currentProjectVersions.length}
+                  disabled={!currentDeviceProjectVersions.length}
                   style={{
                     padding: "7px 10px",
                     borderRadius: 10,
                     border: "1px solid rgba(255,125,125,0.45)",
                     background: "rgba(180,58,58,0.20)",
                     color: "#fff",
-                    cursor: currentProjectVersions.length ? "pointer" : "not-allowed",
-                    opacity: currentProjectVersions.length ? 1 : 0.6,
+                    cursor: currentDeviceProjectVersions.length ? "pointer" : "not-allowed",
+                    opacity: currentDeviceProjectVersions.length ? 1 : 0.6,
                     fontWeight: 700,
                     fontSize: 12,
                   }}
                 >
-                  Clear History
+                  Clear Device History
                 </button>
                 <button
                   type="button"
@@ -20545,10 +20189,16 @@ export default function App() {
                             {Number(version.polygonCount || 0).toLocaleString()} polygons
                             {version.savedBy ? ` • by ${version.savedBy}` : ""}
                           </div>
+                          {version.note ? (
+                            <div style={{ fontSize: 11, opacity: 0.82, marginTop: 4, lineHeight: 1.35 }}>
+                              {version.note}
+                            </div>
+                          ) : null}
                           <div style={{ display: "flex", gap: 6, marginTop: 7 }}>
                             <button
                               type="button"
-                              onClick={() => setVersionCompareId(String(version.id || ""))}
+                              onClick={() => void selectVersionForCompare(version)}
+                              disabled={sharedVersionPayloadLoadingId === String(version.id || "")}
                               style={{
                                 padding: "6px 8px",
                                 borderRadius: 8,
@@ -20560,11 +20210,16 @@ export default function App() {
                                 fontSize: 11,
                               }}
                             >
-                              {selected ? "Selected" : "Compare"}
+                              {sharedVersionPayloadLoadingId === String(version.id || "")
+                                ? "Loading..."
+                                : selected
+                                ? "Selected"
+                                : "Compare"}
                             </button>
                             <button
                               type="button"
-                              onClick={() => restoreVersionSnapshot(version.id)}
+                              onClick={() => void restoreVersionSnapshot(version.id)}
+                              disabled={sharedVersionPayloadLoadingId === String(version.id || "")}
                               style={{
                                 padding: "6px 8px",
                                 borderRadius: 8,
@@ -20607,6 +20262,11 @@ export default function App() {
                         ? new Date(selectedVersionForCompare.savedAt).toLocaleString()
                         : "Unknown"}
                     </div>
+                    {selectedVersionForCompare.note ? (
+                      <div style={{ marginBottom: 8, opacity: 0.82, lineHeight: 1.4 }}>
+                        Note: {selectedVersionForCompare.note}
+                      </div>
+                    ) : null}
                     {LAYER_KEYS.map((layerKey) => {
                       const currentLayer = currentProjectMetrics.byLayer[layerKey] || {
                         polygons: 0,
@@ -20957,9 +20617,30 @@ export default function App() {
       <div
         className="sidebar"
         style={{
-          width: isCompactTouchUi ? 340 : 420,
-          maxWidth: isCompactTouchUi ? "58vw" : "42vw",
-          minWidth: isCompactTouchUi ? 300 : 420,
+          width:
+            workflowMode === WORKFLOW_MODE_PDF
+              ? isCompactTouchUi
+                ? 310
+                : 360
+              : isCompactTouchUi
+              ? 340
+              : 420,
+          maxWidth:
+            workflowMode === WORKFLOW_MODE_PDF
+              ? isCompactTouchUi
+                ? "52vw"
+                : "38vw"
+              : isCompactTouchUi
+              ? "58vw"
+              : "42vw",
+          minWidth:
+            workflowMode === WORKFLOW_MODE_PDF
+              ? isCompactTouchUi
+                ? 286
+                : 360
+              : isCompactTouchUi
+              ? 300
+              : 420,
           background: "#0b0b0b",
           color: "#fff",
           borderRight: "1px solid rgba(255,255,255,0.08)",
@@ -21484,6 +21165,114 @@ export default function App() {
                 Azure Aerial{!azureMapsKey ? " — missing key" : ""}
               </option>
             </select>
+
+            <div
+              style={{
+                marginTop: 8,
+                padding: 8,
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.035)",
+              }}
+            >
+              <div style={{ fontSize: 11, fontWeight: 800, marginBottom: 6 }}>
+                Imagery Quality & Comparison
+              </div>
+              {googleMapsKey ? (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 7,
+                    fontSize: 11,
+                    cursor: "pointer",
+                    marginBottom: 7,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={googleHighDpi}
+                    onChange={(event) => setGoogleHighDpi(event.target.checked)}
+                  />
+                  Google high-DPI tiles {googleHighDpi ? "(2x)" : "(standard)"}
+                </label>
+              ) : null}
+              <div
+                style={{
+                  fontSize: 11,
+                  lineHeight: 1.4,
+                  marginBottom: 7,
+                  color:
+                    Number.isFinite(imageryDetailStatus.maxZoom) &&
+                    imageryDetailStatus.zoom > imageryDetailStatus.maxZoom + 0.25
+                      ? "#ffd39d"
+                      : "rgba(255,255,255,0.76)",
+                }}
+              >
+                Zoom {imageryDetailStatus.zoom.toFixed(1)}
+                {imageryDetailStatus.loading
+                  ? " • checking native detail..."
+                  : Number.isFinite(imageryDetailStatus.maxZoom)
+                    ? ` • native imagery through z${imageryDetailStatus.maxZoom}`
+                    : " • native limit unavailable"}
+                {Number.isFinite(imageryDetailStatus.maxZoom) &&
+                imageryDetailStatus.zoom > imageryDetailStatus.maxZoom + 0.25
+                  ? " • over-zoomed (detail will not increase)"
+                  : ""}
+                {imageryDetailStatus.copyright
+                  ? ` • ${imageryDetailStatus.copyright}`
+                  : ""}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 6 }}>
+                <select
+                  value={imageryCompareSource}
+                  onChange={(event) => setImageryCompareSource(event.target.value)}
+                  disabled={imageryCompareActive}
+                  aria-label="Imagery comparison source"
+                  style={{
+                    minWidth: 0,
+                    padding: "7px 8px",
+                    borderRadius: 8,
+                    border: "1px solid rgba(255,255,255,0.14)",
+                    background: "#111",
+                    color: "#fff",
+                  }}
+                >
+                  <option value="maptiler">MapTiler</option>
+                  <option value="google" disabled={!googleMapsKey}>Google</option>
+                  <option value="mapbox" disabled={!mapboxToken}>Mapbox</option>
+                  <option value="azure" disabled={!azureMapsKey}>Azure</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={toggleImageryComparison}
+                  disabled={!imageryCompareActive && imageryCompareSource === baseMap}
+                  style={{
+                    ...btnStyleCompactOverlay(),
+                    cursor:
+                      !imageryCompareActive && imageryCompareSource === baseMap
+                        ? "not-allowed"
+                        : "pointer",
+                  }}
+                >
+                  {imageryCompareActive ? "Show Original" : "Preview"}
+                </button>
+              </div>
+              {imageryCompareActive ? (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 6, marginTop: 6 }}>
+                  <div style={{ fontSize: 11, opacity: 0.78, alignSelf: "center" }}>
+                    Previewing {imageryCompareSource}; camera and polygons stay unchanged.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={keepComparedImagery}
+                    style={btnStyleCompactOverlay()}
+                  >
+                    Use This
+                  </button>
+                </div>
+              ) : null}
+            </div>
 
             <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
               <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, cursor: "pointer" }}>
@@ -22427,10 +22216,10 @@ export default function App() {
             >
               <div>
                 <div style={{ fontSize: 12, opacity: 0.86, fontWeight: 800 }}>
-                  PDF Expert Annotation Toolbar
+                  PDF Measure & Draw
                 </div>
                 <div style={{ fontSize: 11, opacity: 0.62, marginTop: 2 }}>
-                  Built for touch markup, quick notes, and client-ready plan review.
+                  One workspace for calibrated takeoffs, markup, and shapes.
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -22675,7 +22464,10 @@ export default function App() {
                 {displayedMeasureResult?.kind === "area"
                   ? `${
                       Number.isFinite(Number(displayedMeasureResult.sqft))
-                        ? `${Number(displayedMeasureResult.sqft).toFixed(2)} sq ft`
+                        ? formatPdfAreaDisplayValue(
+                            displayedMeasureResult.sqft,
+                            displayedMeasureResult.acres
+                          )
                         : "Set scale to compute area"
                     } • ${Number(displayedMeasureResult.squarePixels || 0).toFixed(2)} px²${
                       displayedMeasureResult.scaled ? " (scaled)" : ""
@@ -22696,12 +22488,41 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(8, minmax(0, 1fr))", gap: 6 }}>
+            <div
+              style={{
+                marginTop: 8,
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.035)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  marginBottom: 8,
+                }}
+              >
+                <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.92 }}>
+                  Draw & Shapes
+                </div>
+                <div style={{ fontSize: 10, opacity: 0.62 }}>
+                  {pdfAnnotationTool === "shape"
+                    ? PDF_SHAPE_OPTIONS.find((option) => option.key === pdfShapeType)?.label ||
+                      "Shape"
+                    : pdfAnnotationTool.charAt(0).toUpperCase() + pdfAnnotationTool.slice(1)}
+                </div>
+              </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 7 }}>
               {[
                 { key: "select", label: "Select" },
                 { key: "pen", label: "Pen" },
                 { key: "pencil", label: "Pencil" },
                 { key: "marker", label: "Marker" },
+                { key: "highlighter", label: "Highlighter" },
                 { key: "crayon", label: "Crayon" },
                 { key: "shape", label: "Shape" },
                 { key: "text", label: "Text" },
@@ -22714,6 +22535,7 @@ export default function App() {
                     type="button"
                     onClick={() => activatePdfAnnotationTool(tool.key)}
                     style={{
+                      minHeight: 68,
                       padding: "8px 6px",
                       borderRadius: 10,
                       cursor: "pointer",
@@ -22996,6 +22818,8 @@ export default function App() {
               <div style={{ fontSize: 12, opacity: 0.82, marginBottom: 4 }}>
                 {pdfAnnotationTool === "marker"
                   ? "Marker Width"
+                  : pdfAnnotationTool === "highlighter"
+                  ? "Highlighter Width"
                   : pdfAnnotationTool === "crayon"
                   ? "Crayon Width"
                   : pdfAnnotationTool === "pencil"
@@ -23018,7 +22842,7 @@ export default function App() {
               />
             </div>
 
-            {["pen", "pencil", "marker", "crayon", "shape"].includes(pdfAnnotationTool) && (
+            {["pen", "pencil", "marker", "highlighter", "crayon", "shape"].includes(pdfAnnotationTool) && (
               <div style={{ marginTop: 8 }}>
                 <div style={{ fontSize: 12, opacity: 0.82, marginBottom: 4 }}>
                   {pdfAnnotationTool === "shape"
@@ -23256,14 +23080,15 @@ export default function App() {
             </div>
 
             <div style={{ fontSize: 11, opacity: 0.72, marginTop: 8, lineHeight: 1.35 }}>
-              Pen/Pencil/Marker/Crayon draw freehand. Shape opens line, rectangle, diamond,
+              Pen, pencil, marker, highlighter, and crayon each use a distinct freehand stroke. Shape opens line, rectangle, diamond,
               arrow, callout, triangle, circle, and star options. Text places standalone notes. Eraser removes
               markups. Select can reposition text notes.
             </div>
             <div style={{ fontSize: 11, opacity: 0.68, marginTop: 6, lineHeight: 1.35 }}>
-              Shortcuts: `V` select, `P` pen, `I` pencil, `M` marker, `C` crayon, `H` shape,
+              Shortcuts: `V` select, `P` pen, `I` pencil, `M` marker, `G` highlighter, `C` crayon, `H` shape,
               `T` text, `E` eraser, `1-8` shape type, `Delete` remove selected, `Cmd/Ctrl+D`
               duplicate selected, `Esc` clear draft and return to select.
+            </div>
             </div>
               </>
             ) : (
@@ -23767,6 +23592,9 @@ export default function App() {
             segmentingImage={segmentingImage}
             trainingExporting={trainingExporting}
             segmentationResult={segmentationResult}
+            segmentationStatus={segmentationStatus}
+            showCvUncertainty={showCvUncertainty}
+            setShowCvUncertainty={setShowCvUncertainty}
             backendMeasurementResult={backendMeasurementResult}
             measurementHistory={measurementHistory}
             activeLearningQueue={activeLearningQueue}
@@ -24100,6 +23928,28 @@ export default function App() {
           </div>
 
           <div style={{ fontSize: 12, opacity: 0.72, marginTop: 6, lineHeight: 1.35 }}>
+            Device recovery:{" "}
+            <span
+              style={{
+                fontWeight: 700,
+                color:
+                  offlineCacheStatus === "ready"
+                    ? "rgba(180,255,210,0.95)"
+                    : offlineCacheStatus === "checking"
+                    ? "#ffd39d"
+                    : "rgba(255,255,255,0.82)",
+              }}
+            >
+              {offlineCacheStatus === "ready"
+                ? "ready on this device"
+                : offlineCacheStatus === "checking"
+                ? "checking"
+                : "unavailable"}
+            </span>
+            . Large autosaves are preserved in IndexedDB so refreshes and brief network outages are recoverable on this device.
+          </div>
+
+          <div style={{ fontSize: 12, opacity: 0.72, marginTop: 6, lineHeight: 1.35 }}>
             Shared sync queue: {sharedProjectQueue.length} pending change
             {sharedProjectQueue.length === 1 ? "" : "s"}.
             {!sharedAccessAuthenticated ? " Log in on Home to sync shared files." : ""}
@@ -24365,6 +24215,61 @@ export default function App() {
             Polygons in {LAYER_META[activeLayer].name}
           </div>
 
+          <input
+            value={polygonSearchQuery}
+            onChange={(e) => setPolygonSearchQuery(e.target.value)}
+            placeholder="Search polygons by name, layer, or id"
+            style={{
+              width: "100%",
+              marginBottom: 8,
+              padding: "8px 10px",
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.14)",
+              background: "#111",
+              color: "#fff",
+            }}
+            aria-label="Search polygons"
+          />
+
+          {String(polygonSearchQuery || "").trim() ? (
+            polygonSearchResults.length ? (
+              <div style={{ marginBottom: 8, maxHeight: 240, overflow: "auto" }}>
+                {polygonSearchResults.map(({ layerKey, feature, name, sqft }) => (
+                  <button
+                    key={`search-${layerKey}-${feature?.id || name}`}
+                    type="button"
+                    onClick={() => focusLocationFeature(layerKey, feature)}
+                    style={{
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "8px 9px",
+                      marginBottom: 6,
+                      borderRadius: 10,
+                      cursor: "pointer",
+                      border: "1px solid rgba(255,255,255,0.10)",
+                      background: "rgba(255,255,255,0.05)",
+                      color: "#fff",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                      <span style={{ fontWeight: 700 }}>{name}</span>
+                      <span style={{ fontSize: 11, opacity: 0.72 }}>
+                        {LAYER_META[layerKey].name}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, opacity: 0.72, marginTop: 2 }}>
+                      {sqft.toLocaleString()} sq ft
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, opacity: 0.72, marginBottom: 8 }}>
+                No polygons matched that search.
+              </div>
+            )
+          ) : null}
+
           {(layerFeatures[activeLayer] || []).length === 0 ? (
             <div style={{ fontSize: 12, opacity: 0.75 }}>
               Draw polygons to see them listed here.
@@ -24419,7 +24324,7 @@ export default function App() {
                   </div>
 
                   <button
-                    onClick={() => zoomToFeature(f)}
+                    onClick={() => focusLocationFeature(activeLayer, f)}
                     style={{
                       width: 64,
                       padding: "7px 8px",
@@ -24463,6 +24368,23 @@ export default function App() {
         <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
           <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Exports</div>
 
+          <textarea
+            value={clientReportNotes}
+            onChange={(e) => setClientReportNotes(e.target.value)}
+            placeholder="Optional client report notes"
+            rows={4}
+            style={{
+              width: "100%",
+              resize: "vertical",
+              padding: 9,
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.14)",
+              background: "#111",
+              color: "#fff",
+              marginBottom: 8,
+            }}
+          />
+
           <button
             onClick={exportTotalsCsvSafe}
             style={btnStyleFull()}
@@ -24489,6 +24411,13 @@ export default function App() {
             style={{ ...btnStyleFull(), marginTop: 8 }}
           >
             Export PDF
+          </button>
+
+          <button
+            onClick={exportClientReportSafe}
+            style={{ ...btnStyleFull(), marginTop: 8, background: "rgba(0,140,255,0.14)" }}
+          >
+            Export Client Report (PDF)
           </button>
 
           <button
@@ -24741,6 +24670,7 @@ export default function App() {
 
         {workflowMode === WORKFLOW_MODE_PDF && measurementImageFile && planOverlay?.url && (
           <div
+            ref={pdfScrollContainerRef}
             style={{
               position: "absolute",
               inset: 0,
@@ -24750,6 +24680,7 @@ export default function App() {
               overflow: "auto",
             }}
           >
+            {pdfFocusMode ? (
             <div
               ref={pdfFloatingSidebarRef}
               style={{
@@ -24768,7 +24699,7 @@ export default function App() {
                 boxShadow: "0 18px 42px rgba(0,0,0,0.34)",
                 display: "flex",
                 flexDirection: "column",
-                gap: 8,
+                gap: 10,
               }}
             >
               <div
@@ -24784,14 +24715,19 @@ export default function App() {
                   userSelect: "none",
                 }}
               >
-                <div
-                  style={{
-                    flex: 1,
-                    height: 6,
-                    borderRadius: 999,
-                    background: "rgba(255,255,255,0.18)",
-                  }}
-                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 850, color: "#fff" }}>
+                    PDF Measure & Draw
+                  </div>
+                  <div
+                    style={{
+                      height: 4,
+                      borderRadius: 999,
+                      background: "rgba(255,255,255,0.18)",
+                      marginTop: 5,
+                    }}
+                  />
+                </div>
                 {!pdfToolbarCollapsed ? (
                   <>
                     <button
@@ -24887,8 +24823,21 @@ export default function App() {
                       gap: 6,
                     }}
                   >
-                    <div style={{ fontSize: 10, fontWeight: 800, opacity: 0.92 }}>
-                      PDF Measure
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: 8,
+                        fontSize: 11,
+                        fontWeight: 800,
+                        opacity: 0.92,
+                      }}
+                    >
+                      <span>Measure</span>
+                      <span style={{ fontSize: 9, opacity: 0.66 }}>
+                        {pdfMeasureKind === "area" ? "Area" : "Distance"}
+                      </span>
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                       <button
@@ -25104,7 +25053,10 @@ export default function App() {
                       {displayedMeasureResult?.kind === "area"
                         ? `${
                             Number.isFinite(Number(displayedMeasureResult.sqft))
-                              ? `${Number(displayedMeasureResult.sqft).toFixed(2)} sq ft`
+                              ? formatPdfAreaDisplayValue(
+                                  displayedMeasureResult.sqft,
+                                  displayedMeasureResult.acres
+                                )
                               : "Set scale to compute area"
                           }`
                         : displayedMeasureResult
@@ -25160,7 +25112,7 @@ export default function App() {
                       {pdfMeasurementSummary.areaCount
                         ? `${
                             pdfMeasurementSummary.hasSqft
-                              ? `${pdfMeasurementSummary.totalSqft.toFixed(2)} sq ft`
+                              ? formatPdfAreaDisplayValue(pdfMeasurementSummary.totalSqft)
                               : `${pdfMeasurementSummary.totalSquarePixels.toFixed(2)} px²`
                           } across ${pdfMeasurementSummary.areaCount} saved area${
                             pdfMeasurementSummary.areaCount === 1 ? "" : "s"
@@ -25241,9 +25193,34 @@ export default function App() {
 
                   <div
                     style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 8,
+                      fontSize: 11,
+                      fontWeight: 800,
+                      color: "#fff",
+                    }}
+                  >
+                    <span>Draw & Shapes</span>
+                    <span style={{ fontSize: 9, opacity: 0.66 }}>
+                      {pdfAnnotationTool === "shape"
+                        ? PDF_SHAPE_OPTIONS.find((option) => option.key === pdfShapeType)?.label ||
+                          "Shape"
+                        : pdfAnnotationTool.charAt(0).toUpperCase() +
+                          pdfAnnotationTool.slice(1)}
+                    </span>
+                  </div>
+
+                  <div
+                    style={{
                       display: "grid",
-                      gridTemplateColumns: "1fr",
-                      gap: 6,
+                      gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                      gap: 7,
+                      padding: "8px 7px",
+                      borderRadius: 12,
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      background: "rgba(255,255,255,0.04)",
                     }}
                   >
                     {[
@@ -25251,6 +25228,7 @@ export default function App() {
                       { key: "pen", label: "Pen" },
                       { key: "pencil", label: "Pencil" },
                       { key: "marker", label: "Marker" },
+                      { key: "highlighter", label: "Highlighter" },
                       { key: "crayon", label: "Crayon" },
                       { key: "shape", label: "Shape" },
                       { key: "text", label: "Text" },
@@ -25264,7 +25242,8 @@ export default function App() {
                           onClick={() => activatePdfAnnotationTool(tool.key)}
                           style={{
                             width: "100%",
-                            padding: "8px 6px",
+                            minHeight: 62,
+                            padding: "7px 4px",
                             borderRadius: 12,
                             cursor: "pointer",
                             border: active
@@ -25275,7 +25254,7 @@ export default function App() {
                               : "rgba(255,255,255,0.05)",
                             color: "#fff",
                             fontWeight: 700,
-                            fontSize: 10,
+                            fontSize: 9,
                             display: "flex",
                             flexDirection: "column",
                             alignItems: "center",
@@ -25339,7 +25318,7 @@ export default function App() {
                   <div
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                      gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
                       gap: 6,
                     }}
                   >
@@ -25507,16 +25486,20 @@ export default function App() {
                 </>
               )}
             </div>
-            {showCompactPdfQuickBar ? (
+            ) : null}
+            {(pdfSourceFile || measurementImageFile) ? (
               <div
                 style={{
                   position: "sticky",
                   top: 10,
+                  left: 10,
                   zIndex: 20,
                   display: "flex",
                   gap: 8,
                   alignItems: "center",
                   flexWrap: "wrap",
+                  width: "fit-content",
+                  maxWidth: "calc(100% - 20px)",
                   margin: "10px 10px 0",
                   padding: "10px 12px",
                   borderRadius: 14,
@@ -25546,81 +25529,274 @@ export default function App() {
                 >
                   {pdfFocusMode ? "Exit Focus" : "Focus"}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setApplePencilMode((prev) => !prev)}
+                {pdfSourceFile ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                      padding: "3px 5px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      background: "rgba(255,255,255,0.05)",
+                    }}
+                    aria-label="PDF page navigation"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => jumpToPdfPage(pdfPageNumber - 1)}
+                      disabled={pdfConverting || pdfPageNumber <= 1}
+                      style={{
+                        minWidth: 36,
+                        minHeight: 34,
+                        borderRadius: 8,
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: "rgba(255,255,255,0.06)",
+                        color: "#fff",
+                        cursor: pdfConverting || pdfPageNumber <= 1 ? "not-allowed" : "pointer",
+                        opacity: pdfConverting || pdfPageNumber <= 1 ? 0.45 : 1,
+                        fontSize: 20,
+                        lineHeight: 1,
+                      }}
+                      aria-label="Previous PDF page"
+                    >
+                      ‹
+                    </button>
+                    <input
+                      type="number"
+                      min="1"
+                      max={pdfPageCount || undefined}
+                      step="1"
+                      value={pdfPageJumpInput}
+                      onChange={(event) => setPdfPageJumpInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter") return;
+                        event.preventDefault();
+                        jumpToPdfPage(pdfPageJumpInput);
+                      }}
+                      onBlur={() => setPdfPageJumpInput(String(pdfPageNumber))}
+                      style={{
+                        width: 48,
+                        minHeight: 34,
+                        padding: "5px 4px",
+                        borderRadius: 8,
+                        border: "1px solid rgba(255,255,255,0.14)",
+                        background: "#111720",
+                        color: "#fff",
+                        textAlign: "center",
+                        fontWeight: 800,
+                      }}
+                      aria-label="Current PDF page"
+                    />
+                    <span style={{ fontSize: 11, fontWeight: 800, whiteSpace: "nowrap" }}>
+                      / {pdfPageCount || "?"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => jumpToPdfPage(pdfPageNumber + 1)}
+                      disabled={
+                        pdfConverting ||
+                        (pdfPageCount > 0 && pdfPageNumber >= pdfPageCount)
+                      }
+                      style={{
+                        minWidth: 36,
+                        minHeight: 34,
+                        borderRadius: 8,
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: "rgba(255,255,255,0.06)",
+                        color: "#fff",
+                        cursor:
+                          pdfConverting ||
+                          (pdfPageCount > 0 && pdfPageNumber >= pdfPageCount)
+                            ? "not-allowed"
+                            : "pointer",
+                        opacity:
+                          pdfConverting ||
+                          (pdfPageCount > 0 && pdfPageNumber >= pdfPageCount)
+                            ? 0.45
+                            : 1,
+                        fontSize: 20,
+                        lineHeight: 1,
+                      }}
+                      aria-label="Next PDF page"
+                    >
+                      ›
+                    </button>
+                  </div>
+                ) : null}
+                <div
                   style={{
-                    padding: "10px 12px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 5,
+                    padding: "3px 5px",
                     borderRadius: 10,
-                    border: applePencilMode
-                      ? "1px solid rgba(130,220,255,0.72)"
-                      : "1px solid rgba(255,255,255,0.14)",
-                    background: applePencilMode
-                      ? "rgba(0,140,255,0.18)"
-                      : "rgba(255,255,255,0.06)",
-                    color: "#fff",
-                    cursor: "pointer",
-                    fontWeight: 800,
-                    fontSize: 12,
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background: "rgba(255,255,255,0.05)",
                   }}
+                  aria-label="PDF zoom controls"
                 >
-                  {applePencilMode ? "Apple Pencil On" : "Apple Pencil Off"}
-                </button>
-                {pdfAnnotationTool === "shape" ? (
                   <button
                     type="button"
-                    onClick={() => setShowPdfShapePicker(true)}
+                    onClick={() => {
+                      const nextZoom =
+                        [...PDF_CANVAS_ZOOM_OPTIONS]
+                          .reverse()
+                          .find((zoomOption) => zoomOption < pdfCanvasZoom) ||
+                        PDF_CANVAS_ZOOM_MIN;
+                      setPdfCanvasZoom(nextZoom);
+                      setPdfPanMode(nextZoom > 1);
+                      setPdfPanActive(false);
+                    }}
+                    disabled={pdfCanvasZoom <= PDF_CANVAS_ZOOM_MIN}
                     style={{
-                      padding: "10px 12px",
-                      borderRadius: 10,
-                      border: "1px solid rgba(130,220,255,0.28)",
-                      background: "rgba(0,140,255,0.10)",
+                      minWidth: 36,
+                      minHeight: 34,
+                      borderRadius: 8,
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      background: "rgba(255,255,255,0.06)",
                       color: "#fff",
-                      cursor: "pointer",
+                      cursor:
+                        pdfCanvasZoom <= PDF_CANVAS_ZOOM_MIN ? "not-allowed" : "pointer",
+                      opacity: pdfCanvasZoom <= PDF_CANVAS_ZOOM_MIN ? 0.45 : 1,
+                      fontSize: 20,
+                      lineHeight: 1,
+                    }}
+                    aria-label="Zoom PDF out"
+                  >
+                    −
+                  </button>
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 7,
+                      minHeight: 34,
+                      paddingLeft: 4,
+                      fontSize: 11,
                       fontWeight: 800,
-                      fontSize: 12,
                     }}
                   >
-                    Shape: {PDF_SHAPE_OPTIONS.find((option) => option.key === pdfShapeType)?.label || "Shape"}
+                    <span>Zoom</span>
+                    <select
+                      value={String(pdfCanvasZoom)}
+                      onChange={(event) => {
+                        const nextZoom = Number(event.target.value);
+                        if (!Number.isFinite(nextZoom)) return;
+                        setPdfCanvasZoom(
+                          Math.max(
+                            PDF_CANVAS_ZOOM_MIN,
+                            Math.min(PDF_CANVAS_ZOOM_MAX, nextZoom)
+                          )
+                        );
+                        setPdfPanMode(nextZoom > 1);
+                        setPdfPanActive(false);
+                      }}
+                      style={{
+                        minWidth: 112,
+                        minHeight: 34,
+                        padding: "5px 28px 5px 9px",
+                        borderRadius: 8,
+                        border: "1px solid rgba(255,255,255,0.14)",
+                        background: "#111720",
+                        color: "#fff",
+                        cursor: "pointer",
+                        fontWeight: 800,
+                        fontSize: 11,
+                      }}
+                      aria-label="PDF zoom level"
+                    >
+                      {PDF_CANVAS_ZOOM_OPTIONS.map((zoomOption) => (
+                        <option key={`pdf-zoom-${zoomOption}`} value={String(zoomOption)}>
+                          {zoomOption === 1
+                            ? "Fit (100%)"
+                            : `${Math.round(zoomOption * 100)}%`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextZoom =
+                        PDF_CANVAS_ZOOM_OPTIONS.find(
+                          (zoomOption) => zoomOption > pdfCanvasZoom
+                        ) || PDF_CANVAS_ZOOM_MAX;
+                      setPdfCanvasZoom(nextZoom);
+                      setPdfPanMode(nextZoom > 1);
+                      setPdfPanActive(false);
+                    }}
+                    disabled={pdfCanvasZoom >= PDF_CANVAS_ZOOM_MAX}
+                    style={{
+                      minWidth: 36,
+                      minHeight: 34,
+                      borderRadius: 8,
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      background: "rgba(255,255,255,0.06)",
+                      color: "#fff",
+                      cursor:
+                        pdfCanvasZoom >= PDF_CANVAS_ZOOM_MAX ? "not-allowed" : "pointer",
+                      opacity: pdfCanvasZoom >= PDF_CANVAS_ZOOM_MAX ? 0.45 : 1,
+                      fontSize: 20,
+                      lineHeight: 1,
+                    }}
+                    aria-label="Zoom PDF in"
+                  >
+                    +
                   </button>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={undoCurrentEdit}
-                  disabled={!canUndo}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: "1px solid rgba(255,255,255,0.14)",
-                    background: "rgba(255,255,255,0.06)",
-                    color: "#fff",
-                    cursor: canUndo ? "pointer" : "not-allowed",
-                    fontWeight: 800,
-                    fontSize: 12,
-                    opacity: canUndo ? 1 : 0.5,
-                  }}
-                >
-                  Undo
-                </button>
-                <button
-                  type="button"
-                  onClick={redoCurrentEdit}
-                  disabled={!canRedo}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: "1px solid rgba(255,255,255,0.14)",
-                    background: "rgba(255,255,255,0.06)",
-                    color: "#fff",
-                    cursor: canRedo ? "pointer" : "not-allowed",
-                    fontWeight: 800,
-                    fontSize: 12,
-                    opacity: canRedo ? 1 : 0.5,
-                  }}
-                >
-                  Redo
-                </button>
-                <div style={{ fontSize: 11, opacity: 0.72, marginLeft: "auto" }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPdfPanMode((previous) => !previous);
+                      setPdfPanActive(false);
+                      pdfPanSessionRef.current = null;
+                    }}
+                    disabled={pdfCanvasZoom <= 1}
+                    style={{
+                      minHeight: 34,
+                      padding: "5px 10px",
+                      borderRadius: 8,
+                      border: pdfPanMode
+                        ? "1px solid rgba(130,220,255,0.78)"
+                        : "1px solid rgba(255,255,255,0.12)",
+                      background: pdfPanMode
+                        ? "rgba(0,140,255,0.20)"
+                        : "rgba(255,255,255,0.06)",
+                      color: "#fff",
+                      cursor: pdfCanvasZoom <= 1 ? "not-allowed" : "pointer",
+                      opacity: pdfCanvasZoom <= 1 ? 0.45 : 1,
+                      fontWeight: 800,
+                      fontSize: 11,
+                    }}
+                    aria-pressed={pdfPanMode}
+                  >
+                    {pdfPanMode ? "Pan On" : "Pan"}
+                  </button>
+                  <span
+                    style={{
+                      minWidth: 60,
+                      padding: "5px 7px",
+                      borderRadius: 8,
+                      background: "rgba(255,255,255,0.05)",
+                      color: "#fff",
+                      fontSize: 9,
+                      fontWeight: 800,
+                      textAlign: "center",
+                      whiteSpace: "nowrap",
+                      opacity: 0.78,
+                    }}
+                    aria-live="polite"
+                  >
+                    {!pdfSourceFile
+                      ? "Original"
+                      : pdfHighResolutionLoading
+                      ? "Sharpening..."
+                      : pdfHighResolutionUrl && pdfHighResolutionPage === pdfPageNumber
+                      ? `HQ ${Math.round(pdfHighResolutionDimension / 100) / 10}K`
+                      : "Standard"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, opacity: 0.72 }}>
                   {pdfTouchGestureActive
                     ? "Gesture active: pan/zoom locked from drawing."
                     : pdfStylusDrawingActive
@@ -25646,17 +25822,20 @@ export default function App() {
                 position: "absolute",
                 inset: 0,
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
+                alignItems: pdfCanvasZoom > 1 ? "flex-start" : "center",
+                justifyContent: pdfCanvasZoom > 1 ? "flex-start" : "center",
                 padding: 18,
                 touchAction:
-                  pdfStylusDrawingActive
+                  pdfPanMode || pdfStylusDrawingActive
                     ? "none"
                     : isCompactTouchUi || pdfTouchGestureActive
                     ? "pan-x pan-y pinch-zoom"
                     : "none",
-                cursor:
-                  pdfAnnotationTool === "text"
+                cursor: pdfPanMode
+                  ? pdfPanActive
+                    ? "grabbing"
+                    : "grab"
+                  : pdfAnnotationTool === "text"
                     ? "text"
                     : pdfAnnotationTool === "eraser"
                     ? "cell"
@@ -25673,6 +25852,8 @@ export default function App() {
                   background: "#fff",
                   borderRadius: 8,
                   boxShadow: "0 24px 70px rgba(0,0,0,0.45)",
+                  transform: `scale(${pdfCanvasZoom})`,
+                  transformOrigin: "top left",
                 }}
               >
                 <img
@@ -25694,6 +25875,27 @@ export default function App() {
                     borderRadius: 8,
                   }}
                 />
+                {pdfHighResolutionUrl && pdfHighResolutionPage === pdfPageNumber ? (
+                  <img
+                    src={pdfHighResolutionUrl}
+                    alt=""
+                    aria-hidden="true"
+                    draggable={false}
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      width: "100%",
+                      height: "100%",
+                      display: "block",
+                      objectFit: "fill",
+                      userSelect: "none",
+                      WebkitUserDrag: "none",
+                      pointerEvents: "none",
+                      borderRadius: 8,
+                      imageRendering: "auto",
+                    }}
+                  />
+                ) : null}
                 <svg
                   style={{
                     position: "absolute",
@@ -25708,6 +25910,56 @@ export default function App() {
                     pdfRenderMetrics.displayWidth || 1
                   )} ${Math.max(1, pdfRenderMetrics.displayHeight || 1)}`}
                 >
+                  <defs>
+                    <filter id="pdf-pencil-grain" x="-8%" y="-20%" width="116%" height="140%">
+                      <feTurbulence
+                        type="fractalNoise"
+                        baseFrequency="0.9"
+                        numOctaves="2"
+                        seed="7"
+                        result="pencilNoise"
+                      />
+                      <feDisplacementMap
+                        in="SourceGraphic"
+                        in2="pencilNoise"
+                        scale="0.75"
+                        xChannelSelector="R"
+                        yChannelSelector="G"
+                      />
+                    </filter>
+                    <filter id="pdf-marker-felt" x="-6%" y="-18%" width="112%" height="136%">
+                      <feTurbulence
+                        type="fractalNoise"
+                        baseFrequency="0.22 0.7"
+                        numOctaves="1"
+                        seed="12"
+                        result="markerNoise"
+                      />
+                      <feDisplacementMap
+                        in="SourceGraphic"
+                        in2="markerNoise"
+                        scale="0.45"
+                        xChannelSelector="R"
+                        yChannelSelector="B"
+                      />
+                    </filter>
+                    <filter id="pdf-crayon-wax" x="-10%" y="-25%" width="120%" height="150%">
+                      <feTurbulence
+                        type="fractalNoise"
+                        baseFrequency="0.52"
+                        numOctaves="3"
+                        seed="19"
+                        result="crayonNoise"
+                      />
+                      <feDisplacementMap
+                        in="SourceGraphic"
+                        in2="crayonNoise"
+                        scale="1.6"
+                        xChannelSelector="R"
+                        yChannelSelector="G"
+                      />
+                    </filter>
+                  </defs>
                   {pdfDisplayAnnotations.map((annotation) => {
                     const isSelected =
                       String(selectedPdfAnnotationId || "") ===
@@ -25793,7 +26045,7 @@ export default function App() {
                     }
                     return (
                       <g key={`pdf-annotation-${annotation.id}`}>
-                        {textureStyle.edgeFilterId ? (
+                        {textureStyle.edgeWidthScale > 0 ? (
                           <polyline
                             points={pointsAttr}
                             fill="none"
@@ -25806,7 +26058,7 @@ export default function App() {
                               0.06,
                               annotation.opacity * textureStyle.edgeOpacityScale
                             )}
-                            strokeLinecap={annotation.kind === "marker" ? "square" : "round"}
+                            strokeLinecap={annotation.kind === "highlighter" ? "square" : "round"}
                             strokeLinejoin="round"
                             filter={textureStyle.edgeFilterId}
                             style={{ mixBlendMode: textureStyle.overlayBlend }}
@@ -25818,7 +26070,7 @@ export default function App() {
                           stroke={annotation.color}
                           strokeWidth={annotation.width}
                           strokeOpacity={annotation.opacity}
-                          strokeLinecap={annotation.kind === "marker" ? "square" : "round"}
+                          strokeLinecap={annotation.kind === "highlighter" ? "square" : "round"}
                           strokeLinejoin="round"
                           strokeDasharray={isSelected ? "8 5" : undefined}
                           filter={textureStyle.filterId || undefined}
@@ -25837,7 +26089,7 @@ export default function App() {
                               0.08,
                               annotation.opacity * textureStyle.textureOpacityScale
                             )}
-                            strokeLinecap={annotation.kind === "marker" ? "square" : "round"}
+                            strokeLinecap={annotation.kind === "highlighter" ? "square" : "round"}
                             strokeLinejoin="round"
                             strokeDasharray={
                               isSelected ? "8 5" : textureStyle.textureDash
@@ -25925,7 +26177,7 @@ export default function App() {
                             strokeWidth={Math.max(1, pdfDraftDisplayAnnotation.width * 0.18)}
                           />
                         ) : null}
-                        {getPdfStrokeTextureStyle(pdfDraftDisplayAnnotation.kind).edgeFilterId ? (
+                        {getPdfStrokeTextureStyle(pdfDraftDisplayAnnotation.kind).edgeWidthScale > 0 ? (
                           <polyline
                             points={pdfDraftDisplayAnnotation.points
                               .map((point) => `${point[0]},${point[1]}`)
@@ -25945,7 +26197,7 @@ export default function App() {
                                   .edgeOpacityScale
                             )}
                             strokeLinecap={
-                              pdfDraftDisplayAnnotation.kind === "marker" ? "square" : "round"
+                              pdfDraftDisplayAnnotation.kind === "highlighter" ? "square" : "round"
                             }
                             strokeLinejoin="round"
                             filter={
@@ -25971,7 +26223,7 @@ export default function App() {
                           )}
                           strokeOpacity={pdfDraftDisplayAnnotation.opacity}
                           strokeLinecap={
-                            pdfDraftDisplayAnnotation.kind === "marker" ? "square" : "round"
+                            pdfDraftDisplayAnnotation.kind === "highlighter" ? "square" : "round"
                           }
                           strokeLinejoin="round"
                           filter={
@@ -26004,7 +26256,7 @@ export default function App() {
                                   .textureOpacityScale
                             )}
                             strokeLinecap={
-                              pdfDraftDisplayAnnotation.kind === "marker" ? "square" : "round"
+                              pdfDraftDisplayAnnotation.kind === "highlighter" ? "square" : "round"
                             }
                             strokeLinejoin="round"
                             strokeDasharray={
@@ -26820,6 +27072,51 @@ export default function App() {
                 flexWrap: "wrap",
               }}
             >
+              <select
+                value={true3DQualityPreset}
+                onChange={(event) => setTrue3DQualityPreset(event.target.value)}
+                aria-label="3D quality preset"
+                style={{
+                  padding: "6px 8px",
+                  borderRadius: 8,
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  background: "#111",
+                  color: "#fff",
+                  fontSize: 12,
+                  fontWeight: 700,
+                }}
+              >
+                <option value="auto">
+                  Quality: Auto ({getTrue3DQualityProfile("auto", isCompactTouchUi).name})
+                </option>
+                <option value="high">Quality: High</option>
+                <option value="balanced">Quality: Balanced</option>
+                <option value="performance">Quality: iPad / Performance</option>
+              </select>
+              {[
+                ["fit", "Fit Property"],
+                ["flat", "Flat"],
+                ["angled", "Angled"],
+                ["north", "North Up"],
+              ].map(([preset, label]) => (
+                <button
+                  key={`true-3d-camera-${preset}`}
+                  type="button"
+                  onClick={() => flyTrue3DCamera(preset)}
+                  style={{
+                    padding: "6px 8px",
+                    borderRadius: 8,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(255,255,255,0.08)",
+                    color: "#fff",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    fontWeight: 700,
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
               <span
                 style={{
                   fontSize: 12,

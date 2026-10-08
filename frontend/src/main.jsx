@@ -60,3 +60,29 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     </AppErrorBoundary>
   </React.StrictMode>
 );
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .getRegistrations()
+      .then((registrations) =>
+        Promise.all(
+          registrations.map((registration) => registration.unregister().catch(() => false))
+        )
+      )
+      .catch(() => []);
+
+    if ("caches" in window) {
+      window.caches
+        .keys()
+        .then((keys) =>
+          Promise.all(
+            keys
+              .filter((key) => key.startsWith("pt-"))
+              .map((key) => window.caches.delete(key).catch(() => false))
+          )
+        )
+        .catch(() => []);
+    }
+  });
+}
