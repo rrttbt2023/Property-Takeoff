@@ -13364,41 +13364,34 @@ export default function App() {
       return;
     }
 
-    const localEntries = (Array.isArray(projectLibrary) ? projectLibrary : []).filter(
-      (entry) =>
-        String(entry?.storageScope || "").trim().toLowerCase() !== "shared" &&
-        isValidProjectPayload(entry?.payload)
+    const localEntries = (Array.isArray(projectLibrary) ? projectLibrary : []).filter((entry) =>
+      isValidProjectPayload(entry?.payload)
     );
     if (!localEntries.length) {
-      pushToast("There are no browser-only projects to upload.", "info", 3600);
+      pushToast("There are no project payloads cached in this browser to sync.", "info", 4200);
       return;
     }
 
     setSharedFolderUploadState({ running: true, total: localEntries.length, completed: 0 });
     let uploaded = 0;
-    let skipped = 0;
+    let updated = 0;
+    let organized = 0;
+    let unchanged = 0;
     let failed = 0;
-    const uploadedById = new Map();
+    const syncedById = new Map();
 
     try {
       const remoteEntries = await listSharedProjects(SHARED_PROJECT_LIBRARY_FETCH_LIMIT);
-      const remoteIds = new Set(
+      const remoteEntriesById = new Map(
         (Array.isArray(remoteEntries) ? remoteEntries : [])
-          .map((entry) => String(entry?.id || "").trim())
-          .filter(Boolean)
+          .map((entry) => [String(entry?.id || "").trim(), entry])
+          .filter(([id]) => !!id)
       );
 
-      for (const entry of localEntries) {
+      let stopForAuth = false;
+      for (let entryIndex = 0; entryIndex < localEntries.length; entryIndex += 1) {
+        const entry = localEntries[entryIndex];
         const id = String(entry?.id || "").trim();
-        if (!id || remoteIds.has(id)) {
-          skipped += 1;
-          setSharedFolderUploadState((state) => ({
-            ...state,
-            completed: Math.min(state.total, state.completed + 1),
-          }));
-          continue;
-        }
-
         const folderName =
           String(entry?.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME;
         const workflow =
@@ -13407,7 +13400,7 @@ export default function App() {
             .toLowerCase() === WORKFLOW_MODE_PDF
             ? WORKFLOW_MODE_PDF
             : WORKFLOW_MODE_LOCATION;
-        const payload = {
+        const localPayload = {
           ...entry.payload,
           projectName:
             String(entry?.projectName || entry?.payload?.projectName || "").trim() ||
@@ -13417,17 +13410,94 @@ export default function App() {
         };
 
         try {
+          if (!id) {
+            throw new Error("Local project is missing its project ID.");
+          }
+
+          const remoteSummary = remoteEntriesById.get(id);
+          if (!remoteSummary) {
+            const summary = await saveSharedProject({
+              id,
+              projectName: localPayload.projectName,
+              savedAt: entry?.savedAt || localPayload.savedAt || null,
+              polygonCount: countProjectPayloadPolygons(localPayload),
+              hasBoundary: !!localPayload.boundary,
+              payload: localPayload,
+            });
+            uploaded += 1;
+            remoteEntriesById.set(id, summary);
+            syncedById.set(id, {
+              summary,
+              payload: localPayload,
+              folderName,
+              workflow,
+            });
+            continue;
+          }
+
+          const remoteProject = await getSharedProject(id);
+          if (!isValidProjectPayload(remoteProject?.payload)) {
+            throw new Error("The existing shared project payload is invalid.");
+          }
+          const remotePayload = remoteProject.payload;
+          const localEditedAt = Date.parse(
+            String(entry?.lastEditedAt || entry?.savedAt || localPayload.savedAt || "")
+          );
+          const remoteEditedAt = Date.parse(
+            String(
+              remoteProject?.last_edited_at ||
+                remoteProject?.saved_at ||
+                remotePayload.savedAt ||
+                ""
+            )
+          );
+          const localIsNewer =
+            Number.isFinite(localEditedAt) &&
+            (!Number.isFinite(remoteEditedAt) || localEditedAt > remoteEditedAt);
+          const remoteFolderName =
+            String(remotePayload?.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME;
+          const remoteWorkflow =
+            String(remotePayload?.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
+              ? WORKFLOW_MODE_PDF
+              : WORKFLOW_MODE_LOCATION;
+          const metadataChanged =
+            remoteFolderName !== folderName || remoteWorkflow !== workflow;
+          const contentChanged =
+            localIsNewer &&
+            buildProjectPayloadSignature(localPayload) !==
+              buildProjectPayloadSignature(remotePayload);
+
+          if (!metadataChanged && !contentChanged) {
+            unchanged += 1;
+            syncedById.set(id, {
+              summary: remoteProject,
+              payload: remotePayload,
+              folderName,
+              workflow,
+            });
+            continue;
+          }
+
+          const payload = {
+            ...(contentChanged ? localPayload : remotePayload),
+            folderName,
+            workflowMode: workflow,
+          };
           const summary = await saveSharedProject({
             id,
-            projectName: payload.projectName,
-            savedAt: entry?.savedAt || payload.savedAt || null,
+            projectName:
+              String(payload?.projectName || remoteProject?.project_name || "").trim() ||
+              "Untitled Project",
+            savedAt: payload?.savedAt || remoteProject?.saved_at || null,
             polygonCount: countProjectPayloadPolygons(payload),
             hasBoundary: !!payload.boundary,
+            baseRevision: Math.max(1, Number(remoteProject?.revision) || 1),
             payload,
           });
-          uploaded += 1;
-          remoteIds.add(id);
-          uploadedById.set(id, { summary, payload, folderName, workflow });
+          if (contentChanged) updated += 1;
+          else organized += 1;
+          remoteEntriesById.set(id, summary);
+          syncedById.set(id, { summary, payload, folderName, workflow });
         } catch (error) {
           failed += 1;
           if (isAuthError(error)) {
@@ -13437,8 +13507,8 @@ export default function App() {
               expiresAt: "",
             }));
             setSharedProjectLibraryStatus("locked");
-            failed += Math.max(0, localEntries.length - uploaded - skipped - failed);
-            break;
+            failed += Math.max(0, localEntries.length - entryIndex - 1);
+            stopForAuth = true;
           }
         } finally {
           setSharedFolderUploadState((state) => ({
@@ -13446,14 +13516,15 @@ export default function App() {
             completed: Math.min(state.total, state.completed + 1),
           }));
         }
+        if (stopForAuth) break;
       }
 
-      if (uploadedById.size) {
+      if (syncedById.size) {
         setProjectLibrary((previous) =>
           (Array.isArray(previous) ? previous : []).map((entry) => {
-            const uploadedEntry = uploadedById.get(String(entry?.id || "").trim());
-            if (!uploadedEntry) return entry;
-            const { summary, payload, folderName, workflow } = uploadedEntry;
+            const syncedEntry = syncedById.get(String(entry?.id || "").trim());
+            if (!syncedEntry) return entry;
+            const { summary, payload, folderName, workflow } = syncedEntry;
             return {
               ...entry,
               payload,
@@ -13472,10 +13543,17 @@ export default function App() {
       }
 
       await refreshSharedProjectLibrary({ quiet: true });
-      const parts = [`Uploaded ${uploaded} project${uploaded === 1 ? "" : "s"}`];
-      if (skipped) parts.push(`skipped ${skipped} already in Shared`);
+      const parts = [];
+      if (uploaded) parts.push(`uploaded ${uploaded} new project${uploaded === 1 ? "" : "s"}`);
+      if (updated) parts.push(`updated ${updated} from newer local data`);
+      if (organized) parts.push(`organized ${organized} existing project${organized === 1 ? "" : "s"}`);
+      if (unchanged) parts.push(`${unchanged} already current`);
       if (failed) parts.push(`${failed} failed`);
-      pushToast(`${parts.join(", ")}.`, failed ? "warn" : "info", 7000);
+      pushToast(
+        `${parts.length ? parts.join(", ") : "No projects needed changes"}.`,
+        failed ? "warn" : "info",
+        7000
+      );
     } catch (error) {
       if (isAuthError(error)) {
         setSharedAuth((previous) => ({

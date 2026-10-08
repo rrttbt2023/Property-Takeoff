@@ -245,6 +245,8 @@ def get_shared_project(
         polygon_count=summary.polygon_count,
         has_boundary=summary.has_boundary,
         revision=summary.revision,
+        folder_name=summary.folder_name,
+        workflow_mode=summary.workflow_mode,
         payload=payload,
     )
 

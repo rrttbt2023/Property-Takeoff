@@ -471,6 +471,18 @@ export function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
     const cachedPayload = payloadById.get(id) || previousEntry?.payload || null;
     const payload =
       !revision || !previousRevision || revision === previousRevision ? cachedPayload : null;
+    const previousFolderName = String(
+      previousEntry?.folderName ||
+        previousEntry?.folder ||
+        cachedPayload?.folderName ||
+        ""
+    ).trim();
+    const remoteFolderName = String(entry?.folder_name || entry?.folderName || "").trim();
+    const folderName =
+      remoteFolderName &&
+      (remoteFolderName !== DEFAULT_PROJECT_FOLDER_NAME || !previousFolderName)
+        ? remoteFolderName
+        : previousFolderName || remoteFolderName || DEFAULT_PROJECT_FOLDER_NAME;
     return {
       id,
       projectName: projectName || "Untitled Project",
@@ -490,16 +502,7 @@ export function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
         WORKFLOW_MODE_PDF
           ? WORKFLOW_MODE_PDF
           : WORKFLOW_MODE_LOCATION,
-      folderName:
-        String(
-          entry?.folder_name ||
-            entry?.folderName ||
-            previousEntry?.folderName ||
-            previousEntry?.folder ||
-            payload?.folderName ||
-            ""
-        ).trim() ||
-        DEFAULT_PROJECT_FOLDER_NAME,
+      folderName,
       polygonCount,
       hasBoundary,
       payload,
