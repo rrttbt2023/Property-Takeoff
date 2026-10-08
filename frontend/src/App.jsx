@@ -4408,6 +4408,11 @@ export default function App() {
   });
   const [sharedProjectLibrarySyncing, setSharedProjectLibrarySyncing] = useState(false);
   const [sharedProjectQueueSyncing, setSharedProjectQueueSyncing] = useState(false);
+  const [sharedFolderUploadState, setSharedFolderUploadState] = useState({
+    running: false,
+    total: 0,
+    completed: 0,
+  });
   const [securityAuditEvents, setSecurityAuditEvents] = useState([]);
   const [securityAuditSyncing, setSecurityAuditSyncing] = useState(false);
   const sharedAccessToken = String(sharedAuth?.token || "").trim();
@@ -11873,10 +11878,18 @@ export default function App() {
 
   const buildProjectPayload = useCallback(() => {
     const snapshot = buildLayerSnapshot();
+    const payloadProjectId = buildProjectLibraryId(projectName || "Untitled Project");
+    const currentFolderName =
+      String(
+        (Array.isArray(projectLibrary) ? projectLibrary : []).find(
+          (entry) => String(entry?.id || "").trim() === payloadProjectId
+        )?.folderName || ""
+      ).trim() || DEFAULT_PROJECT_FOLDER_NAME;
     return {
       version: PROJECT_SCHEMA_VERSION,
       savedAt: new Date().toISOString(),
       projectName: (projectName || "").trim(),
+      folderName: currentFolderName,
       boundary,
       layerFeatures: snapshot,
       activeLayer,
@@ -11917,6 +11930,7 @@ export default function App() {
     lockNonActiveLayers,
     maskOutsideBoundary,
     projectName,
+    projectLibrary,
     terrain3d,
     terrainExaggeration,
     objects3d,
@@ -13342,6 +13356,158 @@ export default function App() {
       )
     );
   }, [homeProjectTab]);
+
+  const uploadAllLocalFolders = useCallback(async () => {
+    if (sharedFolderUploadState.running) return;
+    if (!sharedAccessAuthenticated) {
+      pushToast("Sign in to Shared Projects before uploading local folders.", "warn", 5200);
+      return;
+    }
+
+    const localEntries = (Array.isArray(projectLibrary) ? projectLibrary : []).filter(
+      (entry) =>
+        String(entry?.storageScope || "").trim().toLowerCase() !== "shared" &&
+        isValidProjectPayload(entry?.payload)
+    );
+    if (!localEntries.length) {
+      pushToast("There are no browser-only projects to upload.", "info", 3600);
+      return;
+    }
+
+    setSharedFolderUploadState({ running: true, total: localEntries.length, completed: 0 });
+    let uploaded = 0;
+    let skipped = 0;
+    let failed = 0;
+    const uploadedById = new Map();
+
+    try {
+      const remoteEntries = await listSharedProjects(SHARED_PROJECT_LIBRARY_FETCH_LIMIT);
+      const remoteIds = new Set(
+        (Array.isArray(remoteEntries) ? remoteEntries : [])
+          .map((entry) => String(entry?.id || "").trim())
+          .filter(Boolean)
+      );
+
+      for (const entry of localEntries) {
+        const id = String(entry?.id || "").trim();
+        if (!id || remoteIds.has(id)) {
+          skipped += 1;
+          setSharedFolderUploadState((state) => ({
+            ...state,
+            completed: Math.min(state.total, state.completed + 1),
+          }));
+          continue;
+        }
+
+        const folderName =
+          String(entry?.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME;
+        const workflow =
+          String(entry?.workflowMode || entry?.payload?.workflowMode || "")
+            .trim()
+            .toLowerCase() === WORKFLOW_MODE_PDF
+            ? WORKFLOW_MODE_PDF
+            : WORKFLOW_MODE_LOCATION;
+        const payload = {
+          ...entry.payload,
+          projectName:
+            String(entry?.projectName || entry?.payload?.projectName || "").trim() ||
+            "Untitled Project",
+          folderName,
+          workflowMode: workflow,
+        };
+
+        try {
+          const summary = await saveSharedProject({
+            id,
+            projectName: payload.projectName,
+            savedAt: entry?.savedAt || payload.savedAt || null,
+            polygonCount: countProjectPayloadPolygons(payload),
+            hasBoundary: !!payload.boundary,
+            payload,
+          });
+          uploaded += 1;
+          remoteIds.add(id);
+          uploadedById.set(id, { summary, payload, folderName, workflow });
+        } catch (error) {
+          failed += 1;
+          if (isAuthError(error)) {
+            setSharedAuth((previous) => ({
+              token: "",
+              username: String(previous?.username || sharedLoginUsername || "").trim(),
+              expiresAt: "",
+            }));
+            setSharedProjectLibraryStatus("locked");
+            failed += Math.max(0, localEntries.length - uploaded - skipped - failed);
+            break;
+          }
+        } finally {
+          setSharedFolderUploadState((state) => ({
+            ...state,
+            completed: Math.min(state.total, state.completed + 1),
+          }));
+        }
+      }
+
+      if (uploadedById.size) {
+        setProjectLibrary((previous) =>
+          (Array.isArray(previous) ? previous : []).map((entry) => {
+            const uploadedEntry = uploadedById.get(String(entry?.id || "").trim());
+            if (!uploadedEntry) return entry;
+            const { summary, payload, folderName, workflow } = uploadedEntry;
+            return {
+              ...entry,
+              payload,
+              folderName,
+              workflowMode: workflow,
+              storageScope: "shared",
+              savedBy: String(summary?.saved_by || sharedAuth?.username || "").trim(),
+              lastEditedAt: String(
+                summary?.last_edited_at || summary?.saved_at || payload.savedAt || ""
+              ).trim(),
+              revision: Math.max(1, Number(summary?.revision) || 1),
+            };
+          })
+        );
+        setSharedProjectLibraryStatus("connected");
+      }
+
+      await refreshSharedProjectLibrary({ quiet: true });
+      const parts = [`Uploaded ${uploaded} project${uploaded === 1 ? "" : "s"}`];
+      if (skipped) parts.push(`skipped ${skipped} already in Shared`);
+      if (failed) parts.push(`${failed} failed`);
+      pushToast(`${parts.join(", ")}.`, failed ? "warn" : "info", 7000);
+    } catch (error) {
+      if (isAuthError(error)) {
+        setSharedAuth((previous) => ({
+          token: "",
+          username: String(previous?.username || sharedLoginUsername || "").trim(),
+          expiresAt: "",
+        }));
+        setSharedProjectLibraryStatus("locked");
+      } else {
+        setSharedProjectLibraryStatus("offline");
+      }
+      pushToast(
+        `Folder upload could not start: ${error?.message || "shared backend unavailable"}.`,
+        "error",
+        6500
+      );
+    } finally {
+      setSharedFolderUploadState((state) => ({
+        ...state,
+        running: false,
+        completed: state.total,
+      }));
+    }
+  }, [
+    projectLibrary,
+    pushToast,
+    refreshSharedProjectLibrary,
+    sharedAccessAuthenticated,
+    sharedAuth?.username,
+    sharedFolderUploadState.running,
+    sharedLoginUsername,
+  ]);
 
   const createHomeFolder = useCallback(() => {
     const normalized = String(homeNewFolderName || "").trim();
@@ -19959,6 +20125,8 @@ export default function App() {
           sharedSyncing={sharedProjectQueueSyncing}
           onRefreshShared={() => refreshSharedProjectLibrary({ quiet: false })}
           onSyncShared={() => syncSharedProjectQueue({ quiet: false })}
+          folderUploadState={sharedFolderUploadState}
+          onUploadAllFolders={uploadAllLocalFolders}
           recoveryRecords={homeProjectRecoveries}
           recoveryStorageState={offlineCacheStatus}
           recoveryRefreshing={homeRecoveryRefreshing}

@@ -108,6 +108,12 @@ def _to_summary(record: dict, project_id: str) -> SharedProjectSummary:
     has_boundary = record.get("has_boundary")
     if not isinstance(has_boundary, bool):
         has_boundary = _payload_has_boundary(payload_dict)
+    folder_name = str(payload_dict.get("folderName") or "").strip() or "Unfiled"
+    workflow_mode = (
+        "pdf"
+        if str(payload_dict.get("workflowMode") or "").strip().lower() == "pdf"
+        else "location"
+    )
     return SharedProjectSummary(
         id=_normalize_project_id(project_id),
         project_name=project_name,
@@ -117,6 +123,8 @@ def _to_summary(record: dict, project_id: str) -> SharedProjectSummary:
         polygon_count=max(0, int(polygon_count)),
         has_boundary=bool(has_boundary),
         revision=max(1, int(record.get("revision") or 1)),
+        folder_name=folder_name[:240],
+        workflow_mode=workflow_mode,
     )
 
 

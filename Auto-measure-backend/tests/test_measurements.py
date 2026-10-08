@@ -116,6 +116,8 @@ def test_shared_project_revisions_and_polygon_drop_guard() -> None:
         payload = {
             "version": 1,
             "projectName": "Revision Safety",
+            "folderName": "Training Properties",
+            "workflowMode": "location",
             "layerFeatures": {
                 "plowable": many_polygons,
                 "sidewalks": [],
@@ -135,6 +137,8 @@ def test_shared_project_revisions_and_polygon_drop_guard() -> None:
         )
         assert create_response.status_code == 200
         assert create_response.json()["revision"] == 1
+        assert create_response.json()["folder_name"] == "Training Properties"
+        assert create_response.json()["workflow_mode"] == "location"
 
         versions_response = client.get(
             f"/api/projects/{project_id}/versions",

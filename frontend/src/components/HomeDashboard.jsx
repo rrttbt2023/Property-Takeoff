@@ -313,6 +313,8 @@ function HomeDashboard({
   sharedSyncing,
   onRefreshShared,
   onSyncShared,
+  folderUploadState,
+  onUploadAllFolders,
   recoveryRecords,
   recoveryStorageState,
   recoveryRefreshing,
@@ -327,6 +329,11 @@ function HomeDashboard({
   const mainRef = useRef(null);
   const recentProjects = useMemo(() => sortedProjects(projects), [projects]);
   const recentProject = recentProjects[0] || null;
+  const localProjectCount = recentProjects.filter(
+    (entry) =>
+      String(entry?.storageScope || "").trim().toLowerCase() !== "shared" &&
+      entry?.payload
+  ).length;
   const [selectedPreviewProjectId, setSelectedPreviewProjectId] = useState("");
   const [activeNavigation, setActiveNavigation] = useState("dashboard");
   const [folderMessage, setFolderMessage] = useState("");
@@ -669,6 +676,22 @@ function HomeDashboard({
         <section className="hd-dashboard-folders">
           <div className="hd-dashboard-folder-heading">
             <SectionTitle title="Project Folders" action="Manage Folders" onAction={showFolderTools} />
+            <button
+              type="button"
+              className="hd-button hd-button-outline hd-folder-upload"
+              onClick={onUploadAllFolders}
+              disabled={
+                !sharedAuthenticated ||
+                folderUploadState?.running ||
+                localProjectCount === 0
+              }
+              title={!sharedAuthenticated ? "Sign in to Shared Projects first" : "Upload every browser-only project and preserve its folder"}
+            >
+              <Icon name="upload" size={17} />
+              {folderUploadState?.running
+                ? `Uploading ${folderUploadState.completed}/${folderUploadState.total}`
+                : `Upload All Folders${localProjectCount ? ` (${localProjectCount})` : ""}`}
+            </button>
             <div className="hd-mode-tabs" aria-label="Dashboard folder type">
               <button type="button" className={projectTab === WORKFLOW_MODE_LOCATION ? "active" : ""} onClick={() => onProjectTabChange(WORKFLOW_MODE_LOCATION)}>Location</button>
               <button type="button" className={projectTab === WORKFLOW_MODE_PDF ? "active" : ""} onClick={() => onProjectTabChange(WORKFLOW_MODE_PDF)}>PDF / Image</button>
@@ -721,6 +744,22 @@ function HomeDashboard({
           <section className="hd-page">
             <div className="hd-page-intro hd-folder-page-header">
               <div><span className="hd-page-kicker">Project organization</span><h2>Folders</h2><p>Create service-area or team folders, then open one to see only its projects.</p></div>
+              <button
+                type="button"
+                className="hd-button hd-button-outline hd-folder-upload"
+                onClick={onUploadAllFolders}
+                disabled={
+                  !sharedAuthenticated ||
+                  folderUploadState?.running ||
+                  localProjectCount === 0
+                }
+                title={!sharedAuthenticated ? "Sign in to Shared Projects first" : "Upload every browser-only project and preserve its folder"}
+              >
+                <Icon name="upload" size={17} />
+                {folderUploadState?.running
+                  ? `Uploading ${folderUploadState.completed}/${folderUploadState.total}`
+                  : `Upload All Folders${localProjectCount ? ` (${localProjectCount})` : ""}`}
+              </button>
               <div className="hd-mode-tabs hd-folder-mode-tabs">
                 <button type="button" className={projectTab === WORKFLOW_MODE_LOCATION ? "active" : ""} onClick={() => onProjectTabChange(WORKFLOW_MODE_LOCATION)}>Location</button>
                 <button type="button" className={projectTab === WORKFLOW_MODE_PDF ? "active" : ""} onClick={() => onProjectTabChange(WORKFLOW_MODE_PDF)}>PDF / Image</button>

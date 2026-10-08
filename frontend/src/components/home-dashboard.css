@@ -1246,6 +1246,11 @@
   margin-left: auto;
 }
 
+.hd-folder-upload {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .hd-folder-page-create {
   flex: 1 1 390px;
   max-width: 470px;

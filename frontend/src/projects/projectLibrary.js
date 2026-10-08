@@ -88,7 +88,7 @@ export function readStoredProjectLibrary() {
             ? WORKFLOW_MODE_PDF
             : WORKFLOW_MODE_LOCATION,
         folderName:
-          String(entry?.folderName || entry?.folder || "").trim() ||
+          String(entry?.folderName || entry?.folder || payload?.folderName || "").trim() ||
           DEFAULT_PROJECT_FOLDER_NAME,
         polygonCount: Number.isFinite(Number(entry?.polygonCount))
           ? Math.max(0, Number(entry.polygonCount))
@@ -383,7 +383,7 @@ export function buildProjectLibraryEntryFromPayload(
         : "local",
     workflowMode,
     folderName:
-      String(metadata?.folderName || metadata?.folder || "").trim() ||
+      String(metadata?.folderName || metadata?.folder || payload?.folderName || "").trim() ||
       DEFAULT_PROJECT_FOLDER_NAME,
     polygonCount: countProjectPayloadPolygons(payload),
     hasBoundary: !!payload?.boundary,
@@ -480,12 +480,25 @@ export function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
       revision,
       storageScope: "shared",
       workflowMode:
-        String(previousEntry?.workflowMode || payload?.workflowMode || "").trim().toLowerCase() ===
+        String(
+          entry?.workflow_mode ||
+            entry?.workflowMode ||
+            previousEntry?.workflowMode ||
+            payload?.workflowMode ||
+            ""
+        ).trim().toLowerCase() ===
         WORKFLOW_MODE_PDF
           ? WORKFLOW_MODE_PDF
           : WORKFLOW_MODE_LOCATION,
       folderName:
-        String(previousEntry?.folderName || previousEntry?.folder || "").trim() ||
+        String(
+          entry?.folder_name ||
+            entry?.folderName ||
+            previousEntry?.folderName ||
+            previousEntry?.folder ||
+            payload?.folderName ||
+            ""
+        ).trim() ||
         DEFAULT_PROJECT_FOLDER_NAME,
       polygonCount,
       hasBoundary,

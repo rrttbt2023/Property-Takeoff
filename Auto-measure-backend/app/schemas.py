@@ -135,6 +135,8 @@ class SharedProjectSummary(BaseModel):
     polygon_count: int = Field(0, ge=0)
     has_boundary: bool = False
     revision: int = Field(1, ge=1)
+    folder_name: str = Field("Unfiled", max_length=240)
+    workflow_mode: str = Field("location", pattern="^(location|pdf)$")
 
 
 class SharedProjectRecord(SharedProjectSummary):
