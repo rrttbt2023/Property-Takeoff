@@ -233,6 +233,10 @@ export function saveSegmentationCorrection({ imageBlob, maskBlob, metadata }) {
   });
 }
 
+export function listLocalMigrationProjects(limit = 500) {
+  return request(`/api/projects/local-migration/export?limit=${encodeURIComponent(limit)}`);
+}
+
 export function listSharedProjects(limit = 100) {
   return sharedRequest(`/api/projects?limit=${encodeURIComponent(limit)}`, {
     headers: sharedAuthToken

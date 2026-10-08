@@ -25,6 +25,8 @@ Auto-measure-backend/.env.*
 
 # Local runtime data
 Auto-measure-backend/data/measurements.db
+Auto-measure-backend/data/*.db-shm
+Auto-measure-backend/data/*.db-wal
 Auto-measure-backend/data/shared_projects/
 
 # Training artifacts (too large for normal git hosting)

@@ -148,6 +148,13 @@ def test_shared_project_revisions_and_polygon_drop_guard() -> None:
         assert project_response.json()["folder_name"] == "Training Properties"
         assert project_response.json()["workflow_mode"] == "location"
 
+        migration_response = client.get("/api/projects/local-migration/export")
+        assert migration_response.status_code == 200
+        assert any(
+            record.get("id") == project_id and record.get("payload") == payload
+            for record in migration_response.json()
+        )
+
         versions_response = client.get(
             f"/api/projects/{project_id}/versions",
             headers=headers,

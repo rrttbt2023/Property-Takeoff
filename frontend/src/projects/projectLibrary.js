@@ -434,9 +434,17 @@ export function upsertProjectLibraryEntries(
 export function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
   const previous = Array.isArray(prevEntries) ? prevEntries : [];
   const remote = Array.isArray(remoteEntries) ? remoteEntries : [];
-  const localOnlyEntries = previous.filter(
-    (entry) => String(entry?.storageScope || "").trim().toLowerCase() !== "shared"
+  const remoteIds = new Set(
+    remote.map((entry) => String(entry?.id || "").trim()).filter(Boolean)
   );
+  const localOnlyEntries = previous
+    .filter(
+      (entry) =>
+        String(entry?.id || "").trim() &&
+        !remoteIds.has(String(entry.id).trim()) &&
+        isValidProjectPayload(entry?.payload)
+    )
+    .map((entry) => ({ ...entry, storageScope: "local", revision: 0 }));
   const payloadById = new Map(
     previous
       .filter((entry) => entry?.id && entry?.payload && isValidProjectPayload(entry.payload))

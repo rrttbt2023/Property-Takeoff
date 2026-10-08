@@ -23,6 +23,7 @@ import {
   getMeasurementHistory,
   getSegmentationStatus,
   loginSharedAccess,
+  listLocalMigrationProjects,
   listSharedProjectVersions,
   listSharedProjects,
   logoutSharedAccess,
@@ -13364,9 +13365,65 @@ export default function App() {
       return;
     }
 
-    const localEntries = (Array.isArray(projectLibrary) ? projectLibrary : []).filter((entry) =>
+    let localEntries = (Array.isArray(projectLibrary) ? projectLibrary : []).filter((entry) =>
       isValidProjectPayload(entry?.payload)
     );
+    if (import.meta.env.DEV) {
+      try {
+        const localBackendProjects = await listLocalMigrationProjects(
+          SHARED_PROJECT_LIBRARY_FETCH_LIMIT
+        );
+        const entriesById = new Map(
+          localEntries
+            .map((entry) => [String(entry?.id || "").trim(), entry])
+            .filter(([id]) => !!id)
+        );
+        for (const record of Array.isArray(localBackendProjects) ? localBackendProjects : []) {
+          const id = String(record?.id || "").trim();
+          const payload = record?.payload;
+          if (!id || !isValidProjectPayload(payload)) continue;
+          const candidate = {
+            id,
+            projectName:
+              String(record?.project_name || payload?.projectName || "").trim() ||
+              "Untitled Project",
+            savedAt: String(record?.saved_at || payload?.savedAt || "").trim(),
+            lastEditedAt: String(
+              record?.last_edited_at || record?.saved_at || payload?.savedAt || ""
+            ).trim(),
+            workflowMode:
+              String(payload?.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
+                ? WORKFLOW_MODE_PDF
+                : WORKFLOW_MODE_LOCATION,
+            folderName:
+              String(payload?.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME,
+            storageScope: "local",
+            payload,
+          };
+          const existing = entriesById.get(id);
+          const existingTimestamp = Date.parse(
+            String(existing?.lastEditedAt || existing?.savedAt || "")
+          );
+          const candidateTimestamp = Date.parse(
+            String(candidate.lastEditedAt || candidate.savedAt || "")
+          );
+          if (
+            !existing ||
+            !Number.isFinite(existingTimestamp) ||
+            (Number.isFinite(candidateTimestamp) && candidateTimestamp > existingTimestamp)
+          ) {
+            entriesById.set(id, candidate);
+          }
+        }
+        localEntries = [...entriesById.values()];
+      } catch (error) {
+        pushToast(
+          `Could not read the old local project database: ${error?.message || "local backend unavailable"}.`,
+          "warn",
+          6200
+        );
+      }
+    }
     if (!localEntries.length) {
       pushToast("There are no project payloads cached in this browser to sync.", "info", 4200);
       return;

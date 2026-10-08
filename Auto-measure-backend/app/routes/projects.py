@@ -1,3 +1,4 @@
+import os
 import re
 from datetime import UTC, datetime
 
@@ -156,6 +157,27 @@ def list_shared_projects(
             # Keep listing robust even if one migrated record is malformed.
             continue
     return summaries
+
+
+@router.get("/local-migration/export")
+def export_local_projects_for_migration(
+    request: Request,
+    limit: int = Query(MAX_PROJECTS_LIMIT, ge=1, le=MAX_PROJECTS_LIMIT),
+) -> list[dict]:
+    environment = str(os.getenv("AUTO_MEASURE_ENV", "")).strip().lower()
+    render_runtime = str(os.getenv("RENDER", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if environment in {"prod", "production"} or render_runtime:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    client_host = str(request.client.host if request.client else "").strip().lower()
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(status_code=403, detail="Local migration is only available on this Mac.")
+    return list_records(limit)
 
 
 @router.get("/{project_id}/versions", response_model=list[SharedProjectVersionSummary])
