@@ -13,6 +13,11 @@ export default defineConfig({
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
+      '/shared-api': {
+        target: 'https://property-takeoff.onrender.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/shared-api/, '/api'),
+      },
     },
   },
 })

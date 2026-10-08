@@ -2,7 +2,7 @@ const RAW_API_BASE = String(import.meta.env.VITE_API_BASE_URL || "").trim();
 const API_BASE_URL = RAW_API_BASE.replace(/\/+$/, "");
 const RAW_SHARED_API_BASE = String(
   import.meta.env.VITE_SHARED_API_BASE_URL ||
-    "https://property-takeoff.onrender.com"
+    (import.meta.env.DEV ? "/shared-api" : "https://property-takeoff.onrender.com")
 ).trim();
 const SHARED_API_BASE_URL = RAW_SHARED_API_BASE.replace(/\/+$/, "");
 let sharedAuthToken = "";
