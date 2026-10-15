@@ -71,6 +71,7 @@ cors_allow_origins = _parse_csv_env(
     [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://mckennasitemanagement.vercel.app",
     ],
 )
 cors_allow_origin_regex = os.getenv(
