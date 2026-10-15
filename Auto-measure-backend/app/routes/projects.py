@@ -22,7 +22,7 @@ from app.schemas import (
     SharedProjectVersionRecord,
     SharedProjectVersionSummary,
 )
-from app.services.shared_auth import require_shared_access
+from app.services.shared_auth import require_workspace_access
 
 router = APIRouter(
     prefix="/projects",
@@ -147,10 +147,11 @@ def _write_audit_safe(**kwargs) -> None:
 @router.get("", response_model=list[SharedProjectSummary])
 def list_shared_projects(
     limit: int = Query(100, ge=1, le=MAX_PROJECTS_LIMIT),
-    _: dict[str, str] = Depends(require_shared_access),
+    session: dict = Depends(require_workspace_access),
 ) -> list[SharedProjectSummary]:
     summaries: list[SharedProjectSummary] = []
-    for record in list_records(limit):
+    organization_id = str(session.get("organization_id") or "")
+    for record in list_records(limit, organization_id):
         try:
             summaries.append(_to_summary(record, str(record.get("id") or "")))
         except Exception:
@@ -184,7 +185,7 @@ def export_local_projects_for_migration(
 def list_shared_project_versions(
     project_id: str,
     limit: int = Query(100, ge=1, le=1000),
-    _: dict[str, str] = Depends(require_shared_access),
+    session: dict = Depends(require_workspace_access),
 ) -> list[SharedProjectVersionSummary]:
     normalized_id = _normalize_project_id(project_id)
     return [
@@ -197,7 +198,11 @@ def list_shared_project_versions(
             has_boundary=bool(item.get("has_boundary")),
             project_name=str(item.get("project_name") or "Untitled Project"),
         )
-        for item in list_versions(normalized_id, limit)
+        for item in list_versions(
+            normalized_id,
+            limit,
+            str(session.get("organization_id") or ""),
+        )
     ]
 
 
@@ -208,10 +213,14 @@ def list_shared_project_versions(
 def get_shared_project_version(
     project_id: str,
     revision: int,
-    _: dict[str, str] = Depends(require_shared_access),
+    session: dict = Depends(require_workspace_access),
 ) -> SharedProjectVersionRecord:
     normalized_id = _normalize_project_id(project_id)
-    record = get_version(normalized_id, revision)
+    record = get_version(
+        normalized_id,
+        revision,
+        str(session.get("organization_id") or ""),
+    )
     if not record:
         raise HTTPException(status_code=404, detail="Project revision not found.")
     return SharedProjectVersionRecord(
@@ -230,12 +239,13 @@ def get_shared_project_version(
 def get_shared_project(
     request: Request,
     project_id: str,
-    session: dict[str, str] = Depends(require_shared_access),
+    session: dict = Depends(require_workspace_access),
 ) -> SharedProjectRecord:
     username = str(session.get("username") or "unknown")
     ip_address, user_agent = _request_meta(request)
     normalized_id = _normalize_project_id(project_id)
-    record = get_record(normalized_id)
+    organization_id = str(session.get("organization_id") or "")
+    record = get_record(normalized_id, organization_id)
     if not record:
         _write_audit_safe(
             username=username,
@@ -278,13 +288,14 @@ def upsert_shared_project(
     request: Request,
     project_id: str,
     body: SharedProjectUpsertRequest,
-    session: dict[str, str] = Depends(require_shared_access),
+    session: dict = Depends(require_workspace_access),
 ) -> SharedProjectSummary:
     normalized_id = _normalize_project_id(project_id or body.id)
     now_iso = _now_iso()
     saved_at = _parse_saved_at(body.saved_at, now_iso)
     saved_by = str(session.get("username") or "").strip() or "unknown"
-    existing = get_record(normalized_id) or {}
+    organization_id = str(session.get("organization_id") or "")
+    existing = get_record(normalized_id, organization_id) or {}
     existing_summary = _to_summary(existing, normalized_id) if existing else None
     base_last_edited_at: str | None = None
     try:
@@ -367,11 +378,12 @@ def upsert_shared_project(
     try:
         saved_record = save_record(
             record,
+            organization_id=organization_id,
             expected_revision=body.base_revision,
             force=body.force_overwrite,
         )
     except ProjectRevisionConflictError:
-        current = get_record(normalized_id) or existing
+        current = get_record(normalized_id, organization_id) or existing
         raise HTTPException(
             status_code=409,
             detail={
@@ -402,12 +414,13 @@ def upsert_shared_project(
 def delete_shared_project(
     request: Request,
     project_id: str,
-    session: dict[str, str] = Depends(require_shared_access),
+    session: dict = Depends(require_workspace_access),
 ) -> SharedProjectDeleteResponse:
     normalized_id = _normalize_project_id(project_id)
     username = str(session.get("username") or "unknown")
+    organization_id = str(session.get("organization_id") or "")
     ip_address, user_agent = _request_meta(request)
-    if not get_record(normalized_id):
+    if not get_record(normalized_id, organization_id):
         _write_audit_safe(
             username=username,
             action="project.delete",
@@ -417,7 +430,7 @@ def delete_shared_project(
             user_agent=user_agent,
         )
         return SharedProjectDeleteResponse(deleted=False)
-    deleted = delete_record(normalized_id)
+    deleted = delete_record(normalized_id, organization_id)
     _write_audit_safe(
         username=username,
         action="project.delete",

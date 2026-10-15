@@ -2,6 +2,7 @@ import base64
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from shapely.geometry import shape
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.main import app
 from app.repositories.measurement_repository import init_db
+from app.repositories.account_repository import update_organization_billing
 from app.services import shared_auth as shared_auth_service
 from app.services.segmentation_service import SegmentationService
 
@@ -237,6 +239,187 @@ def test_shared_project_revisions_and_polygon_drop_guard() -> None:
                 client.delete(f"/api/projects/{project_id}", headers=headers)
         finally:
             _restore_shared_auth_env(previous)
+
+
+def test_customer_registration_persistent_session_and_tenant_isolation() -> None:
+    first = client.post(
+        "/api/auth/register",
+        json={
+            "email": "first-company@example.com",
+            "password": "safe-password-123",
+            "display_name": "First Owner",
+            "organization_name": "First Company",
+        },
+    )
+    second = client.post(
+        "/api/auth/register",
+        json={
+            "email": "second-company@example.com",
+            "password": "safe-password-456",
+            "display_name": "Second Owner",
+            "organization_name": "Second Company",
+        },
+    )
+    assert first.status_code == 201
+    assert second.status_code == 201
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["workspace_access"] is False
+
+    shared_auth_service._TOKEN_STORE.clear()
+    first_headers = {"Authorization": f"Bearer {first_body['token']}"}
+    second_headers = {"Authorization": f"Bearer {second_body['token']}"}
+    assert client.get("/api/auth/session", headers=first_headers).status_code == 200
+    assert client.get("/api/projects", headers=first_headers).status_code == 402
+
+    update_organization_billing(first_body["organization_id"], status="active")
+    update_organization_billing(second_body["organization_id"], status="active")
+    payload = {
+        "version": 1,
+        "projectName": "Private First Project",
+        "workflowMode": "location",
+        "layerFeatures": {"plowable": [], "sidewalks": [], "turf": [], "mulch": []},
+    }
+    created = client.put(
+        "/api/projects/tenant-private-project",
+        headers=first_headers,
+        json={"id": "tenant-private-project", "project_name": "Private First Project", "payload": payload},
+    )
+    assert created.status_code == 200
+    assert client.get("/api/projects/tenant-private-project", headers=first_headers).status_code == 200
+    assert client.get("/api/projects/tenant-private-project", headers=second_headers).status_code == 404
+
+
+def test_managed_takeoff_quote_and_acceptance_workflow() -> None:
+    customer = client.post(
+        "/api/auth/register",
+        json={
+            "email": "managed-customer@example.com",
+            "password": "managed-password-123",
+            "display_name": "Managed Customer",
+            "organization_name": "Managed Customer Company",
+        },
+    )
+    assert customer.status_code == 201
+    customer_headers = {"Authorization": f"Bearer {customer.json()['token']}"}
+    created = client.post(
+        "/api/takeoff-requests",
+        headers=customer_headers,
+        json={
+            "title": "Dover Shopping Center",
+            "address": "1200 N Dupont Hwy, Dover, DE",
+            "service_types": ["Plowable", "Sidewalks"],
+            "notes": "Exclude the loading dock.",
+        },
+    )
+    assert created.status_code == 201
+    request_id = created.json()["id"]
+    empty_upload = client.post(
+        f"/api/takeoff-requests/{request_id}/files",
+        headers=customer_headers,
+        files={"upload": ("empty.pdf", b"", "application/pdf")},
+    )
+    assert empty_upload.status_code == 400
+
+    previous = _set_shared_auth_env(
+        AUTO_MEASURE_SHARED_AUTH_USER="takeoff-staff",
+        AUTO_MEASURE_SHARED_AUTH_PASS="staff-secret-123",
+    )
+    try:
+        staff = client.post(
+            "/api/auth/login",
+            json={"username": "takeoff-staff", "password": "staff-secret-123"},
+        )
+        assert staff.status_code == 200
+        staff_headers = {"Authorization": f"Bearer {staff.json()['token']}"}
+        invalid_accept = client.patch(
+            f"/api/takeoff-requests/{request_id}",
+            headers=staff_headers,
+            json={"status": "accepted"},
+        )
+        assert invalid_accept.status_code == 400
+        quote = client.patch(
+            f"/api/takeoff-requests/{request_id}",
+            headers=staff_headers,
+            json={"status": "quoted", "quote_cents": 8500, "quote_notes": "Complete site takeoff."},
+        )
+        assert quote.status_code == 200
+        assert quote.json()["quote_cents"] == 8500
+        accepted = client.post(
+            f"/api/takeoff-requests/{request_id}/accept",
+            headers=customer_headers,
+        )
+        assert accepted.status_code == 200
+        assert accepted.json()["status"] == "accepted"
+        assert accepted.json()["due_at"]
+    finally:
+        _restore_shared_auth_env(previous)
+
+
+def test_stripe_checkout_and_webhook_unlock_workspace(monkeypatch) -> None:
+    from app.routes import billing as billing_routes
+
+    customer = client.post(
+        "/api/auth/register",
+        json={
+            "email": "billing-customer@example.com",
+            "password": "billing-password-123",
+            "display_name": "Billing Customer",
+            "organization_name": "Billing Customer Company",
+        },
+    )
+    assert customer.status_code == 201
+    body = customer.json()
+    headers = {"Authorization": f"Bearer {body['token']}"}
+    checkout_calls = []
+
+    class FakeCheckoutSession:
+        @staticmethod
+        def create(**kwargs):
+            checkout_calls.append(kwargs)
+            return {"url": "https://checkout.stripe.test/session"}
+
+    class FakeWebhook:
+        @staticmethod
+        def construct_event(payload, signature, secret):
+            assert payload == b"{}"
+            assert signature == "test-signature"
+            assert secret == "whsec_test"
+            return {
+                "id": "evt_checkout_complete",
+                "type": "checkout.session.completed",
+                "data": {
+                    "object": {
+                        "client_reference_id": body["organization_id"],
+                        "customer": "cus_test",
+                        "subscription": "sub_test",
+                        "payment_status": "paid",
+                    }
+                },
+            }
+
+    fake_stripe = SimpleNamespace(
+        checkout=SimpleNamespace(Session=FakeCheckoutSession),
+        Webhook=FakeWebhook,
+    )
+    monkeypatch.setattr(billing_routes, "_stripe_module", lambda: fake_stripe)
+    monkeypatch.setenv("STRIPE_BASIC_PRICE_ID", "price_basic_test")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+
+    checkout = client.post("/api/billing/checkout", headers=headers)
+    assert checkout.status_code == 200
+    assert checkout.json()["url"] == "https://checkout.stripe.test/session"
+    assert checkout_calls[0]["mode"] == "subscription"
+    assert checkout_calls[0]["line_items"] == [{"price": "price_basic_test", "quantity": 1}]
+
+    webhook = client.post(
+        "/api/billing/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "test-signature"},
+    )
+    assert webhook.status_code == 200
+    assert client.get("/api/billing/status", headers=headers).json()["workspace_access"] is True
+    assert client.get("/api/projects", headers=headers).status_code == 200
 
 
 def test_create_measurement_success() -> None:

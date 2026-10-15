@@ -82,6 +82,9 @@ export function readStoredProjectLibrary() {
         ).trim(),
         revision: Math.max(0, Number(entry?.revision) || 0),
         storageScope,
+        ownerOrganizationId: String(
+          entry?.ownerOrganizationId || entry?.organizationId || ""
+        ).trim(),
         workflowMode:
           String(entry?.workflowMode || payload?.workflowMode || "").trim().toLowerCase() ===
           WORKFLOW_MODE_PDF
@@ -123,6 +126,9 @@ export function readStoredProjectFolders() {
         if (!name) return null;
         return {
           name,
+          ownerOrganizationId: String(
+            entry?.ownerOrganizationId || entry?.organizationId || ""
+          ).trim(),
           workflowMode:
             String(entry?.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
               ? WORKFLOW_MODE_PDF
@@ -261,6 +267,9 @@ export function readStoredResumeProject() {
       pdfPageNumber: Math.max(1, Math.round(Number(parsed.pdfPageNumber) || 1)),
       lastEditedAt: String(parsed.lastEditedAt || parsed.savedAt || "").trim(),
       savedBy: String(parsed.savedBy || "").trim(),
+      ownerOrganizationId: String(
+        parsed.ownerOrganizationId || parsed.organizationId || ""
+      ).trim(),
     };
   } catch {
     return null;
@@ -287,6 +296,9 @@ export function normalizeSharedQueueOperation(op) {
   const base = {
     op: type,
     id,
+    ownerOrganizationId: String(
+      op?.ownerOrganizationId || op?.organizationId || ""
+    ).trim(),
     enqueuedAt: String(op?.enqueuedAt || new Date().toISOString()),
   };
   if (type === "delete") return base;
@@ -323,18 +335,32 @@ export function readStoredSharedProjectQueue() {
 }
 
 export function readStoredSharedAuth() {
-  if (typeof window === "undefined") return { token: "", username: "", expiresAt: "" };
+  const empty = {
+    token: "", username: "", email: "", displayName: "", role: "member",
+    organizationId: "", organizationName: "Workspace", subscriptionStatus: "inactive",
+    workspaceAccess: false, aiAccess: false, isStaff: false, expiresAt: "",
+  };
+  if (typeof window === "undefined") return empty;
   try {
     const raw = window.localStorage.getItem(SHARED_AUTH_STORAGE_KEY);
-    if (!raw) return { token: "", username: "", expiresAt: "" };
+    if (!raw) return empty;
     const parsed = JSON.parse(raw);
     return {
       token: String(parsed?.token || "").trim(),
       username: String(parsed?.username || "").trim(),
+      email: String(parsed?.email || "").trim(),
+      displayName: String(parsed?.displayName || "").trim(),
+      role: String(parsed?.role || "member").trim(),
+      organizationId: String(parsed?.organizationId || "").trim(),
+      organizationName: String(parsed?.organizationName || "Workspace").trim(),
+      subscriptionStatus: String(parsed?.subscriptionStatus || "inactive").trim(),
+      workspaceAccess: Boolean(parsed?.workspaceAccess),
+      aiAccess: Boolean(parsed?.aiAccess),
+      isStaff: Boolean(parsed?.isStaff),
       expiresAt: String(parsed?.expiresAt || "").trim(),
     };
   } catch {
-    return { token: "", username: "", expiresAt: "" };
+    return empty;
   }
 }
 
@@ -351,7 +377,11 @@ export function upsertSharedQueueOperation(prevQueue, nextOp) {
   const queue = Array.isArray(prevQueue) ? prevQueue : [];
   const normalized = normalizeSharedQueueOperation(nextOp);
   if (!normalized) return queue;
-  const filtered = queue.filter((item) => String(item?.id) !== normalized.id);
+  const filtered = queue.filter(
+    (item) =>
+      String(item?.id) !== normalized.id ||
+      String(item?.ownerOrganizationId || "").trim() !== normalized.ownerOrganizationId
+  );
   return [...filtered, normalized].slice(-500);
 }
 
@@ -381,6 +411,7 @@ export function buildProjectLibraryEntryFromPayload(
       String(metadata?.storageScope || "").trim().toLowerCase() === "shared"
         ? "shared"
         : "local",
+    ownerOrganizationId: String(metadata?.ownerOrganizationId || "").trim(),
     workflowMode,
     folderName:
       String(metadata?.folderName || metadata?.folder || payload?.folderName || "").trim() ||
@@ -410,6 +441,9 @@ export function buildProjectLibraryEntryFromRecord(record) {
     ).trim(),
     revision: Math.max(0, Number(record?.revision) || 0),
     storageScope: "local",
+    ownerOrganizationId: String(
+      record?.organization_id || record?.organizationId || ""
+    ).trim(),
     workflowMode:
       String(
         record?.workflow_mode || record?.workflowMode || payload?.workflowMode || ""
@@ -493,6 +527,9 @@ export function upsertProjectLibraryEntries(
   if (!nextEntry.revision && existing?.revision) {
     nextEntry.revision = Math.max(0, Number(existing.revision) || 0);
   }
+  if (!nextEntry.ownerOrganizationId && existing?.ownerOrganizationId) {
+    nextEntry.ownerOrganizationId = String(existing.ownerOrganizationId).trim();
+  }
   if (
     !incomingFolder &&
     String(existing?.folderName || "").trim() &&
@@ -515,9 +552,18 @@ export function upsertProjectLibraryEntries(
   return [nextEntry, ...prev.filter((entry) => entry?.id !== nextEntry.id)];
 }
 
-export function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
+export function mergeSharedProjectLibrarySummaries(
+  prevEntries,
+  remoteEntries,
+  { organizationId = "", allowLegacy = false } = {}
+) {
   const previous = Array.isArray(prevEntries) ? prevEntries : [];
   const remote = Array.isArray(remoteEntries) ? remoteEntries : [];
+  const normalizedOrganizationId = String(organizationId || "").trim();
+  const usablePrevious = previous.filter((entry) => {
+    const owner = String(entry?.ownerOrganizationId || "").trim();
+    return owner === normalizedOrganizationId || (!owner && allowLegacy);
+  });
   const remoteIds = new Set(
     remote.map((entry) => String(entry?.id || "").trim()).filter(Boolean)
   );
@@ -525,17 +571,18 @@ export function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
     .filter(
       (entry) =>
         String(entry?.id || "").trim() &&
+        String(entry?.storageScope || "").trim().toLowerCase() !== "shared" &&
         !remoteIds.has(String(entry.id).trim()) &&
         isValidProjectPayload(entry?.payload)
     )
     .map((entry) => ({ ...entry, storageScope: "local", revision: 0 }));
   const payloadById = new Map(
-    previous
+    usablePrevious
       .filter((entry) => entry?.id && entry?.payload && isValidProjectPayload(entry.payload))
       .map((entry) => [String(entry.id), entry.payload])
   );
   const previousById = new Map(
-    previous.filter((entry) => entry?.id).map((entry) => [String(entry.id), entry])
+    usablePrevious.filter((entry) => entry?.id).map((entry) => [String(entry.id), entry])
   );
 
   const merged = remote.map((entry) => {
@@ -583,6 +630,7 @@ export function mergeSharedProjectLibrarySummaries(prevEntries, remoteEntries) {
       lastEditedAt,
       revision,
       storageScope: "shared",
+      ownerOrganizationId: normalizedOrganizationId,
       workflowMode:
         String(
           entry?.workflow_mode ||

@@ -12,13 +12,19 @@ import {
   normalizeLayerVisibility,
 } from "./projectSchema";
 import {
+  acceptTakeoffQuote,
   autoClassifyMeasurement,
   calculatePixelDistance,
+  createBillingPortal,
+  createSubscriptionCheckout,
+  createTakeoffRequest,
   deleteSharedProject,
   getApiHealth,
+  getBillingStatus,
   getSharedProject,
   getSharedProjectVersion,
   getSharedAccessSession,
+  getTakeoffDelivery,
   getSecurityAuditEvents,
   getMeasurementHistory,
   getSegmentationStatus,
@@ -26,14 +32,19 @@ import {
   listLocalMigrationProjects,
   listSharedProjectVersions,
   listSharedProjects,
+  listTakeoffRequests,
   logoutSharedAccess,
   measureGeoJson,
   saveSegmentationCorrection,
   saveSharedProject,
+  registerSharedAccess,
   setSharedAuthToken,
   segmentMeasurementUpload,
   uploadMeasurement,
+  uploadTakeoffRequestFile,
+  updateTakeoffRequest,
 } from "./api";
+import AccountAccess from "./components/AccountAccess";
 import CvWorkflowPanel from "./components/CvWorkflowPanel";
 import HomeDashboard from "./components/HomeDashboard";
 import SystemStatusPanel from "./components/SystemStatusPanel";
@@ -126,6 +137,11 @@ const BOUNDARY_COLORS = {
 };
 
 const AUTOSAVE_KEY = "takeoff-autosave-v1";
+
+function buildAutosaveStorageKey(organizationId) {
+  const owner = String(organizationId || "").trim();
+  return owner ? `${AUTOSAVE_KEY}:${owner}` : AUTOSAVE_KEY;
+}
 const MEASURE_SOURCE_ID = "measure-two-point-src";
 const MEASURE_LINE_LAYER_ID = "measure-two-point-line";
 const MEASURE_POINT_LAYER_ID = "measure-two-point-points";
@@ -226,6 +242,29 @@ const ESTIMATE_TEMPLATES_STORAGE_KEY = "takeoff-estimate-templates-v1";
 const APP_SCREEN_HOME = "home";
 const APP_SCREEN_LOCATION = "location";
 const APP_SCREEN_PDF = "pdf";
+
+function buildSharedAuthState(value, tokenFallback = "", usernameFallback = "") {
+  return {
+    token: String(value?.token || tokenFallback || "").trim(),
+    username: String(value?.username || usernameFallback || "").trim(),
+    email: String(value?.email || "").trim(),
+    displayName: String(value?.display_name || value?.displayName || "").trim(),
+    role: String(value?.role || "member").trim(),
+    organizationId: String(value?.organization_id || value?.organizationId || "").trim(),
+    organizationName: String(value?.organization_name || value?.organizationName || "Workspace").trim(),
+    subscriptionStatus: String(value?.subscription_status || value?.subscriptionStatus || "inactive").trim(),
+    workspaceAccess: Boolean(value?.workspace_access ?? value?.workspaceAccess),
+    aiAccess: Boolean(value?.ai_access ?? value?.aiAccess),
+    isStaff: Boolean(value?.is_staff ?? value?.isStaff),
+    expiresAt: String(value?.expires_at || value?.expiresAt || "").trim(),
+  };
+}
+
+function canUseCachedWorkspaceEntry(entry, organizationId, isStaff) {
+  const owner = String(entry?.ownerOrganizationId || "").trim();
+  if (!owner) return Boolean(isStaff);
+  return owner === String(organizationId || "").trim();
+}
 const ESTIMATE_BINARY_SPREADSHEET_EXT_RE = /\.(numbers|xlsx|xlsm|xlsb|xls|ods|fods)$/i;
 const ESTIMATE_BINARY_SPREADSHEET_MIME_RE =
   /(spreadsheet|excel|officedocument|oasis|numbers)/i;
@@ -4256,7 +4295,7 @@ export default function App() {
   const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
   const azureMapsKey = import.meta.env.VITE_AZURE_MAPS_KEY;
   const googleMapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
-  const aiEnabled =
+  const aiFeatureConfigured =
     String(import.meta.env.VITE_ENABLE_AI ?? "true").toLowerCase() !== "false";
 
   // Provider switcher
@@ -4401,6 +4440,11 @@ export default function App() {
   );
   const [sharedLoginPassword, setSharedLoginPassword] = useState("");
   const [sharedLoginSubmitting, setSharedLoginSubmitting] = useState(false);
+  const [sharedRegisterSubmitting, setSharedRegisterSubmitting] = useState(false);
+  const [billingStatus, setBillingStatus] = useState(null);
+  const [billingWorking, setBillingWorking] = useState(false);
+  const [takeoffRequests, setTakeoffRequests] = useState([]);
+  const [takeoffRequestsLoading, setTakeoffRequestsLoading] = useState(false);
   const [sharedProjectLibraryStatus, setSharedProjectLibraryStatus] = useState(() =>
     readStoredSharedAuth().token ? "connecting" : "locked"
   );
@@ -4419,6 +4463,11 @@ export default function App() {
   const [securityAuditSyncing, setSecurityAuditSyncing] = useState(false);
   const sharedAccessToken = String(sharedAuth?.token || "").trim();
   const sharedAccessAuthenticated = !!sharedAccessToken;
+  const autosaveStorageKey = buildAutosaveStorageKey(sharedAuth?.organizationId);
+  const sharedWorkspaceAccess = Boolean(
+    sharedAuth?.workspaceAccess || billingStatus?.workspace_access
+  );
+  const aiEnabled = aiFeatureConfigured && Boolean(sharedAuth?.aiAccess);
   const [appScreen, setAppScreen] = useState(APP_SCREEN_HOME); // "home" | "location" | "pdf"
   const [estimateTemplates, setEstimateTemplates] = useState(() =>
     readStoredEstimateTemplates()
@@ -4790,29 +4839,27 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      if (sharedAccessToken) {
-        window.localStorage.setItem(
-          SHARED_AUTH_STORAGE_KEY,
-          JSON.stringify({
-            token: sharedAccessToken,
-            username: String(sharedAuth?.username || "").trim(),
-            expiresAt: String(sharedAuth?.expiresAt || "").trim(),
-          })
-        );
-      } else {
-        window.localStorage.setItem(
-          SHARED_AUTH_STORAGE_KEY,
-          JSON.stringify({
-            token: "",
-            username: String(sharedAuth?.username || "").trim(),
-            expiresAt: "",
-          })
-        );
-      }
+      window.localStorage.setItem(
+        SHARED_AUTH_STORAGE_KEY,
+        JSON.stringify({
+          token: sharedAccessToken,
+          username: String(sharedAuth?.username || "").trim(),
+          email: String(sharedAuth?.email || "").trim(),
+          displayName: String(sharedAuth?.displayName || "").trim(),
+          role: String(sharedAuth?.role || "member").trim(),
+          organizationId: String(sharedAuth?.organizationId || "").trim(),
+          organizationName: String(sharedAuth?.organizationName || "Workspace").trim(),
+          subscriptionStatus: String(sharedAuth?.subscriptionStatus || "inactive").trim(),
+          workspaceAccess: Boolean(sharedAuth?.workspaceAccess),
+          aiAccess: Boolean(sharedAuth?.aiAccess),
+          isStaff: Boolean(sharedAuth?.isStaff),
+          expiresAt: sharedAccessToken ? String(sharedAuth?.expiresAt || "").trim() : "",
+        })
+      );
     } catch {
       /* intentionally ignore localStorage errors */
     }
-  }, [sharedAccessToken, sharedAuth?.expiresAt, sharedAuth?.username]);
+  }, [sharedAccessToken, sharedAuth]);
 
   useEffect(() => {
     let canceled = false;
@@ -4834,21 +4881,9 @@ export default function App() {
         const session = await getSharedAccessSession();
         if (canceled) return;
         const username = String(session?.username || sharedAuth?.username || "").trim();
-        const expiresAt = String(session?.expires_at || sharedAuth?.expiresAt || "").trim();
         setSharedAuth((prev) => {
-          const next = {
-            token: sharedAccessToken,
-            username,
-            expiresAt,
-          };
-          if (
-            String(prev?.token || "") === next.token &&
-            String(prev?.username || "") === next.username &&
-            String(prev?.expiresAt || "") === next.expiresAt
-          ) {
-            return prev;
-          }
-          return next;
+          const next = buildSharedAuthState(session, sharedAccessToken, username);
+          return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
         });
         setSharedLoginUsername(username);
         setSharedProjectLibraryStatus("connected");
@@ -4856,6 +4891,7 @@ export default function App() {
         if (canceled) return;
         if (isAuthError(error)) {
           setSharedAuth((prev) => ({
+            ...prev,
             token: "",
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
@@ -4873,11 +4909,11 @@ export default function App() {
     return () => {
       canceled = true;
     };
-  }, [pushToast, sharedAccessToken, sharedAuth?.expiresAt, sharedAuth?.username, sharedLoginUsername]);
+  }, [pushToast, sharedAccessToken, sharedAuth?.username, sharedLoginUsername]);
 
   const refreshSharedProjectLibrary = useCallback(
     async ({ quiet = true } = {}) => {
-      if (!sharedAccessAuthenticated) {
+      if (!sharedAccessAuthenticated || !sharedWorkspaceAccess) {
         setSharedProjectLibraryStatus("locked");
         if (!quiet) {
           pushToast("Log in to access shared project files.", "warn", 4200);
@@ -4887,7 +4923,12 @@ export default function App() {
       if (!quiet) setSharedProjectLibrarySyncing(true);
       try {
         const shared = await listSharedProjects(SHARED_PROJECT_LIBRARY_FETCH_LIMIT);
-        setProjectLibrary((prev) => mergeSharedProjectLibrarySummaries(prev, shared));
+        setProjectLibrary((prev) =>
+          mergeSharedProjectLibrarySummaries(prev, shared, {
+            organizationId: sharedAuth?.organizationId,
+            allowLegacy: Boolean(sharedAuth?.isStaff),
+          })
+        );
         setSharedProjectLibraryStatus("connected");
         if (!quiet) {
           pushToast("Shared project library refreshed.", "info", 3200);
@@ -4895,6 +4936,7 @@ export default function App() {
       } catch (error) {
         if (isAuthError(error)) {
           setSharedAuth((prev) => ({
+            ...prev,
             token: "",
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
@@ -4917,12 +4959,19 @@ export default function App() {
         if (!quiet) setSharedProjectLibrarySyncing(false);
       }
     },
-    [pushToast, sharedAccessAuthenticated, sharedLoginUsername]
+    [
+      pushToast,
+      sharedAccessAuthenticated,
+      sharedAuth?.isStaff,
+      sharedAuth?.organizationId,
+      sharedLoginUsername,
+      sharedWorkspaceAccess,
+    ]
   );
 
   const refreshSecurityAuditEvents = useCallback(
     async ({ quiet = true } = {}) => {
-      if (!sharedAccessAuthenticated) {
+      if (!sharedAccessAuthenticated || !sharedWorkspaceAccess) {
         setSecurityAuditEvents([]);
         if (!quiet) {
           pushToast("Log in to view security audit events.", "warn", 4200);
@@ -4939,6 +4988,7 @@ export default function App() {
       } catch (error) {
         if (isAuthError(error)) {
           setSharedAuth((prev) => ({
+            ...prev,
             token: "",
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
@@ -4959,17 +5009,21 @@ export default function App() {
         setSecurityAuditSyncing(false);
       }
     },
-    [pushToast, sharedAccessAuthenticated, sharedLoginUsername]
+    [pushToast, sharedAccessAuthenticated, sharedLoginUsername, sharedWorkspaceAccess]
   );
 
   const syncSharedProjectQueue = useCallback(
     async ({ quiet = true } = {}) => {
       if (sharedProjectQueueSyncingRef.current) return;
-      const queue = Array.isArray(sharedProjectQueueRef.current)
+      const allQueued = Array.isArray(sharedProjectQueueRef.current)
         ? sharedProjectQueueRef.current
         : [];
+      const organizationId = String(sharedAuth?.organizationId || "").trim();
+      const queue = allQueued.filter((operation) =>
+        canUseCachedWorkspaceEntry(operation, organizationId, sharedAuth?.isStaff)
+      );
       if (!queue.length) return;
-      if (!sharedAccessAuthenticated) {
+      if (!sharedAccessAuthenticated || !sharedWorkspaceAccess) {
         setSharedProjectLibraryStatus("locked");
         if (!quiet) {
           pushToast("Log in to sync queued shared project updates.", "warn", 4500);
@@ -4987,8 +5041,10 @@ export default function App() {
       sharedProjectQueueSyncingRef.current = true;
       if (!quiet) setSharedProjectQueueSyncing(true);
       let syncedCount = 0;
-      let remaining = [...queue];
       let lastError = null;
+      const syncedOperationKeys = new Set();
+      const operationKey = (operation) =>
+        `${String(operation?.ownerOrganizationId || "").trim()}:${String(operation?.id || "").trim()}`;
 
       try {
         for (const op of queue) {
@@ -5007,7 +5063,7 @@ export default function App() {
               });
             }
             syncedCount += 1;
-            remaining.shift();
+            syncedOperationKeys.add(operationKey(op));
           } catch (error) {
             lastError = error;
             break;
@@ -5016,10 +5072,9 @@ export default function App() {
 
         setSharedProjectQueue((latest) => {
           const latestQueue = Array.isArray(latest) ? latest : [];
-          // Preserve any newly queued items that were added after this sync started.
-          const lateQueued =
-            latestQueue.length > queue.length ? latestQueue.slice(queue.length) : [];
-          return [...remaining, ...lateQueued];
+          return latestQueue.filter(
+            (operation) => !syncedOperationKeys.has(operationKey(operation))
+          );
         });
 
         if (syncedCount > 0) {
@@ -5037,6 +5092,7 @@ export default function App() {
         if (lastError) {
           if (isAuthError(lastError)) {
             setSharedAuth((prev) => ({
+              ...prev,
               token: "",
               username: String(prev?.username || sharedLoginUsername || "").trim(),
               expiresAt: "",
@@ -5058,13 +5114,21 @@ export default function App() {
         if (!quiet) setSharedProjectQueueSyncing(false);
       }
     },
-    [pushToast, refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedLoginUsername]
+    [
+      pushToast,
+      refreshSharedProjectLibrary,
+      sharedAccessAuthenticated,
+      sharedAuth?.isStaff,
+      sharedAuth?.organizationId,
+      sharedLoginUsername,
+      sharedWorkspaceAccess,
+    ]
   );
 
   useEffect(() => {
-    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+    if (!sharedAccessAuthenticated || !sharedWorkspaceAccess || sharedAuthChecking) return;
     refreshSharedProjectLibrary({ quiet: true });
-  }, [refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedAuthChecking]);
+  }, [refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedAuthChecking, sharedWorkspaceAccess]);
 
   useEffect(() => {
     let canceled = false;
@@ -5121,23 +5185,23 @@ export default function App() {
   }, [aiEnabled, configuredApiBaseUrl]);
 
   useEffect(() => {
-    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+    if (!sharedAccessAuthenticated || !sharedWorkspaceAccess || sharedAuthChecking) return;
     if (!(sharedProjectQueue?.length > 0)) return;
     syncSharedProjectQueue({ quiet: true });
-  }, [sharedProjectQueue, syncSharedProjectQueue, sharedAccessAuthenticated, sharedAuthChecking]);
+  }, [sharedProjectQueue, syncSharedProjectQueue, sharedAccessAuthenticated, sharedAuthChecking, sharedWorkspaceAccess]);
 
   useEffect(() => {
-    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+    if (!sharedAccessAuthenticated || !sharedWorkspaceAccess || sharedAuthChecking) return;
     if (appScreen !== APP_SCREEN_HOME) return;
     refreshSharedProjectLibrary({ quiet: true });
     const timer = setInterval(() => {
       refreshSharedProjectLibrary({ quiet: true });
     }, 15000);
     return () => clearInterval(timer);
-  }, [appScreen, refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedAuthChecking]);
+  }, [appScreen, refreshSharedProjectLibrary, sharedAccessAuthenticated, sharedAuthChecking, sharedWorkspaceAccess]);
 
   useEffect(() => {
-    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+    if (!sharedAccessAuthenticated || !sharedWorkspaceAccess || sharedAuthChecking) return;
     if (appScreen === APP_SCREEN_HOME) return;
     const projectId = String(activeSharedProjectMeta?.id || "").trim();
     if (!projectId) return;
@@ -5193,9 +5257,16 @@ export default function App() {
     activeSharedProjectMeta?.id,
     appScreen,
     sharedAccessAuthenticated,
+    sharedAuth?.organizationId,
     sharedAuth?.username,
     sharedAuthChecking,
+    sharedWorkspaceAccess,
   ]);
+
+  useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking || sharedWorkspaceAccess) return;
+    if (appScreen !== APP_SCREEN_HOME) setAppScreen(APP_SCREEN_HOME);
+  }, [appScreen, sharedAccessAuthenticated, sharedAuthChecking, sharedWorkspaceAccess]);
 
   useEffect(() => {
     if (!sharedAccessAuthenticated) {
@@ -5206,14 +5277,14 @@ export default function App() {
   }, [sharedAccessAuthenticated]);
 
   useEffect(() => {
-    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+    if (!sharedAccessAuthenticated || sharedAuthChecking || !sharedAuth?.isStaff) return;
     if (appScreen !== APP_SCREEN_HOME) return;
     refreshSecurityAuditEvents({ quiet: true });
     const timer = setInterval(() => {
       refreshSecurityAuditEvents({ quiet: true });
     }, 30000);
     return () => clearInterval(timer);
-  }, [appScreen, refreshSecurityAuditEvents, sharedAccessAuthenticated, sharedAuthChecking]);
+  }, [appScreen, refreshSecurityAuditEvents, sharedAccessAuthenticated, sharedAuthChecking, sharedAuth?.isStaff]);
 
   useEffect(() => {
     if (!sharedAccessAuthenticated || sharedAuthChecking) return;
@@ -5258,14 +5329,28 @@ export default function App() {
         if (!token) {
           throw new Error("Login response did not include a session token.");
         }
-        const normalizedUsername =
-          String(response?.username || username).trim();
-        const expiresAt = String(response?.expires_at || "").trim();
-        setSharedAuth({
-          token,
-          username: normalizedUsername,
-          expiresAt,
-        });
+        const normalizedUsername = String(response?.username || username).trim();
+        const nextAuth = buildSharedAuthState(response, token, normalizedUsername);
+        const previousOrganizationId = String(sharedAuth?.organizationId || "").trim();
+        if (
+          previousOrganizationId &&
+          nextAuth.organizationId &&
+          previousOrganizationId !== nextAuth.organizationId
+        ) {
+          window.localStorage.setItem(SHARED_AUTH_STORAGE_KEY, JSON.stringify(nextAuth));
+          for (const key of [
+            PROJECT_VERSION_HISTORY_STORAGE_KEY,
+            HOME_PINNED_PROJECTS_STORAGE_KEY,
+            HOME_PROJECT_PREVIEWS_STORAGE_KEY,
+            HOME_RESUME_PROJECT_STORAGE_KEY,
+            SHARED_PROJECT_QUEUE_STORAGE_KEY,
+          ]) {
+            window.localStorage.removeItem(key);
+          }
+          window.location.reload();
+          return;
+        }
+        setSharedAuth(nextAuth);
         setSharedLoginUsername(normalizedUsername);
         setSharedLoginPassword("");
         setSharedProjectLibraryStatus("connecting");
@@ -5277,7 +5362,62 @@ export default function App() {
         setSharedLoginSubmitting(false);
       }
     },
-    [pushToast, sharedLoginPassword, sharedLoginUsername]
+    [pushToast, sharedAuth?.organizationId, sharedLoginPassword, sharedLoginUsername]
+  );
+
+  const handleSharedRegister = useCallback(
+    async (event, registration) => {
+      if (event?.preventDefault) event.preventDefault();
+      const email = String(registration?.email || "").trim();
+      const password = String(registration?.password || "");
+      const displayName = String(registration?.displayName || "").trim();
+      const organizationName = String(registration?.organizationName || "").trim();
+      if (!email || !password || !displayName || !organizationName) {
+        pushToast("Complete every account field first.", "warn", 4200);
+        return;
+      }
+      setSharedRegisterSubmitting(true);
+      try {
+        const response = await registerSharedAccess({
+          email,
+          password,
+          displayName,
+          organizationName,
+        });
+        const token = String(response?.token || "").trim();
+        if (!token) throw new Error("Account response did not include a session token.");
+        const nextAuth = buildSharedAuthState(response, token, email);
+        const previousOrganizationId = String(sharedAuth?.organizationId || "").trim();
+        if (
+          previousOrganizationId &&
+          nextAuth.organizationId &&
+          previousOrganizationId !== nextAuth.organizationId
+        ) {
+          window.localStorage.setItem(SHARED_AUTH_STORAGE_KEY, JSON.stringify(nextAuth));
+          for (const key of [
+            PROJECT_VERSION_HISTORY_STORAGE_KEY,
+            HOME_PINNED_PROJECTS_STORAGE_KEY,
+            HOME_PROJECT_PREVIEWS_STORAGE_KEY,
+            HOME_RESUME_PROJECT_STORAGE_KEY,
+            SHARED_PROJECT_QUEUE_STORAGE_KEY,
+          ]) {
+            window.localStorage.removeItem(key);
+          }
+          window.location.reload();
+          return;
+        }
+        setSharedAuth(nextAuth);
+        setSharedLoginUsername(email);
+        setSharedLoginPassword("");
+        setSharedProjectLibraryStatus("connected");
+        pushToast("Your company workspace is ready.", "info", 4200);
+      } catch (error) {
+        pushToast(`Account creation failed: ${error?.message || "please try again"}.`, "error", 6200);
+      } finally {
+        setSharedRegisterSubmitting(false);
+      }
+    },
+    [pushToast, sharedAuth?.organizationId]
   );
 
   const handleSharedLogout = useCallback(async () => {
@@ -5294,14 +5434,105 @@ export default function App() {
       )
     );
     setSharedAuth((prev) => ({
+      ...prev,
       token: "",
       username: String(prev?.username || sharedLoginUsername || "").trim(),
       expiresAt: "",
     }));
     setSharedProjectLibraryStatus("locked");
     setSecurityAuditEvents([]);
+    setBillingStatus(null);
+    setTakeoffRequests([]);
+    setSharedProjectQueue([]);
+    setResumeProject(null);
     pushToast("Logged out from shared files.", "info", 3600);
+    window.setTimeout(() => window.location.reload(), 80);
   }, [pushToast, sharedAccessAuthenticated, sharedLoginUsername]);
+
+  const refreshCustomerWorkspace = useCallback(async ({ quiet = true } = {}) => {
+    if (!sharedAccessAuthenticated) return;
+    setTakeoffRequestsLoading(true);
+    try {
+      const [nextBilling, nextRequests] = await Promise.all([
+        getBillingStatus(),
+        listTakeoffRequests(200),
+      ]);
+      setBillingStatus(nextBilling || null);
+      setTakeoffRequests(Array.isArray(nextRequests) ? nextRequests : []);
+    } catch (error) {
+      if (!quiet) pushToast(`Could not refresh account data: ${error?.message || "request failed"}.`, "error", 5200);
+    } finally {
+      setTakeoffRequestsLoading(false);
+    }
+  }, [pushToast, sharedAccessAuthenticated]);
+
+  useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+    void refreshCustomerWorkspace();
+  }, [refreshCustomerWorkspace, sharedAccessAuthenticated, sharedAuthChecking]);
+
+  const handleStartSubscription = useCallback(async () => {
+    setBillingWorking(true);
+    try {
+      const response = await createSubscriptionCheckout();
+      if (!response?.url) throw new Error("Checkout did not return a secure payment page.");
+      window.location.assign(response.url);
+    } catch (error) {
+      pushToast(`Could not start checkout: ${error?.message || "request failed"}.`, "error", 6200);
+      setBillingWorking(false);
+    }
+  }, [pushToast]);
+
+  const handleOpenBillingPortal = useCallback(async () => {
+    setBillingWorking(true);
+    try {
+      const response = await createBillingPortal();
+      if (!response?.url) throw new Error("Billing settings did not return a secure page.");
+      window.location.assign(response.url);
+    } catch (error) {
+      pushToast(`Could not open billing: ${error?.message || "request failed"}.`, "error", 6200);
+      setBillingWorking(false);
+    }
+  }, [pushToast]);
+
+  const handleCreateTakeoffRequest = useCallback(async ({ details, file }) => {
+    const created = await createTakeoffRequest(details);
+    if (file) await uploadTakeoffRequestFile(created.id, file);
+    await refreshCustomerWorkspace();
+    pushToast("Takeoff request submitted. We will review it and send your quote.", "info", 5600);
+    return created;
+  }, [pushToast, refreshCustomerWorkspace]);
+
+  const handleAcceptTakeoffQuote = useCallback(async (requestId) => {
+    await acceptTakeoffQuote(requestId);
+    await refreshCustomerWorkspace();
+    pushToast("Quote accepted. Your 24-hour delivery window has started.", "info", 5200);
+  }, [pushToast, refreshCustomerWorkspace]);
+
+  const handleUpdateTakeoffRequest = useCallback(async (requestId, changes) => {
+    await updateTakeoffRequest(requestId, changes);
+    await refreshCustomerWorkspace();
+    pushToast("Takeoff request updated.", "info", 3200);
+  }, [pushToast, refreshCustomerWorkspace]);
+
+  const handleDownloadTakeoffDelivery = useCallback(async (requestId) => {
+    try {
+      const delivery = await getTakeoffDelivery(requestId);
+      const payload = delivery?.payload || {};
+      const projectName = String(delivery?.project_name || payload?.projectName || "completed-takeoff");
+      const safeName = projectName.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "") || "completed-takeoff";
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${safeName}.json`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      pushToast("Delivered project downloaded.", "info", 3600);
+    } catch (error) {
+      pushToast(`Could not download delivery: ${error?.message || "request failed"}.`, "error", 5200);
+    }
+  }, [pushToast]);
 
   useEffect(() => {
     if (
@@ -11981,9 +12212,10 @@ export default function App() {
           }
         );
         payload.pdfPageSaveMeta = nextPdfPageSaveMeta;
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+        localStorage.setItem(autosaveStorageKey, JSON.stringify(payload));
         void queueProjectRecoverySnapshot(payload, {
           projectId: buildProjectLibraryId(payload.projectName || "Untitled Project"),
+          ownerOrganizationId: sharedAuth?.organizationId,
           reason: "polygon-change",
         });
         setAutosaveDraftAvailable(true);
@@ -11997,7 +12229,14 @@ export default function App() {
     return () => {
       writeImmediateLocalAutosaveRef.current = () => {};
     };
-  }, [buildProjectPayload, currentPdfContextKey, currentPdfPageSignature, workflowMode]);
+  }, [
+    autosaveStorageKey,
+    buildProjectPayload,
+    currentPdfContextKey,
+    currentPdfPageSignature,
+    sharedAuth?.organizationId,
+    workflowMode,
+  ]);
 
   const currentProjectLibraryId = useMemo(
     () => buildProjectLibraryId(projectName || "Untitled Project"),
@@ -12120,6 +12359,7 @@ export default function App() {
     payload.pdfPageSaveMeta = nextPdfPageSaveMeta;
     void queueProjectRecoverySnapshot(payload, {
       projectId: buildProjectLibraryId(payload.projectName || "Untitled Project"),
+      ownerOrganizationId: sharedAuth?.organizationId,
       reason: sharedOnly ? "shared-autosave" : "manual-save",
       forceCheckpoint: !sharedOnly,
     });
@@ -12128,6 +12368,7 @@ export default function App() {
     }
     const localEntry = buildProjectLibraryEntryFromPayload(payload, "", {
       storageScope: "local",
+      ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
     });
     const projectIdForHistory = String(localEntry?.id || currentProjectLibraryId || "").trim();
     const baseLastEditedAt =
@@ -12146,7 +12387,10 @@ export default function App() {
     if (!sharedOnly) {
       setLayerFeatures(payload.layerFeatures);
       setProjectLibrary((prev) =>
-        upsertProjectLibraryEntries(prev, payload, "", { storageScope: "local" })
+        upsertProjectLibraryEntries(prev, payload, "", {
+          storageScope: "local",
+          ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
+        })
       );
     }
     if (projectIdForHistory && !sharedOnly) {
@@ -12164,12 +12408,14 @@ export default function App() {
       const fname = `${safeFilename(payload.projectName)}.json`;
       downloadJson(fname, payload);
     }
-    if (!sharedAccessAuthenticated) {
+    if (!sharedAccessAuthenticated || !sharedWorkspaceAccess) {
       if (!background) {
         pushToast(
-          downloadFile
-            ? "Project saved (JSON). Log in on Home to sync this project to shared files."
-            : "Project saved locally in this browser. Log in on Home to sync to shared files.",
+          !sharedAccessAuthenticated
+            ? downloadFile
+              ? "Project saved (JSON). Log in on Home to sync this project to shared files."
+              : "Project saved locally in this browser. Log in on Home to sync to shared files."
+            : "Project saved locally. Activate the Basic plan to sync shared projects.",
           "info",
           5200
         );
@@ -12200,6 +12446,7 @@ export default function App() {
         setProjectLibrary((prev) =>
           upsertProjectLibraryEntries(prev, payload, localEntry.projectName, {
             storageScope: "shared",
+            ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
             savedBy: String(
               sharedSummary?.saved_by || sharedSummary?.savedBy || sharedAuth?.username || ""
             ).trim(),
@@ -12290,6 +12537,7 @@ export default function App() {
 
       if (isAuthError(error)) {
         setSharedAuth((prev) => ({
+          ...prev,
           token: "",
           username: String(prev?.username || sharedLoginUsername || "").trim(),
           expiresAt: "",
@@ -12303,6 +12551,7 @@ export default function App() {
           upsertSharedQueueOperation(prev, {
             op: "upsert",
             id: localEntry.id,
+            ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
             projectName: localEntry.projectName,
             savedAt: localEntry.savedAt,
             polygonCount: localEntry.polygonCount,
@@ -12342,8 +12591,10 @@ export default function App() {
     pushToast,
     refreshSharedProjectLibrary,
     sharedAccessAuthenticated,
+    sharedAuth?.organizationId,
     sharedAuth?.username,
     sharedLoginUsername,
+    sharedWorkspaceAccess,
     workflowMode,
   ]);
 
@@ -12411,7 +12662,7 @@ export default function App() {
   useEffect(() => {
     queueSharedPolygonAutosaveRef.current = (delayMs = 900) => {
       if (workflowModeRef.current !== WORKFLOW_MODE_LOCATION) return;
-      if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+      if (!sharedAccessAuthenticated || !sharedWorkspaceAccess || sharedAuthChecking) return;
       if (sharedPolygonAutosaveTimerRef.current) {
         clearTimeout(sharedPolygonAutosaveTimerRef.current);
       }
@@ -12427,7 +12678,7 @@ export default function App() {
     return () => {
       queueSharedPolygonAutosaveRef.current = () => {};
     };
-  }, [saveProject, sharedAccessAuthenticated, sharedAuthChecking]);
+  }, [saveProject, sharedAccessAuthenticated, sharedAuthChecking, sharedWorkspaceAccess]);
 
   const normalizeFeature = useCallback((layerKey, f) => {
     // ensure properties exist and carry correct layer + outside
@@ -12762,6 +13013,7 @@ export default function App() {
         setProjectLibrary((prev) =>
           upsertProjectLibraryEntries(prev, payloadForLibrary, resolvedProjectName, {
             storageScope: isSharedLibraryEntry ? "shared" : "local",
+            ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
             savedBy: String(
               sharedMeta?.savedBy || sharedMeta?.saved_by || ""
             ).trim(),
@@ -12853,6 +13105,7 @@ export default function App() {
       clearUploadedPlanOverlay,
       loadPdfPageFromSource,
       resetPdfSourceState,
+      sharedAuth?.organizationId,
     ]
   );
 
@@ -12958,10 +13211,15 @@ export default function App() {
 
   const restoreAutosave = useCallback(async () => {
     try {
-      const raw = localStorage.getItem(AUTOSAVE_KEY);
+      const raw =
+        localStorage.getItem(autosaveStorageKey) ||
+        (sharedAuth?.isStaff ? localStorage.getItem(AUTOSAVE_KEY) : null);
       let data = raw ? JSON.parse(raw) : null;
       if (!isValidProjectPayload(data)) {
-        const recovery = await getLatestProjectRecovery();
+        const recovery = await getLatestProjectRecovery("", {
+          organizationId: sharedAuth?.organizationId,
+          includeLegacy: Boolean(sharedAuth?.isStaff),
+        });
         data = recovery?.payload || null;
       }
       if (!data) {
@@ -12982,19 +13240,29 @@ export default function App() {
     } catch {
       pushToast("Failed to restore autosave draft.", "error", 5000);
     }
-  }, [applyProjectPayload, pushToast]);
+  }, [
+    applyProjectPayload,
+    autosaveStorageKey,
+    pushToast,
+    sharedAuth?.isStaff,
+    sharedAuth?.organizationId,
+  ]);
 
   const clearAutosave = useCallback(async () => {
     try {
-      localStorage.removeItem(AUTOSAVE_KEY);
-      await clearProjectRecovery();
+      localStorage.removeItem(autosaveStorageKey);
+      if (sharedAuth?.isStaff) localStorage.removeItem(AUTOSAVE_KEY);
+      await clearProjectRecovery("", {
+        organizationId: sharedAuth?.organizationId,
+        includeLegacy: Boolean(sharedAuth?.isStaff),
+      });
       setAutosaveDraftAvailable(false);
       setHomeProjectRecoveries([]);
       pushToast("Autosave draft cleared.", "info");
     } catch {
       pushToast("Could not clear autosave draft.", "error");
     }
-  }, [pushToast]);
+  }, [autosaveStorageKey, pushToast, sharedAuth?.isStaff, sharedAuth?.organizationId]);
 
   const refreshHomeProjectRecoveries = useCallback(async ({ quiet = true } = {}) => {
     setHomeRecoveryRefreshing(true);
@@ -13003,14 +13271,19 @@ export default function App() {
     try {
       const storageStatus = await getRecoveryStorageStatus();
       setOfflineCacheStatus(storageStatus.state);
-      records = await listProjectRecoveries(100);
+      records = await listProjectRecoveries(100, {
+        organizationId: sharedAuth?.organizationId,
+        includeLegacy: Boolean(sharedAuth?.isStaff),
+      });
     } catch (error) {
       storageError = error;
       setOfflineCacheStatus("unavailable");
     }
 
     try {
-      const raw = localStorage.getItem(AUTOSAVE_KEY);
+      const raw =
+        localStorage.getItem(autosaveStorageKey) ||
+        (sharedAuth?.isStaff ? localStorage.getItem(AUTOSAVE_KEY) : null);
       const payload = raw ? JSON.parse(raw) : null;
       if (isValidProjectPayload(payload)) {
         const projectName = String(payload.projectName || "Recovered Project").trim();
@@ -13057,7 +13330,12 @@ export default function App() {
       }
     }
     return ordered;
-  }, [pushToast]);
+  }, [
+    autosaveStorageKey,
+    pushToast,
+    sharedAuth?.isStaff,
+    sharedAuth?.organizationId,
+  ]);
 
   const restoreHomeProjectRecovery = useCallback(async (record) => {
     if (String(record?.recoverySource || "") === "browser-autosave") {
@@ -13070,7 +13348,10 @@ export default function App() {
       return;
     }
     try {
-      const recovery = await getLatestProjectRecovery(projectId);
+      const recovery = await getLatestProjectRecovery(projectId, {
+        organizationId: sharedAuth?.organizationId,
+        includeLegacy: Boolean(sharedAuth?.isStaff),
+      });
       if (!isValidProjectPayload(recovery?.payload)) {
         throw new Error("Recovery payload is invalid");
       }
@@ -13084,7 +13365,13 @@ export default function App() {
     } catch {
       pushToast("That recovery snapshot could not be restored.", "error", 5200);
     }
-  }, [applyProjectPayload, pushToast, restoreAutosave]);
+  }, [
+    applyProjectPayload,
+    pushToast,
+    restoreAutosave,
+    sharedAuth?.isStaff,
+    sharedAuth?.organizationId,
+  ]);
 
   useEffect(() => {
     if (appScreen !== APP_SCREEN_HOME) return undefined;
@@ -13221,9 +13508,25 @@ export default function App() {
 
   const removeProjectFromLibrary = useCallback(
     async (id) => {
-      setProjectLibrary((prev) => (prev || []).filter((entry) => entry?.id !== id));
-      if (!sharedAccessAuthenticated) {
-        pushToast("Removed from this device. Log in to remove it from shared files too.", "info", 4300);
+      setProjectLibrary((prev) =>
+        (prev || []).filter(
+          (entry) =>
+            entry?.id !== id ||
+            !canUseCachedWorkspaceEntry(
+              entry,
+              sharedAuth?.organizationId,
+              sharedAuth?.isStaff
+            )
+        )
+      );
+      if (!sharedAccessAuthenticated || !sharedWorkspaceAccess) {
+        pushToast(
+          sharedAccessAuthenticated
+            ? "Removed from this device. Activate the Basic plan to update shared files."
+            : "Removed from this device. Log in to remove it from shared files too.",
+          "info",
+          4300
+        );
         return;
       }
       try {
@@ -13238,6 +13541,7 @@ export default function App() {
       } catch (error) {
         if (isAuthError(error)) {
           setSharedAuth((prev) => ({
+            ...prev,
             token: "",
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
@@ -13250,6 +13554,7 @@ export default function App() {
           upsertSharedQueueOperation(prev, {
             op: "delete",
             id: String(id || ""),
+            ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
           })
         );
         pushToast(
@@ -13259,16 +13564,37 @@ export default function App() {
         );
       }
     },
-    [pushToast, sharedAccessAuthenticated, sharedLoginUsername]
+    [
+      pushToast,
+      sharedAccessAuthenticated,
+      sharedAuth?.isStaff,
+      sharedAuth?.organizationId,
+      sharedLoginUsername,
+      sharedWorkspaceAccess,
+    ]
   );
 
   const loadProjectFromLibrary = useCallback(
     async (id) => {
-      if (!sharedAccessAuthenticated) {
-        pushToast("Log in on Home to view and open projects.", "warn", 4200);
+      if (!sharedAccessAuthenticated || !sharedWorkspaceAccess) {
+        pushToast(
+          sharedAccessAuthenticated
+            ? "Activate the Basic plan to open measuring projects."
+            : "Log in on Home to view and open projects.",
+          "warn",
+          4200
+        );
         return;
       }
-      const entry = (projectLibrary || []).find((item) => item?.id === id);
+      const entry = (projectLibrary || []).find(
+        (item) =>
+          item?.id === id &&
+          canUseCachedWorkspaceEntry(
+            item,
+            sharedAuth?.organizationId,
+            sharedAuth?.isStaff
+          )
+      );
       if (entry?.payload && isValidProjectPayload(entry.payload)) {
         try {
           applyProjectPayload(entry.payload, {
@@ -13335,6 +13661,7 @@ export default function App() {
       } catch (error) {
         if (isAuthError(error)) {
           setSharedAuth((prev) => ({
+            ...prev,
             token: "",
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
@@ -13350,7 +13677,16 @@ export default function App() {
         );
       }
     },
-    [applyProjectPayload, projectLibrary, pushToast, sharedAccessAuthenticated, sharedLoginUsername]
+    [
+      applyProjectPayload,
+      projectLibrary,
+      pushToast,
+      sharedAccessAuthenticated,
+      sharedAuth?.isStaff,
+      sharedAuth?.organizationId,
+      sharedLoginUsername,
+      sharedWorkspaceAccess,
+    ]
   );
 
   const assignProjectLibraryFolder = useCallback((id, folderName) => {
@@ -13366,26 +13702,50 @@ export default function App() {
           String(entry?.workflowMode || "").trim().toLowerCase() === homeProjectTab
       );
       if (existing) return current;
-      return [...current, { name: normalizedFolder, workflowMode: homeProjectTab }];
+      return [
+        ...current,
+        {
+          name: normalizedFolder,
+          workflowMode: homeProjectTab,
+          ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
+        },
+      ];
     });
     setProjectLibrary((prev) =>
       (Array.isArray(prev) ? prev : []).map((entry) =>
-        String(entry?.id || "").trim() === normalizedId
+        String(entry?.id || "").trim() === normalizedId &&
+        canUseCachedWorkspaceEntry(
+          entry,
+          sharedAuth?.organizationId,
+          sharedAuth?.isStaff
+        )
           ? { ...entry, folderName: normalizedFolder }
           : entry
       )
     );
-  }, [homeProjectTab]);
+  }, [homeProjectTab, sharedAuth?.isStaff, sharedAuth?.organizationId]);
 
   const uploadAllLocalFolders = useCallback(async () => {
     if (sharedFolderUploadState.running) return;
-    if (!sharedAccessAuthenticated) {
-      pushToast("Sign in to Shared Projects before uploading local folders.", "warn", 5200);
+    if (!sharedAccessAuthenticated || !sharedWorkspaceAccess) {
+      pushToast(
+        sharedAccessAuthenticated
+          ? "Activate the Basic plan before uploading local folders."
+          : "Sign in to Shared Projects before uploading local folders.",
+        "warn",
+        5200
+      );
       return;
     }
 
-    let localEntries = (Array.isArray(projectLibrary) ? projectLibrary : []).filter((entry) =>
-      isValidProjectPayload(entry?.payload)
+    let localEntries = (Array.isArray(projectLibrary) ? projectLibrary : []).filter(
+      (entry) =>
+        isValidProjectPayload(entry?.payload) &&
+        canUseCachedWorkspaceEntry(
+          entry,
+          sharedAuth?.organizationId,
+          sharedAuth?.isStaff
+        )
     );
     if (import.meta.env.DEV) {
       try {
@@ -13395,7 +13755,15 @@ export default function App() {
         localEntries = mergeLocalProjectLibraryRecords(
           localEntries,
           localBackendProjects
-        ).filter((entry) => isValidProjectPayload(entry?.payload));
+        ).filter(
+          (entry) =>
+            isValidProjectPayload(entry?.payload) &&
+            canUseCachedWorkspaceEntry(
+              entry,
+              sharedAuth?.organizationId,
+              sharedAuth?.isStaff
+            )
+        );
       } catch (error) {
         pushToast(
           `Could not read the old local project database: ${error?.message || "local backend unavailable"}.`,
@@ -13539,6 +13907,7 @@ export default function App() {
           failed += 1;
           if (isAuthError(error)) {
             setSharedAuth((previous) => ({
+              ...previous,
               token: "",
               username: String(previous?.username || sharedLoginUsername || "").trim(),
               expiresAt: "",
@@ -13568,6 +13937,7 @@ export default function App() {
               folderName,
               workflowMode: workflow,
               storageScope: "shared",
+              ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
               savedBy: String(summary?.saved_by || sharedAuth?.username || "").trim(),
               lastEditedAt: String(
                 summary?.last_edited_at || summary?.saved_at || payload.savedAt || ""
@@ -13594,6 +13964,7 @@ export default function App() {
     } catch (error) {
       if (isAuthError(error)) {
         setSharedAuth((previous) => ({
+          ...previous,
           token: "",
           username: String(previous?.username || sharedLoginUsername || "").trim(),
           expiresAt: "",
@@ -13619,9 +13990,12 @@ export default function App() {
     pushToast,
     refreshSharedProjectLibrary,
     sharedAccessAuthenticated,
+    sharedAuth?.isStaff,
+    sharedAuth?.organizationId,
     sharedAuth?.username,
     sharedFolderUploadState.running,
     sharedLoginUsername,
+    sharedWorkspaceAccess,
   ]);
 
   const createHomeFolder = useCallback(() => {
@@ -13632,6 +14006,7 @@ export default function App() {
     }
     const existingFolder = (Array.isArray(projectFolders) ? projectFolders : []).find(
       (entry) =>
+        canUseCachedWorkspaceEntry(entry, sharedAuth?.organizationId, sharedAuth?.isStaff) &&
         String(entry?.name || "").trim().toLowerCase() === normalized.toLowerCase() &&
         String(entry?.workflowMode || "").trim().toLowerCase() === homeProjectTab
     );
@@ -13644,12 +14019,16 @@ export default function App() {
     }
     setProjectFolders((previous) => [
       ...(Array.isArray(previous) ? previous : []),
-      { name: normalized, workflowMode: homeProjectTab },
+      {
+        name: normalized,
+        workflowMode: homeProjectTab,
+        ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
+      },
     ]);
     setHomeFolderFilter(normalized);
     setHomeNewFolderName("");
     pushToast(`Folder "${normalized}" created.`, "info", 2800);
-  }, [homeNewFolderName, homeProjectTab, projectFolders, pushToast]);
+  }, [homeNewFolderName, homeProjectTab, projectFolders, pushToast, sharedAuth?.isStaff, sharedAuth?.organizationId]);
 
   const toggleHomeFolderCollapsed = useCallback((workflowMode, folderName) => {
     const normalizedFolder = String(folderName || "").trim();
@@ -13682,11 +14061,15 @@ export default function App() {
         const current = Array.isArray(prev) ? prev : [];
         const alreadyExists = current.some(
           (entry) =>
+            canUseCachedWorkspaceEntry(entry, sharedAuth?.organizationId, sharedAuth?.isStaff) &&
             String(entry?.name || "").trim() === nextName &&
             String(entry?.workflowMode || "").trim().toLowerCase() === normalizedWorkflow
         );
         return current
           .map((entry) => {
+            if (!canUseCachedWorkspaceEntry(entry, sharedAuth?.organizationId, sharedAuth?.isStaff)) {
+              return entry;
+            }
             const entryName = String(entry?.name || "").trim();
             const entryWorkflow =
               String(entry?.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
@@ -13702,6 +14085,9 @@ export default function App() {
 
       setProjectLibrary((prev) =>
         (Array.isArray(prev) ? prev : []).map((entry) => {
+          if (!canUseCachedWorkspaceEntry(entry, sharedAuth?.organizationId, sharedAuth?.isStaff)) {
+            return entry;
+          }
           const entryWorkflow =
             String(entry?.workflowMode || entry?.payload?.workflowMode || "")
               .trim()
@@ -13730,7 +14116,7 @@ export default function App() {
 
       setHomeFolderFilter((prev) => (prev === normalizedFolder ? nextName : prev));
     },
-    []
+    [sharedAuth?.isStaff, sharedAuth?.organizationId]
   );
 
   const deleteHomeFolder = useCallback(
@@ -13762,6 +14148,9 @@ export default function App() {
 
       setProjectFolders((prev) =>
         (Array.isArray(prev) ? prev : []).filter((entry) => {
+          if (!canUseCachedWorkspaceEntry(entry, sharedAuth?.organizationId, sharedAuth?.isStaff)) {
+            return true;
+          }
           const entryName = String(entry?.name || "").trim();
           const entryWorkflow =
             String(entry?.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
@@ -13777,7 +14166,7 @@ export default function App() {
       });
       setHomeFolderFilter((prev) => (prev === normalizedFolder ? "all" : prev));
     },
-    [projectLibrary, sharedAccessAuthenticated]
+    [projectLibrary, sharedAccessAuthenticated, sharedAuth?.isStaff, sharedAuth?.organizationId]
   );
 
   const hasCurrentProjectData = useMemo(() => {
@@ -13822,6 +14211,7 @@ export default function App() {
       pdfPageNumber: workflowMode === WORKFLOW_MODE_PDF ? pdfPageNumber : 1,
       lastEditedAt: nextLastEditedAt,
       savedBy: String(activeSharedProjectMeta?.savedBy || sharedAuth?.username || "").trim(),
+      ownerOrganizationId: String(sharedAuth?.organizationId || "").trim(),
     });
   }, [
     activeSharedProjectMeta?.id,
@@ -13834,6 +14224,7 @@ export default function App() {
     pdfPageNumber,
     projectName,
     sharedAuth?.username,
+    sharedAuth?.organizationId,
     workflowMode,
   ]);
 
@@ -13848,11 +14239,19 @@ export default function App() {
 
   const visibleProjectLibrary = useMemo(() => {
     const entries = Array.isArray(projectLibrary) ? projectLibrary : [];
-    if (sharedAccessAuthenticated) return entries;
+    if (sharedAccessAuthenticated) {
+      return entries.filter((entry) =>
+        canUseCachedWorkspaceEntry(
+          entry,
+          sharedAuth?.organizationId,
+          sharedAuth?.isStaff
+        )
+      );
+    }
     return entries.filter(
       (entry) => String(entry?.storageScope || "").trim().toLowerCase() !== "shared"
     );
-  }, [projectLibrary, sharedAccessAuthenticated]);
+  }, [projectLibrary, sharedAccessAuthenticated, sharedAuth?.isStaff, sharedAuth?.organizationId]);
 
   const pinnedProjectIdSet = useMemo(
     () => new Set((Array.isArray(pinnedProjectIds) ? pinnedProjectIds : []).filter(Boolean)),
@@ -13862,6 +14261,7 @@ export default function App() {
   const homeFolderOptions = useMemo(() => {
     const names = new Set([DEFAULT_PROJECT_FOLDER_NAME]);
     for (const entry of Array.isArray(projectFolders) ? projectFolders : []) {
+      if (!canUseCachedWorkspaceEntry(entry, sharedAuth?.organizationId, sharedAuth?.isStaff)) continue;
       const workflow =
         String(entry?.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
           ? WORKFLOW_MODE_PDF
@@ -13882,7 +14282,7 @@ export default function App() {
       names.add(folderName);
     }
     return Array.from(names).sort((a, b) => a.localeCompare(b));
-  }, [homeProjectTab, projectFolders, visibleProjectLibrary]);
+  }, [homeProjectTab, projectFolders, sharedAuth?.isStaff, sharedAuth?.organizationId, visibleProjectLibrary]);
 
   const filteredHomeProjectLibrary = useMemo(() => {
     const normalizedSearch = String(homeProjectSearch || "").trim().toLowerCase();
@@ -13961,6 +14361,19 @@ export default function App() {
     );
   }, [resumeProject?.projectId, visibleProjectLibrary]);
 
+  const usableResumeProject = useMemo(
+    () =>
+      resumeProject &&
+      canUseCachedWorkspaceEntry(
+        resumeProject,
+        sharedAuth?.organizationId,
+        sharedAuth?.isStaff
+      )
+        ? resumeProject
+        : null,
+    [resumeProject, sharedAuth?.isStaff, sharedAuth?.organizationId]
+  );
+
   const homeResumeCard = useMemo(() => {
     if (hasCurrentProjectData) {
       return {
@@ -13977,8 +14390,8 @@ export default function App() {
         buttonLabel: "Resume Current Project",
       };
     }
-    if (resumeProject || resumeProjectEntry) {
-      const source = resumeProjectEntry || resumeProject || {};
+    if (usableResumeProject || resumeProjectEntry) {
+      const source = resumeProjectEntry || usableResumeProject || {};
       const nextMode =
         String(source.workflowMode || "").trim().toLowerCase() === WORKFLOW_MODE_PDF
           ? WORKFLOW_MODE_PDF
@@ -13990,13 +14403,13 @@ export default function App() {
           nextMode === WORKFLOW_MODE_PDF
             ? `Page ${Math.max(
                 1,
-                Math.round(Number(source.pdfPageNumber || resumeProject?.pdfPageNumber) || 1)
+                Math.round(Number(source.pdfPageNumber || usableResumeProject?.pdfPageNumber) || 1)
               )}`
             : "Location workspace",
         lastEditedAt: String(
-          source.lastEditedAt || resumeProject?.lastEditedAt || source.savedAt || ""
+          source.lastEditedAt || usableResumeProject?.lastEditedAt || source.savedAt || ""
         ).trim(),
-        savedBy: String(source.savedBy || resumeProject?.savedBy || "").trim(),
+        savedBy: String(source.savedBy || usableResumeProject?.savedBy || "").trim(),
         buttonLabel: "Resume Where I Left Off",
       };
     }
@@ -14008,9 +14421,9 @@ export default function App() {
     lastManualSaveAt,
     pdfPageNumber,
     projectName,
-    resumeProject,
     resumeProjectEntry,
     sharedAuth?.username,
+    usableResumeProject,
     workflowMode,
   ]);
 
@@ -14049,13 +14462,13 @@ export default function App() {
       openMeasurementScreen(workflowMode);
       return;
     }
-    const targetId = String(resumeProject?.projectId || "").trim();
+    const targetId = String(usableResumeProject?.projectId || "").trim();
     if (targetId) {
       await loadProjectFromLibrary(targetId);
       return;
     }
-    if (resumeProject?.workflowMode) {
-      openMeasurementScreen(resumeProject.workflowMode);
+    if (usableResumeProject?.workflowMode) {
+      openMeasurementScreen(usableResumeProject.workflowMode);
       return;
     }
     pushToast("No recent project is available to resume yet.", "warn", 3200);
@@ -14065,7 +14478,7 @@ export default function App() {
     loadProjectFromLibrary,
     openMeasurementScreen,
     pushToast,
-    resumeProject,
+    usableResumeProject,
     workflowMode,
   ]);
 
@@ -17767,22 +18180,31 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     try {
-      const hasLocalStorageDraft = !!localStorage.getItem(AUTOSAVE_KEY);
+      const hasLocalStorageDraft = Boolean(
+        localStorage.getItem(autosaveStorageKey) ||
+          (sharedAuth?.isStaff && localStorage.getItem(AUTOSAVE_KEY))
+      );
       setAutosaveDraftAvailable(hasLocalStorageDraft);
       if (!hasLocalStorageDraft) {
-        void hasProjectRecovery().then((available) => {
+        void hasProjectRecovery({
+          organizationId: sharedAuth?.organizationId,
+          includeLegacy: Boolean(sharedAuth?.isStaff),
+        }).then((available) => {
           if (!cancelled) setAutosaveDraftAvailable(available);
         });
       }
     } catch {
-      void hasProjectRecovery().then((available) => {
+      void hasProjectRecovery({
+        organizationId: sharedAuth?.organizationId,
+        includeLegacy: Boolean(sharedAuth?.isStaff),
+      }).then((available) => {
         if (!cancelled) setAutosaveDraftAvailable(available);
       });
     }
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [autosaveStorageKey, sharedAuth?.isStaff, sharedAuth?.organizationId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -17818,9 +18240,10 @@ export default function App() {
           }
         );
         payload.pdfPageSaveMeta = nextPdfPageSaveMeta;
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+        localStorage.setItem(autosaveStorageKey, JSON.stringify(payload));
         void queueProjectRecoverySnapshot(payload, {
           projectId: buildProjectLibraryId(payload.projectName || "Untitled Project"),
+          ownerOrganizationId: sharedAuth?.organizationId,
           reason: "interval-autosave",
           forceCheckpoint: true,
         });
@@ -17831,7 +18254,14 @@ export default function App() {
       }
     }, 30000);
     return () => clearInterval(id);
-  }, [buildProjectPayload, currentPdfContextKey, currentPdfPageSignature, workflowMode]);
+  }, [
+    autosaveStorageKey,
+    buildProjectPayload,
+    currentPdfContextKey,
+    currentPdfPageSignature,
+    sharedAuth?.organizationId,
+    workflowMode,
+  ]);
 
   // Write an autosave snapshot when tab/window closes.
   useEffect(() => {
@@ -17850,7 +18280,7 @@ export default function App() {
             savedMeasurements: payload.pdfSavedMeasurements,
           }
         );
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+        localStorage.setItem(autosaveStorageKey, JSON.stringify(payload));
       } catch {
         /* intentionally ignore non-critical map/draw errors */
       }
@@ -17861,7 +18291,14 @@ export default function App() {
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [buildProjectPayload, currentPdfContextKey, currentPdfPageSignature, hasUnsavedChanges, workflowMode]);
+  }, [
+    autosaveStorageKey,
+    buildProjectPayload,
+    currentPdfContextKey,
+    currentPdfPageSignature,
+    hasUnsavedChanges,
+    workflowMode,
+  ]);
 
   // Keyboard shortcuts switch by workflow:
   // Location mode focuses on map drawing, PDF mode focuses on annotation tools.
@@ -20182,6 +20619,24 @@ export default function App() {
 
   // ---------- Render ----------
   if (appScreen === APP_SCREEN_HOME) {
+    if (!sharedAccessAuthenticated) {
+      return (
+        <>
+          <Toasts toasts={toasts} onClose={closeToast} />
+          <AccountAccess
+            checking={sharedAuthChecking}
+            loginUsername={sharedLoginUsername}
+            onLoginUsernameChange={setSharedLoginUsername}
+            loginPassword={sharedLoginPassword}
+            onLoginPasswordChange={setSharedLoginPassword}
+            loginSubmitting={sharedLoginSubmitting}
+            onLogin={handleSharedLogin}
+            registerSubmitting={sharedRegisterSubmitting}
+            onRegister={handleSharedRegister}
+          />
+        </>
+      );
+    }
     return (
       <>
         <Toasts toasts={toasts} onClose={closeToast} />
@@ -20223,7 +20678,21 @@ export default function App() {
           sharedAuthenticated={sharedAccessAuthenticated}
           sharedAuthChecking={sharedAuthChecking}
           sharedUsername={sharedAuth?.username || ""}
+          sharedOrganizationName={sharedAuth?.organizationName || "Workspace"}
           sharedExpiresAt={sharedAuth?.expiresAt || ""}
+          workspaceAccess={sharedWorkspaceAccess}
+          isStaff={Boolean(sharedAuth?.isStaff)}
+          billingStatus={billingStatus}
+          billingWorking={billingWorking}
+          onStartSubscription={handleStartSubscription}
+          onOpenBillingPortal={handleOpenBillingPortal}
+          onRefreshAccount={() => refreshCustomerWorkspace({ quiet: false })}
+          takeoffRequests={takeoffRequests}
+          takeoffRequestsLoading={takeoffRequestsLoading}
+          onCreateTakeoffRequest={handleCreateTakeoffRequest}
+          onAcceptTakeoffQuote={handleAcceptTakeoffQuote}
+          onUpdateTakeoffRequest={handleUpdateTakeoffRequest}
+          onDownloadTakeoffDelivery={handleDownloadTakeoffDelivery}
           loginUsername={sharedLoginUsername}
           onLoginUsernameChange={setSharedLoginUsername}
           loginPassword={sharedLoginPassword}

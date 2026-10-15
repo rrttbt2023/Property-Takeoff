@@ -22,6 +22,7 @@ frontend/.env
 frontend/.env.*
 Auto-measure-backend/.env
 Auto-measure-backend/.env.*
+!Auto-measure-backend/.env.example
 
 # Local runtime data
 Auto-measure-backend/data/measurements.db

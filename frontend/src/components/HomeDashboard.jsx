@@ -44,6 +44,8 @@ function Icon({ name, size = 18, strokeWidth = 1.8 }) {
     cloud: <><path d="M7 18h10a4 4 0 0 0 .7-7.9A6 6 0 0 0 6.4 8.4 4.8 4.8 0 0 0 7 18Z" /><path d="m9 13 2 2 4-4" /></>,
     warning: <><path d="M12 3 2.8 20h18.4Z" /><path d="M12 9v4M12 17h.01" /></>,
     database: <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" /><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /></>,
+    briefcase: <><rect x="3" y="7" width="18" height="13" rx="2" /><path d="M9 7V4h6v3M3 12h18M10 12v2h4v-2" /></>,
+    credit: <><rect x="2.5" y="5" width="19" height="14" rx="2" /><path d="M3 9h18M7 15h3" /></>,
   };
 
   return (
@@ -296,7 +298,21 @@ function HomeDashboard({
   sharedAuthenticated,
   sharedAuthChecking,
   sharedUsername,
+  sharedOrganizationName,
   sharedExpiresAt,
+  workspaceAccess,
+  isStaff,
+  billingStatus,
+  billingWorking,
+  onStartSubscription,
+  onOpenBillingPortal,
+  onRefreshAccount,
+  takeoffRequests,
+  takeoffRequestsLoading,
+  onCreateTakeoffRequest,
+  onAcceptTakeoffQuote,
+  onUpdateTakeoffRequest,
+  onDownloadTakeoffDelivery,
   loginUsername,
   onLoginUsernameChange,
   loginPassword,
@@ -336,6 +352,16 @@ function HomeDashboard({
   const [previewImageLoadingId, setPreviewImageLoadingId] = useState("");
   const [previewImageError, setPreviewImageError] = useState("");
   const [restoringRecoveryId, setRestoringRecoveryId] = useState("");
+  const [takeoffForm, setTakeoffForm] = useState({
+    title: "",
+    address: "",
+    serviceTypes: "Plowable, Sidewalks",
+    boundaryText: "",
+    notes: "",
+  });
+  const [takeoffFile, setTakeoffFile] = useState(null);
+  const [takeoffSubmitting, setTakeoffSubmitting] = useState(false);
+  const [takeoffMessage, setTakeoffMessage] = useState("");
   const previewProject =
     recentProjects.find((entry) => entry.id === selectedPreviewProjectId) || recentProject;
   const activityProjects = recentProjects.slice(0, 4);
@@ -378,6 +404,8 @@ function HomeDashboard({
     folders: { title: "Folders", description: "Organize projects by team, route, or service area" },
     activity: { title: "Project Activity", description: "Recent saves, edits, and shared updates" },
     recovery: { title: "Recovery Center", description: "Autosave snapshots and shared-sync health" },
+    takeoffs: { title: "Managed Takeoffs", description: "Request, quote, and track 24-hour measurements" },
+    billing: { title: "Plan & Billing", description: "Manage measuring access and subscription billing" },
     admin: { title: "Admin Tools", description: "Security, access, and audit information" },
   };
   const currentPage = pageDetails[activeNavigation] || pageDetails.dashboard;
@@ -390,9 +418,63 @@ function HomeDashboard({
     });
   };
   const showMode = (mode) => {
+    if (!workspaceAccess) {
+      showPage("billing");
+      return;
+    }
     onProjectTabChange(mode);
     onFolderFilterChange("all");
     showPage(mode === WORKFLOW_MODE_PDF ? "pdf-projects" : "location-projects");
+  };
+  const startLocationProject = () => workspaceAccess ? onNewLocation() : showPage("billing");
+  const startPdfProject = () => workspaceAccess ? onNewPdf() : showPage("billing");
+  const submitTakeoffRequest = async (event) => {
+    event.preventDefault();
+    setTakeoffMessage("");
+    let boundary = null;
+    if (takeoffForm.boundaryText.trim()) {
+      try {
+        boundary = JSON.parse(takeoffForm.boundaryText);
+      } catch {
+        setTakeoffMessage("The optional boundary must be valid GeoJSON.");
+        return;
+      }
+    }
+    setTakeoffSubmitting(true);
+    try {
+      await onCreateTakeoffRequest({
+        details: {
+          title: takeoffForm.title,
+          address: takeoffForm.address,
+          serviceTypes: takeoffForm.serviceTypes.split(",").map((value) => value.trim()).filter(Boolean),
+          boundary,
+          notes: takeoffForm.notes,
+        },
+        file: takeoffFile,
+      });
+      setTakeoffForm({ title: "", address: "", serviceTypes: "Plowable, Sidewalks", boundaryText: "", notes: "" });
+      setTakeoffFile(null);
+      setTakeoffMessage("Request received. We will review the site and send a measurement quote.");
+    } catch (error) {
+      setTakeoffMessage(error?.message || "The request could not be submitted.");
+    } finally {
+      setTakeoffSubmitting(false);
+    }
+  };
+  const quoteTakeoffRequest = async (request) => {
+    const value = window.prompt("Quote amount in dollars", request.quote_cents ? String(request.quote_cents / 100) : "");
+    if (value === null) return;
+    const dollars = Number(value);
+    if (!Number.isFinite(dollars) || dollars < 0) {
+      setTakeoffMessage("Enter a valid quote amount.");
+      return;
+    }
+    const note = window.prompt("Quote notes (optional)", request.quote_notes || "") ?? request.quote_notes ?? "";
+    await onUpdateTakeoffRequest(request.id, {
+      status: "quoted",
+      quote_cents: Math.round(dollars * 100),
+      quote_notes: note,
+    });
   };
   const showAllProjects = () => {
     onFolderFilterChange("all");
@@ -515,24 +597,26 @@ function HomeDashboard({
         <nav className="hd-nav" aria-label="Home dashboard navigation">
           <button type="button" className={activeNavigation === "dashboard" ? "active" : ""} aria-current={activeNavigation === "dashboard" ? "page" : undefined} onClick={() => showPage("dashboard")}><Icon name="home" />Dashboard</button>
           <p>Measure</p>
-          <button type="button" className={activeNavigation === "location-projects" ? "active" : ""} onClick={() => showMode(WORKFLOW_MODE_LOCATION)}><Icon name="pin" />Location Projects</button>
+          {workspaceAccess ? <><button type="button" className={activeNavigation === "location-projects" ? "active" : ""} onClick={() => showMode(WORKFLOW_MODE_LOCATION)}><Icon name="pin" />Location Projects</button>
           <button type="button" className={activeNavigation === "pdf-projects" ? "active" : ""} onClick={() => showMode(WORKFLOW_MODE_PDF)}><Icon name="file" />PDF / Image Projects</button>
           <button type="button" className={activeNavigation === "import" ? "active" : ""} onClick={() => showPage("import")}><Icon name="upload" />Import Project</button>
           <p>Project Library</p>
           <button type="button" className={activeNavigation === "all-projects" ? "active" : ""} onClick={showAllProjects}><Icon name="grid" />All Projects</button>
           <button type="button" className={activeNavigation === "pinned-sites" ? "active" : ""} onClick={() => showPage("pinned-sites")}><Icon name="star" />Pinned Sites</button>
-          <button type="button" className={activeNavigation === "folders" ? "active" : ""} onClick={showFolderTools}><Icon name="folder" />Folders</button>
+          <button type="button" className={activeNavigation === "folders" ? "active" : ""} onClick={showFolderTools}><Icon name="folder" />Folders</button></> : null}
           <p>Tools</p>
+          <button type="button" className={activeNavigation === "takeoffs" ? "active" : ""} onClick={() => showPage("takeoffs")}><Icon name="briefcase" />Managed Takeoffs</button>
           <button type="button" className={activeNavigation === "activity" ? "active" : ""} onClick={() => showPage("activity")}><Icon name="report" />Project Activity</button>
           <button type="button" className={activeNavigation === "recovery" ? "active" : ""} onClick={() => showPage("recovery")}><Icon name="database" />Recovery Center</button>
-          <button type="button" className={activeNavigation === "admin" ? "active" : ""} onClick={() => showPage("admin")}><Icon name="shield" />Admin Tools</button>
+          <button type="button" className={activeNavigation === "billing" ? "active" : ""} onClick={() => showPage("billing")}><Icon name="credit" />Plan & Billing</button>
+          {isStaff ? <button type="button" className={activeNavigation === "admin" ? "active" : ""} onClick={() => showPage("admin")}><Icon name="shield" />Admin Tools</button> : null}
         </nav>
 
         <div className="hd-account">
           {sharedAuthenticated ? (
             <>
               <div className="hd-avatar">{getInitials(sharedUsername)}</div>
-              <div className="hd-account-copy"><strong>{sharedUsername || "Shared user"}</strong><span>{sharedStatusLabel}</span></div>
+              <div className="hd-account-copy"><strong>{sharedUsername || "Shared user"}</strong><span>{sharedOrganizationName || sharedStatusLabel}</span></div>
               <button type="button" className="hd-icon-button" onClick={onLogout} title="Log out"><Icon name="logout" /></button>
             </>
           ) : (
@@ -562,7 +646,7 @@ function HomeDashboard({
               <i><b /></i>
             </button>
             {resumeCard ? <button type="button" className="hd-button hd-button-outline" onClick={onResume}>Resume Where I Left Off</button> : null}
-            <button type="button" className="hd-button hd-button-primary" onClick={onNewLocation}><Icon name="plus" />New Project</button>
+            <button type="button" className="hd-button hd-button-primary" onClick={workspaceAccess ? onNewLocation : () => showPage("billing")}><Icon name={workspaceAccess ? "plus" : "credit"} />{workspaceAccess ? "New Project" : "Choose Plan"}</button>
           </div>
         </header>
 
@@ -572,8 +656,8 @@ function HomeDashboard({
             <h2>Plan smarter.<br />Measure faster.<br /><em>Win more.</em></h2>
             <p>Accurate snow and landscape takeoffs from map or plan in minutes.</p>
             <div className="hd-hero-actions">
-              <button type="button" className="hd-button hd-button-primary" onClick={onNewLocation}><Icon name="pin" />Measure on Map</button>
-              <button type="button" className="hd-button hd-button-glass" onClick={onNewPdf}><Icon name="file" />Measure from PDF/Image</button>
+              <button type="button" className="hd-button hd-button-primary" onClick={startLocationProject}><Icon name="pin" />{workspaceAccess ? "Measure on Map" : "Unlock Map Measuring"}</button>
+              <button type="button" className="hd-button hd-button-glass" onClick={startPdfProject}><Icon name="file" />{workspaceAccess ? "Measure from PDF/Image" : "Unlock PDF Measuring"}</button>
             </div>
           </div>
           <div className="hd-summary-card">
@@ -788,6 +872,77 @@ function HomeDashboard({
           </section>
         ) : null}
 
+        {activeNavigation === "takeoffs" ? (
+          <section className="hd-page hd-takeoff-page">
+            <div className="hd-page-intro hd-page-intro-row">
+              <div>
+                <span className="hd-page-kicker">Measured by McKenna</span>
+                <h2>{isStaff ? "Managed takeoff queue" : "Send us a property to measure."}</h2>
+                <p>{isStaff ? "Review incoming properties, send quotes, and deliver completed measurements." : "Give us the property, boundary, and plan files. We will quote the work, then return completed measurements within 24 hours of approval."}</p>
+              </div>
+              <button type="button" className="hd-button hd-button-outline" onClick={onRefreshAccount} disabled={takeoffRequestsLoading}><Icon name="refresh" size={16} />{takeoffRequestsLoading ? "Refreshing..." : "Refresh requests"}</button>
+            </div>
+
+            {!isStaff ? <form className="hd-card hd-takeoff-form" onSubmit={submitTakeoffRequest}>
+              <div className="hd-takeoff-form-heading"><span><Icon name="briefcase" size={24} /></span><div><h3>Request a measurement quote</h3><p>No subscription is required to request a quote.</p></div></div>
+              <label>Site or project name<input required value={takeoffForm.title} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, title: event.target.value }))} placeholder="Dover Commons snow takeoff" /></label>
+              <label>Property address<input required value={takeoffForm.address} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, address: event.target.value }))} placeholder="1200 N Dupont Hwy, Dover, DE" /></label>
+              <label>Areas to measure<input value={takeoffForm.serviceTypes} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, serviceTypes: event.target.value }))} placeholder="Plowable, sidewalks, turf" /></label>
+              <label>Plan, image, KML, or boundary file<input type="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.kml,.kmz,.json" onChange={(event) => setTakeoffFile(event.target.files?.[0] || null)} /></label>
+              <label className="hd-takeoff-wide">Boundary GeoJSON (optional)<textarea value={takeoffForm.boundaryText} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, boundaryText: event.target.value }))} placeholder='Paste a GeoJSON Polygon, MultiPolygon, or Feature when available.' /></label>
+              <label className="hd-takeoff-wide">Instructions<textarea value={takeoffForm.notes} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, notes: event.target.value }))} placeholder="Describe the property boundary, exclusions, required layers, and deadline." /></label>
+              <div className="hd-takeoff-submit"><small>Accepted files are private and limited to 25 MB each.</small><button type="submit" className="hd-button hd-button-primary" disabled={takeoffSubmitting}>{takeoffSubmitting ? "Submitting..." : "Submit for Quote"}</button></div>
+            </form> : null}
+
+            {takeoffMessage ? <div className="hd-takeoff-message" role="status">{takeoffMessage}</div> : null}
+
+            <div className="hd-takeoff-list">
+              {takeoffRequests?.length ? takeoffRequests.map((request) => {
+                const quote = request.quote_cents === null || request.quote_cents === undefined ? "Pending review" : `$${(Number(request.quote_cents) / 100).toFixed(2)}`;
+                return <article className="hd-card hd-takeoff-request" key={request.id}>
+                  <div className="hd-takeoff-request-top"><div><span className={`hd-takeoff-status status-${request.status}`}>{String(request.status || "submitted").replaceAll("_", " ")}</span><h3>{request.title}</h3><p>{request.address}</p></div><strong>{quote}</strong></div>
+                  {isStaff ? <small className="hd-takeoff-customer">{request.organization_name || "Customer workspace"}</small> : null}
+                  <div className="hd-takeoff-facts"><span><small>Requested</small><strong>{formatDate(request.created_at)}</strong></span><span><small>Services</small><strong>{request.service_types?.join(", ") || "As directed"}</strong></span><span><small>Delivery due</small><strong>{request.due_at ? formatDate(request.due_at) : "Starts after approval"}</strong></span><span><small>Files</small><strong>{request.files?.length || 0}</strong></span></div>
+                  {request.notes ? <p className="hd-takeoff-notes">{request.notes}</p> : null}
+                  {request.quote_notes ? <div className="hd-takeoff-quote-note"><strong>Quote details</strong><p>{request.quote_notes}</p></div> : null}
+                  {request.delivery_notes ? <div className="hd-takeoff-delivery"><strong>Delivery notes</strong><p>{request.delivery_notes}</p></div> : null}
+                  <div className="hd-takeoff-actions">
+                    {!isStaff && request.status === "quoted" ? <button type="button" className="hd-button hd-button-primary" onClick={() => void onAcceptTakeoffQuote(request.id)}>Accept Quote & Start</button> : null}
+                    {!isStaff && request.status === "delivered" && request.delivered_project_id ? <button type="button" className="hd-button hd-button-primary" onClick={() => void onDownloadTakeoffDelivery(request.id)}>Download Delivered Project</button> : null}
+                    {isStaff && request.status === "submitted" ? <button type="button" className="hd-button hd-button-outline" onClick={() => void onUpdateTakeoffRequest(request.id, { status: "reviewing" })}>Start Review</button> : null}
+                    {isStaff && ["submitted", "reviewing", "quoted"].includes(request.status) ? <button type="button" className="hd-button hd-button-primary" onClick={() => void quoteTakeoffRequest(request)}>Send Quote</button> : null}
+                    {isStaff && request.status === "accepted" ? <button type="button" className="hd-button hd-button-primary" onClick={() => void onUpdateTakeoffRequest(request.id, { status: "in_progress" })}>Start Measuring</button> : null}
+                    {isStaff && request.status === "in_progress" ? <button type="button" className="hd-button hd-button-primary" onClick={() => {
+                      const projectId = window.prompt("Shared project ID to deliver", request.delivered_project_id || "");
+                      if (!projectId) return;
+                      const notes = window.prompt("Delivery notes", request.delivery_notes || "Measurements complete.") ?? "";
+                      void onUpdateTakeoffRequest(request.id, { status: "delivered", delivered_project_id: projectId, delivery_notes: notes });
+                    }}>Deliver Project</button> : null}
+                  </div>
+                </article>;
+              }) : <div className="hd-card hd-empty-state"><Icon name="briefcase" size={34} /><span>{takeoffRequestsLoading ? "Loading requests..." : isStaff ? "No customer takeoff requests are waiting." : "Your submitted takeoff requests will appear here."}</span></div>}
+            </div>
+          </section>
+        ) : null}
+
+        {activeNavigation === "billing" ? (
+          <section className="hd-page hd-billing-page">
+            <div className="hd-page-intro"><span className="hd-page-kicker">Simple workspace access</span><h2>Property Takeoff Basic</h2><p>Manual map and PDF measuring, folders, autosave recovery, exports, and shared project access. AI and CV measuring are not included in Basic.</p></div>
+            <article className="hd-card hd-plan-card">
+              <div className="hd-plan-name"><span><Icon name="credit" size={26} /></span><div><small>Monthly plan</small><h3>Basic Measuring Workspace</h3></div></div>
+              <div className="hd-plan-price"><strong>$9.99</strong><span>/ month</span></div>
+              <div className="hd-plan-features"><span><Icon name="check" />Location map measuring</span><span><Icon name="check" />PDF and image takeoffs</span><span><Icon name="check" />Project folders and version history</span><span><Icon name="check" />Reports, KML, PDF, and PNG exports</span></div>
+              <div className="hd-plan-state"><small>Current status</small><strong>{isStaff ? "Staff access" : String(billingStatus?.subscription_status || "inactive").replaceAll("_", " ")}</strong>{billingStatus?.current_period_end ? <span>Current period ends {formatDate(billingStatus.current_period_end)}</span> : null}</div>
+              <div className="hd-plan-actions">
+                {!workspaceAccess && !isStaff ? <button type="button" className="hd-button hd-button-primary" onClick={onStartSubscription} disabled={billingWorking}>{billingWorking ? "Opening secure checkout..." : "Start Basic for $9.99/month"}</button> : null}
+                {billingStatus?.customer_portal_available ? <button type="button" className="hd-button hd-button-outline" onClick={onOpenBillingPortal} disabled={billingWorking}>Manage Billing</button> : null}
+                <button type="button" className="hd-button hd-button-outline" onClick={onRefreshAccount} disabled={takeoffRequestsLoading}>Refresh Status</button>
+              </div>
+            </article>
+            <article className="hd-card hd-managed-promo"><div><span>Need us to do the measuring?</span><h3>Request a managed takeoff without subscribing.</h3><p>Submit the property and boundary, review our quote, and receive finished measurements within 24 hours after approval.</p></div><button type="button" className="hd-button hd-button-primary" onClick={() => showPage("takeoffs")}>Request a Quote</button></article>
+          </section>
+        ) : null}
+
         {activeNavigation === "activity" ? (
           <section className="hd-page">
             <div className="hd-page-intro hd-page-intro-row">
@@ -892,7 +1047,7 @@ function HomeDashboard({
           </div>
         </section> : null}
 
-        {activeNavigation === "admin" ? <section className="hd-admin" id="admin-tools">
+        {activeNavigation === "admin" && isStaff ? <section className="hd-admin" id="admin-tools">
           <details className="hd-card">
             <summary><span><Icon name="shield" />Security & Legal</span><Icon name="chevron" /></summary>
             <div className="hd-admin-content"><p>Authorized business use only. Shared login events and project actions are logged for accountability and security review.</p><p>Audit events follow the backend retention policy. Shared project files remain available until deleted by a logged-in user.</p>{sharedExpiresAt ? <small>Current session expires {formatDate(sharedExpiresAt)}.</small> : null}</div>

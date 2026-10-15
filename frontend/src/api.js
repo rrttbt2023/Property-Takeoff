@@ -72,10 +72,15 @@ async function readErrorPayload(response) {
 
 async function request(path, options = {}, candidateOptions = undefined) {
   const candidates = buildApiCandidates(path, candidateOptions);
+  const requestHeaders = new Headers(options.headers || {});
+  if (sharedAuthToken && !requestHeaders.has("Authorization")) {
+    requestHeaders.set("Authorization", `Bearer ${sharedAuthToken}`);
+  }
+  const requestOptions = { ...options, headers: requestHeaders };
   let networkError = null;
   for (const url of candidates) {
     try {
-      const response = await fetch(url, options);
+      const response = await fetch(url, requestOptions);
       if (!response.ok) {
         // If relative /api path 404s (common when no dev proxy), try next candidate.
         if (
@@ -115,7 +120,11 @@ async function request(path, options = {}, candidateOptions = undefined) {
 }
 
 function sharedRequest(path, options = {}) {
-  return request(path, options, {
+  const headers = new Headers(options.headers || {});
+  if (sharedAuthToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${sharedAuthToken}`);
+  }
+  return request(path, { ...options, headers }, {
     baseUrl: SHARED_API_BASE_URL,
     includeRelative: false,
     includeLocalFallbacks: false,
@@ -332,6 +341,19 @@ export function loginSharedAccess({ username, password }) {
   });
 }
 
+export function registerSharedAccess({ email, password, displayName, organizationName }) {
+  return sharedRequest("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: String(email || "").trim(),
+      password: String(password || ""),
+      display_name: String(displayName || "").trim(),
+      organization_name: String(organizationName || "").trim(),
+    }),
+  });
+}
+
 export function getSharedAccessSession() {
   return sharedRequest("/api/auth/session", {
     headers: sharedAuthToken
@@ -354,5 +376,62 @@ export function getSecurityAuditEvents(limit = 120) {
     headers: sharedAuthToken
       ? { Authorization: `Bearer ${sharedAuthToken}` }
       : {},
+  });
+}
+
+export function getBillingStatus() {
+  return sharedRequest("/api/billing/status");
+}
+
+export function createSubscriptionCheckout() {
+  return sharedRequest("/api/billing/checkout", { method: "POST" });
+}
+
+export function createBillingPortal() {
+  return sharedRequest("/api/billing/portal", { method: "POST" });
+}
+
+export function listTakeoffRequests(limit = 100) {
+  return sharedRequest(`/api/takeoff-requests?limit=${encodeURIComponent(limit)}`);
+}
+
+export function createTakeoffRequest({ title, address, serviceTypes, boundary, notes }) {
+  return sharedRequest("/api/takeoff-requests", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: String(title || "").trim(),
+      address: String(address || "").trim(),
+      service_types: Array.isArray(serviceTypes) ? serviceTypes : [],
+      boundary: boundary && typeof boundary === "object" ? boundary : null,
+      notes: String(notes || "").trim(),
+    }),
+  });
+}
+
+export function uploadTakeoffRequestFile(requestId, file) {
+  const body = new FormData();
+  body.append("upload", file);
+  return sharedRequest(`/api/takeoff-requests/${encodeURIComponent(requestId)}/files`, {
+    method: "POST",
+    body,
+  });
+}
+
+export function acceptTakeoffQuote(requestId) {
+  return sharedRequest(`/api/takeoff-requests/${encodeURIComponent(requestId)}/accept`, {
+    method: "POST",
+  });
+}
+
+export function getTakeoffDelivery(requestId) {
+  return sharedRequest(`/api/takeoff-requests/${encodeURIComponent(requestId)}/delivery`);
+}
+
+export function updateTakeoffRequest(requestId, changes) {
+  return sharedRequest(`/api/takeoff-requests/${encodeURIComponent(requestId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(changes || {}),
   });
 }

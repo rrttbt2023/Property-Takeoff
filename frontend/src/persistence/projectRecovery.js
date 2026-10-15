@@ -64,6 +64,20 @@ function normalizeProjectId(projectId, payload) {
   return projectName.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "untitled-project";
 }
 
+function normalizeOrganizationId(organizationId) {
+  return String(organizationId || "").trim();
+}
+
+function projectRecoveryKey(projectId, organizationId) {
+  const scope = normalizeOrganizationId(organizationId) || "legacy";
+  return `project:${scope}:${String(projectId || "").trim()}`;
+}
+
+function activeRecoveryKey(organizationId) {
+  const scope = normalizeOrganizationId(organizationId) || "legacy";
+  return `active:${scope}`;
+}
+
 function countPayloadPolygons(payload) {
   const layers = payload?.layerFeatures;
   if (!layers || typeof layers !== "object") return 0;
@@ -73,14 +87,17 @@ function countPayloadPolygons(payload) {
   );
 }
 
-async function pruneProjectHistory(db, projectId, limit) {
+async function pruneProjectHistory(db, projectId, organizationId, limit) {
   const transaction = db.transaction(HISTORY_STORE, "readwrite");
   const store = transaction.objectStore(HISTORY_STORE);
   const index = store.index("projectId");
   const records = await requestResult(index.getAll(projectId));
-  const ordered = (Array.isArray(records) ? records : []).sort((a, b) =>
-    String(b?.savedAt || "").localeCompare(String(a?.savedAt || ""))
-  );
+  const owner = normalizeOrganizationId(organizationId);
+  const ordered = (Array.isArray(records) ? records : [])
+    .filter(
+      (record) => normalizeOrganizationId(record?.ownerOrganizationId) === owner
+    )
+    .sort((a, b) => String(b?.savedAt || "").localeCompare(String(a?.savedAt || "")));
   for (const stale of ordered.slice(Math.max(1, limit))) {
     store.delete(stale.id);
   }
@@ -92,17 +109,25 @@ async function writeSnapshot(snapshot) {
   const transaction = db.transaction([LATEST_STORE, HISTORY_STORE], "readwrite");
   const latest = transaction.objectStore(LATEST_STORE);
   const history = transaction.objectStore(HISTORY_STORE);
-  latest.put({ ...snapshot, key: "active" });
-  latest.put({ ...snapshot, key: `project:${snapshot.projectId}` });
+  latest.put({ ...snapshot, key: activeRecoveryKey(snapshot.ownerOrganizationId) });
+  latest.put({
+    ...snapshot,
+    key: projectRecoveryKey(snapshot.projectId, snapshot.ownerOrganizationId),
+  });
   if (snapshot.checkpoint) {
     history.put({
       ...snapshot,
-      id: `${snapshot.projectId}:${snapshot.savedAt}:${Math.random().toString(36).slice(2, 8)}`,
+      id: `${snapshot.ownerOrganizationId || "legacy"}:${snapshot.projectId}:${snapshot.savedAt}:${Math.random().toString(36).slice(2, 8)}`,
     });
   }
   await transactionDone(transaction);
   if (snapshot.checkpoint) {
-    await pruneProjectHistory(db, snapshot.projectId, snapshot.historyLimit);
+    await pruneProjectHistory(
+      db,
+      snapshot.projectId,
+      snapshot.ownerOrganizationId,
+      snapshot.historyLimit
+    );
   }
   return snapshot;
 }
@@ -117,7 +142,13 @@ async function drainPendingWrites() {
 
 export function queueProjectRecoverySnapshot(
   payload,
-  { projectId = "", reason = "autosave", forceCheckpoint = false, historyLimit = DEFAULT_HISTORY_LIMIT } = {}
+  {
+    projectId = "",
+    ownerOrganizationId = "",
+    reason = "autosave",
+    forceCheckpoint = false,
+    historyLimit = DEFAULT_HISTORY_LIMIT,
+  } = {}
 ) {
   if (!canUseIndexedDb() || !payload || typeof payload !== "object") {
     return Promise.resolve(false);
@@ -129,6 +160,7 @@ export function queueProjectRecoverySnapshot(
   if (checkpoint) lastCheckpointAt.set(resolvedProjectId, now);
   pendingWrite = {
     projectId: resolvedProjectId,
+    ownerOrganizationId: normalizeOrganizationId(ownerOrganizationId),
     projectName: String(payload.projectName || "Untitled Project"),
     savedAt: String(payload.autosavedAt || payload.savedAt || new Date(now).toISOString()),
     reason: String(reason || "autosave"),
@@ -146,25 +178,45 @@ export function queueProjectRecoverySnapshot(
   return writePromise.then(() => true).catch(() => false);
 }
 
-export async function getLatestProjectRecovery(projectId = "") {
+export async function getLatestProjectRecovery(
+  projectId = "",
+  { organizationId = "", includeLegacy = false } = {}
+) {
   if (!canUseIndexedDb()) return null;
   const db = await openRecoveryDb();
   const transaction = db.transaction(LATEST_STORE, "readonly");
-  const key = String(projectId || "").trim() ? `project:${String(projectId).trim()}` : "active";
-  const record = await requestResult(transaction.objectStore(LATEST_STORE).get(key));
+  const normalizedProjectId = String(projectId || "").trim();
+  const key = normalizedProjectId
+    ? projectRecoveryKey(normalizedProjectId, organizationId)
+    : activeRecoveryKey(organizationId);
+  const store = transaction.objectStore(LATEST_STORE);
+  let record = await requestResult(store.get(key));
+  if (!record && includeLegacy) {
+    record = await requestResult(
+      store.get(normalizedProjectId ? `project:${normalizedProjectId}` : "active")
+    );
+  }
   await transactionDone(transaction);
   return record && typeof record === "object" ? record : null;
 }
 
-export async function listProjectRecoveries(limit = 100) {
+export async function listProjectRecoveries(
+  limit = 100,
+  { organizationId = "", includeLegacy = false } = {}
+) {
   if (!canUseIndexedDb()) return [];
   const db = await openRecoveryDb();
   const transaction = db.transaction(LATEST_STORE, "readonly");
   const records = await requestResult(transaction.objectStore(LATEST_STORE).getAll());
   await transactionDone(transaction);
   const maximum = Math.max(1, Math.min(500, Number(limit) || 100));
+  const owner = normalizeOrganizationId(organizationId);
   return (Array.isArray(records) ? records : [])
     .filter((record) => String(record?.key || "").startsWith("project:"))
+    .filter((record) => {
+      const recordOwner = normalizeOrganizationId(record?.ownerOrganizationId);
+      return recordOwner === owner || (includeLegacy && !recordOwner);
+    })
     .sort((a, b) => String(b?.savedAt || "").localeCompare(String(a?.savedAt || "")))
     .slice(0, maximum)
     .map((record) => ({
@@ -177,28 +229,44 @@ export async function listProjectRecoveries(limit = 100) {
     }));
 }
 
-export async function hasProjectRecovery() {
+export async function hasProjectRecovery(options = {}) {
   try {
-    return !!(await getLatestProjectRecovery());
+    return !!(await getLatestProjectRecovery("", options));
   } catch {
     return false;
   }
 }
 
-export async function clearProjectRecovery(projectId = "") {
+export async function clearProjectRecovery(
+  projectId = "",
+  { organizationId = "", includeLegacy = false } = {}
+) {
   if (!canUseIndexedDb()) return false;
   const db = await openRecoveryDb();
   const normalized = String(projectId || "").trim();
   const transaction = db.transaction([LATEST_STORE, HISTORY_STORE], "readwrite");
   const latest = transaction.objectStore(LATEST_STORE);
   const history = transaction.objectStore(HISTORY_STORE);
+  const owner = normalizeOrganizationId(organizationId);
   if (!normalized) {
-    latest.clear();
-    history.clear();
+    const latestRecords = await requestResult(latest.getAll());
+    for (const record of latestRecords || []) {
+      const recordOwner = normalizeOrganizationId(record?.ownerOrganizationId);
+      if (recordOwner === owner || (includeLegacy && !recordOwner)) latest.delete(record.key);
+    }
+    const historyRecords = await requestResult(history.getAll());
+    for (const record of historyRecords || []) {
+      const recordOwner = normalizeOrganizationId(record?.ownerOrganizationId);
+      if (recordOwner === owner || (includeLegacy && !recordOwner)) history.delete(record.id);
+    }
   } else {
-    latest.delete(`project:${normalized}`);
+    latest.delete(projectRecoveryKey(normalized, owner));
+    if (includeLegacy) latest.delete(`project:${normalized}`);
     const records = await requestResult(history.index("projectId").getAll(normalized));
-    for (const record of records || []) history.delete(record.id);
+    for (const record of records || []) {
+      const recordOwner = normalizeOrganizationId(record?.ownerOrganizationId);
+      if (recordOwner === owner || (includeLegacy && !recordOwner)) history.delete(record.id);
+    }
   }
   await transactionDone(transaction);
   return true;

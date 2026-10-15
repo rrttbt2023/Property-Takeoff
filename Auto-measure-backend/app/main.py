@@ -6,20 +6,26 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+from app.repositories.account_repository import init_db as init_account_db
 from app.repositories.audit_repository import init_db as init_audit_db
 from app.repositories.measurement_repository import init_db
 from app.repositories.project_repository import init_db as init_project_db
+from app.repositories.takeoff_repository import init_db as init_takeoff_db
 from app.routes.audit import router as audit_router
 from app.routes.auth import router as auth_router
+from app.routes.billing import router as billing_router
 from app.routes.measurements import router as measurements_router
 from app.routes.projects import router as projects_router
+from app.routes.takeoffs import router as takeoffs_router
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    init_account_db()
     init_audit_db()
     init_project_db()
+    init_takeoff_db()
     yield
 
 
@@ -69,7 +75,7 @@ cors_allow_origins = _parse_csv_env(
 )
 cors_allow_origin_regex = os.getenv(
     "AUTO_MEASURE_CORS_ALLOW_ORIGIN_REGEX",
-    DEFAULT_CORS_ORIGIN_REGEX,
+    "" if _is_production else DEFAULT_CORS_ORIGIN_REGEX,
 ).strip() or None
 
 
@@ -121,6 +127,10 @@ app.include_router(projects_router)
 app.include_router(projects_router, prefix="/api")
 app.include_router(audit_router)
 app.include_router(audit_router, prefix="/api")
+app.include_router(billing_router)
+app.include_router(billing_router, prefix="/api")
+app.include_router(takeoffs_router)
+app.include_router(takeoffs_router, prefix="/api")
 
 
 frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"

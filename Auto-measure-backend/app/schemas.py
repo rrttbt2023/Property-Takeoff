@@ -178,20 +178,136 @@ class SharedAuthLoginRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=240)
 
 
+class SharedAuthRegisterRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=10, max_length=240)
+    display_name: str = Field(..., min_length=2, max_length=120)
+    organization_name: str = Field(..., min_length=2, max_length=180)
+
+    @field_validator("email")
+    @classmethod
+    def email_must_look_valid(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"):
+            raise ValueError("Enter a valid email address")
+        return normalized
+
+    @field_validator("password")
+    @classmethod
+    def password_must_be_strong(cls, value: str) -> str:
+        password = str(value or "")
+        if not any(char.isalpha() for char in password) or not any(
+            char.isdigit() for char in password
+        ):
+            raise ValueError("Password must include at least one letter and one number")
+        return password
+
+
 class SharedAuthLoginResponse(BaseModel):
     token: str
     username: str
     expires_at: str
+    email: str = ""
+    display_name: str = ""
+    role: str = "member"
+    organization_id: str = ""
+    organization_name: str = "Workspace"
+    subscription_status: str = "inactive"
+    workspace_access: bool = False
+    ai_access: bool = False
+    is_staff: bool = False
 
 
 class SharedAuthSessionResponse(BaseModel):
     authenticated: bool = True
     username: str
     expires_at: str
+    email: str = ""
+    display_name: str = ""
+    role: str = "member"
+    organization_id: str = ""
+    organization_name: str = "Workspace"
+    subscription_status: str = "inactive"
+    workspace_access: bool = False
+    ai_access: bool = False
+    is_staff: bool = False
 
 
 class SharedAuthLogoutResponse(BaseModel):
     ok: bool = True
+
+
+class BillingStatusResponse(BaseModel):
+    subscription_status: str
+    workspace_access: bool
+    plan_name: str = "Property Takeoff Basic"
+    price_display: str = "$9.99/month"
+    current_period_end: str | None = None
+    cancel_at_period_end: bool = False
+    customer_portal_available: bool = False
+
+
+class BillingSessionResponse(BaseModel):
+    url: str
+
+
+TakeoffRequestStatus = Literal[
+    "submitted",
+    "reviewing",
+    "quoted",
+    "accepted",
+    "in_progress",
+    "delivered",
+    "canceled",
+]
+
+
+class TakeoffRequestCreate(BaseModel):
+    title: str = Field(..., min_length=2, max_length=180)
+    address: str = Field(..., min_length=3, max_length=300)
+    service_types: list[str] = Field(default_factory=list, max_length=20)
+    boundary: dict[str, Any] | None = None
+    notes: str = Field("", max_length=5000)
+
+
+class TakeoffRequestUpdate(BaseModel):
+    status: TakeoffRequestStatus | None = None
+    quote_cents: int | None = Field(None, ge=0, le=10_000_000)
+    quote_notes: str | None = Field(None, max_length=5000)
+    delivery_notes: str | None = Field(None, max_length=5000)
+    delivered_project_id: str | None = Field(None, max_length=180)
+
+
+class TakeoffFileRecord(BaseModel):
+    id: str
+    original_name: str
+    content_type: str
+    size_bytes: int = Field(..., ge=0)
+    created_at: str
+
+
+class TakeoffRequestRecord(BaseModel):
+    id: str
+    organization_id: str
+    organization_name: str = ""
+    created_by: str
+    title: str
+    address: str
+    service_types: list[str] = Field(default_factory=list)
+    boundary: dict[str, Any] | None = None
+    notes: str = ""
+    status: TakeoffRequestStatus
+    quote_cents: int | None = None
+    quote_notes: str = ""
+    quoted_at: str | None = None
+    accepted_at: str | None = None
+    due_at: str | None = None
+    delivered_at: str | None = None
+    delivery_notes: str = ""
+    delivered_project_id: str | None = None
+    created_at: str
+    updated_at: str
+    files: list[TakeoffFileRecord] = Field(default_factory=list)
 
 
 class SecurityAuditEvent(BaseModel):

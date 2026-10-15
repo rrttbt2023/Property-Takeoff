@@ -5,15 +5,36 @@ from app.schemas import (
     SharedAuthLoginRequest,
     SharedAuthLoginResponse,
     SharedAuthLogoutResponse,
+    SharedAuthRegisterRequest,
     SharedAuthSessionResponse,
 )
 from app.services.shared_auth import (
     login_shared_user,
     logout_shared_user,
+    register_shared_user,
     require_shared_access,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _auth_response(session: dict, *, include_token: bool) -> dict:
+    response = {
+        "username": str(session.get("username") or ""),
+        "email": str(session.get("email") or ""),
+        "display_name": str(session.get("display_name") or session.get("username") or ""),
+        "role": str(session.get("role") or "member"),
+        "organization_id": str(session.get("organization_id") or ""),
+        "organization_name": str(session.get("organization_name") or "Workspace"),
+        "subscription_status": str(session.get("subscription_status") or "inactive"),
+        "workspace_access": bool(session.get("workspace_access")),
+        "ai_access": bool(session.get("ai_access")),
+        "is_staff": bool(session.get("is_staff")),
+        "expires_at": str(session.get("expires_at") or ""),
+    }
+    if include_token:
+        response["token"] = str(session.get("token") or "")
+    return response
 
 
 def _request_meta(request: Request) -> tuple[str, str]:
@@ -53,11 +74,40 @@ def shared_login(payload: SharedAuthLoginRequest, request: Request) -> SharedAut
         ip_address=ip_address,
         user_agent=user_agent,
     )
-    return SharedAuthLoginResponse(
-        token=session["token"],
-        username=session["username"],
-        expires_at=session["expires_at"],
+    return SharedAuthLoginResponse(**_auth_response(session, include_token=True))
+
+
+@router.post("/register", response_model=SharedAuthLoginResponse, status_code=201)
+def shared_register(
+    payload: SharedAuthRegisterRequest,
+    request: Request,
+) -> SharedAuthLoginResponse:
+    ip_address, user_agent = _request_meta(request)
+    try:
+        session = register_shared_user(
+            email=payload.email,
+            password=payload.password,
+            display_name=payload.display_name.strip(),
+            organization_name=payload.organization_name.strip(),
+        )
+    except HTTPException:
+        _write_audit_safe(
+            username=payload.email,
+            action="auth.register",
+            outcome="failure",
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        raise
+    _write_audit_safe(
+        username=payload.email,
+        action="auth.register",
+        outcome="success",
+        resource=str(session.get("organization_id") or ""),
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
+    return SharedAuthLoginResponse(**_auth_response(session, include_token=True))
 
 
 @router.get("/session", response_model=SharedAuthSessionResponse)
@@ -66,8 +116,7 @@ def shared_session(
 ) -> SharedAuthSessionResponse:
     return SharedAuthSessionResponse(
         authenticated=True,
-        username=session["username"],
-        expires_at=session["expires_at"],
+        **_auth_response(session, include_token=False),
     )
 
 

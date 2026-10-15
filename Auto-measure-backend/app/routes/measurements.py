@@ -1,7 +1,7 @@
 import json
 import math
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from app.repositories import measurement_repository
 from app.schemas import (
@@ -20,12 +20,16 @@ from app.schemas import (
 )
 from app.services.measurement_service import MeasurementService
 from app.services.segmentation_service import SegmentationService
+from app.services.shared_auth import require_ai_access
 
 router = APIRouter(prefix="/measurements", tags=["measurements"])
 
 
 @router.post("", response_model=MeasurementResponse)
-def create_measurement(payload: MeasurementRequest) -> MeasurementResponse:
+def create_measurement(
+    payload: MeasurementRequest,
+    _: dict = Depends(require_ai_access),
+) -> MeasurementResponse:
     result = MeasurementService.measure(payload)
     measurement_repository.save_measurement(payload=payload, result=result)
     return result
@@ -48,7 +52,10 @@ def create_measurement_geojson(payload: GeoJsonMeasurementRequest) -> Measuremen
 
 
 @router.post("/auto-classify", response_model=AutoClassifyResponse)
-def auto_classify_measurement(payload: AutoClassifyRequest) -> AutoClassifyResponse:
+def auto_classify_measurement(
+    payload: AutoClassifyRequest,
+    _: dict = Depends(require_ai_access),
+) -> AutoClassifyResponse:
     try:
         return MeasurementService.auto_classify_layers(
             boundary_geometry=payload.boundary_geometry,
@@ -74,17 +81,23 @@ def calculate_pixel_distance(payload: PixelDistanceRequest) -> PixelDistanceResp
 
 
 @router.get("/history", response_model=list[MeasurementRecord])
-def get_measurement_history(limit: int = Query(20, ge=1, le=200)) -> list[MeasurementRecord]:
+def get_measurement_history(
+    limit: int = Query(20, ge=1, le=200),
+    _: dict = Depends(require_ai_access),
+) -> list[MeasurementRecord]:
     return measurement_repository.list_measurements(limit=limit)
 
 
 @router.get("/segment/status", response_model=SegmentationDiagnostics)
-def get_segmentation_status() -> SegmentationDiagnostics:
+def get_segmentation_status(_: dict = Depends(require_ai_access)) -> SegmentationDiagnostics:
     return SegmentationService.get_model_status(load_model=True)
 
 
 @router.get("/{measurement_id}", response_model=MeasurementRecord)
-def get_measurement_detail(measurement_id: int) -> MeasurementRecord:
+def get_measurement_detail(
+    measurement_id: int,
+    _: dict = Depends(require_ai_access),
+) -> MeasurementRecord:
     record = measurement_repository.get_measurement(measurement_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Measurement {measurement_id} not found.")
@@ -97,6 +110,7 @@ async def create_measurement_upload(
     measurement_type: MeasurementType = Form(...),
     known_distance_ft: float = Form(..., gt=0),
     known_distance_pixels: float = Form(100.0, gt=0),
+    _: dict = Depends(require_ai_access),
 ) -> MeasurementResponse:
     if image.content_type is None or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
@@ -122,6 +136,7 @@ async def segment_upload(
     use_model: bool = Form(True),
     min_area_px: int = Form(60, ge=1, le=10000),
     boundary_geojson: str | None = Form(None),
+    _: dict = Depends(require_ai_access),
 ) -> SegmentationResponse:
     if image.content_type is None or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
@@ -151,6 +166,7 @@ async def save_segmentation_correction(
     image: UploadFile = File(...),
     mask: UploadFile = File(...),
     metadata: str = Form("{}"),
+    _: dict = Depends(require_ai_access),
 ) -> SegmentationCorrectionResponse:
     for upload, label in ((image, "image"), (mask, "mask")):
         if upload.content_type is None or not upload.content_type.startswith("image/"):

@@ -2241,3 +2241,59 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+.hd-takeoff-page, .hd-billing-page { display: grid; gap: 18px; }
+.hd-takeoff-form { display: grid; gap: 15px; grid-template-columns: 1fr 1fr; padding: 22px; }
+.hd-takeoff-form-heading { align-items: center; display: flex; gap: 12px; grid-column: 1 / -1; }
+.hd-takeoff-form-heading > span, .hd-plan-name > span { align-items: center; background: color-mix(in srgb, var(--hd-green, #55a936) 14%, transparent); border-radius: 12px; color: var(--hd-green, #55a936); display: flex; height: 46px; justify-content: center; width: 46px; }
+.hd-takeoff-form h3, .hd-takeoff-request h3, .hd-plan-card h3, .hd-managed-promo h3 { margin: 0; }
+.hd-takeoff-form p, .hd-takeoff-request p, .hd-managed-promo p { margin: 4px 0 0; }
+.hd-takeoff-form label { color: var(--hd-muted, #66736b); display: grid; font-size: 12px; font-weight: 800; gap: 7px; letter-spacing: .02em; }
+.hd-takeoff-form input, .hd-takeoff-form textarea { background: var(--hd-control, rgba(255, 255, 255, .72)); border: 1px solid var(--hd-border, #dce5dd); border-radius: 9px; color: var(--hd-text, #112018); font: inherit; padding: 11px 12px; }
+.home-dashboard[data-theme="dark"] .hd-takeoff-form input, .home-dashboard[data-theme="dark"] .hd-takeoff-form textarea { background: #081217; color: #eef6f0; }
+.hd-takeoff-form textarea { min-height: 92px; resize: vertical; }
+.hd-takeoff-wide { grid-column: 1 / -1; }
+.hd-takeoff-submit { align-items: center; display: flex; gap: 16px; grid-column: 1 / -1; justify-content: space-between; }
+.hd-takeoff-submit small { color: var(--hd-muted, #66736b); }
+.hd-takeoff-message { background: rgba(65, 145, 55, .12); border: 1px solid rgba(83, 164, 59, .35); border-radius: 10px; color: var(--hd-text, #16301b); padding: 12px 15px; }
+.hd-takeoff-list { display: grid; gap: 13px; }
+.hd-takeoff-request { display: grid; gap: 14px; padding: 20px; }
+.hd-takeoff-request-top { align-items: start; display: flex; gap: 16px; justify-content: space-between; }
+.hd-takeoff-request-top > strong { color: var(--hd-green, #55a936); font-size: 22px; }
+.hd-takeoff-status { background: rgba(105, 126, 113, .13); border-radius: 999px; color: var(--hd-muted, #66736b); display: inline-block; font-size: 10px; font-weight: 900; letter-spacing: .09em; margin-bottom: 7px; padding: 5px 8px; text-transform: uppercase; }
+.hd-takeoff-status.status-quoted, .hd-takeoff-status.status-accepted { background: rgba(226, 163, 34, .15); color: #a56800; }
+.hd-takeoff-status.status-in_progress { background: rgba(38, 130, 218, .15); color: #2380c9; }
+.hd-takeoff-status.status-delivered { background: rgba(75, 163, 56, .15); color: #419033; }
+.hd-takeoff-customer { color: var(--hd-muted, #66736b); font-weight: 800; }
+.hd-takeoff-facts { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.hd-takeoff-facts span { background: rgba(116, 139, 123, .075); border-radius: 9px; display: grid; gap: 4px; padding: 11px; }
+.hd-takeoff-facts small { color: var(--hd-muted, #66736b); }
+.hd-takeoff-facts strong { font-size: 13px; overflow-wrap: anywhere; }
+.hd-takeoff-notes { color: var(--hd-muted, #66736b); white-space: pre-wrap; }
+.hd-takeoff-quote-note, .hd-takeoff-delivery { border-left: 3px solid var(--hd-green, #55a936); padding: 2px 12px; }
+.hd-takeoff-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+
+.hd-plan-card { align-items: center; display: grid; gap: 22px; grid-template-columns: minmax(220px, 1fr) auto; padding: clamp(24px, 4vw, 42px); }
+.hd-plan-name { align-items: center; display: flex; gap: 13px; }
+.hd-plan-name small { color: var(--hd-green, #55a936); font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+.hd-plan-price { align-items: baseline; display: flex; gap: 6px; }
+.hd-plan-price strong { color: var(--hd-text, #13221a); font-family: Georgia, serif; font-size: 48px; }
+.hd-plan-price span { color: var(--hd-muted, #66736b); }
+.hd-plan-features { display: grid; gap: 10px; grid-column: 1; }
+.hd-plan-features span { align-items: center; display: flex; gap: 9px; }
+.hd-plan-features .hd-icon { color: var(--hd-green, #55a936); }
+.hd-plan-state { align-self: stretch; background: rgba(99, 132, 108, .08); border-radius: 12px; display: grid; gap: 4px; padding: 16px; }
+.hd-plan-state small { color: var(--hd-muted, #66736b); }
+.hd-plan-state strong { text-transform: capitalize; }
+.hd-plan-state span { color: var(--hd-muted, #66736b); font-size: 12px; }
+.hd-plan-actions { display: flex; flex-wrap: wrap; gap: 9px; grid-column: 1 / -1; }
+.hd-managed-promo { align-items: center; background: linear-gradient(120deg, rgba(60, 133, 49, .12), rgba(63, 132, 157, .08)); display: flex; gap: 22px; justify-content: space-between; padding: 25px; }
+.hd-managed-promo > div > span { color: var(--hd-green, #55a936); font-size: 11px; font-weight: 900; letter-spacing: .1em; text-transform: uppercase; }
+
+@media (max-width: 760px) {
+  .hd-takeoff-form, .hd-plan-card { grid-template-columns: 1fr; }
+  .hd-takeoff-form-heading, .hd-takeoff-wide, .hd-takeoff-submit, .hd-plan-actions { grid-column: 1; }
+  .hd-takeoff-facts { grid-template-columns: 1fr 1fr; }
+  .hd-takeoff-submit, .hd-managed-promo { align-items: stretch; flex-direction: column; }
+  .hd-plan-price { grid-row: auto; }
+}

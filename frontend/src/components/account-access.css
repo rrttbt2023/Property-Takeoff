@@ -1,0 +1,73 @@
+.account-access {
+  --aa-green: #74bd39;
+  --aa-ink: #071319;
+  background: #071319;
+  color: #f7fbf3;
+  display: grid;
+  font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+  grid-template-columns: minmax(0, 1.2fr) minmax(380px, .8fr);
+  min-height: 100vh;
+}
+
+.account-access-story {
+  background:
+    linear-gradient(90deg, rgba(3, 14, 18, .96) 0%, rgba(3, 14, 18, .65) 55%, rgba(3, 14, 18, .24) 100%),
+    linear-gradient(0deg, rgba(5, 20, 24, .65), transparent 65%),
+    url("/winter-property-night-hero.jpg") center/cover;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 100vh;
+  padding: clamp(28px, 5vw, 72px);
+}
+
+.account-access-brand { align-items: center; display: flex; gap: 14px; }
+.account-access-brand img { height: 56px; object-fit: contain; width: 56px; }
+.account-access-brand div { display: grid; }
+.account-access-brand strong { font-family: Georgia, serif; font-size: 22px; letter-spacing: .02em; }
+.account-access-brand span { color: #bfd0c4; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+.account-access-copy { max-width: 690px; padding: 70px 0 5vh; }
+.account-access-kicker { color: #9fdc67; font-size: 13px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+.account-access-copy h1 { font-family: Georgia, serif; font-size: clamp(48px, 5.4vw, 82px); letter-spacing: -.045em; line-height: .94; margin: 18px 0 24px; }
+.account-access-copy h1 em { color: var(--aa-green); font-style: normal; }
+.account-access-copy > p { color: #d5e0da; font-size: clamp(17px, 1.35vw, 21px); line-height: 1.6; max-width: 590px; }
+.account-access-offers { display: flex; gap: 12px; margin-top: 34px; }
+.account-access-offers span { backdrop-filter: blur(10px); background: rgba(4, 16, 19, .7); border: 1px solid rgba(137, 190, 99, .3); border-radius: 14px; display: grid; gap: 3px; padding: 16px 20px; }
+.account-access-offers strong { color: #a5e46d; font-size: 25px; }
+.account-access-offers small { color: #c5d2ca; max-width: 220px; }
+
+.account-access-panel { align-self: center; background: #f7faf5; border-radius: 24px; box-shadow: 0 30px 90px rgba(0, 0, 0, .42); color: var(--aa-ink); margin: 28px clamp(24px, 5vw, 72px) 28px clamp(12px, 3vw, 46px); overflow: hidden; }
+.account-access-tabs { background: #e8eee7; display: grid; grid-template-columns: 1fr 1fr; padding: 6px; }
+.account-access-tabs button { background: transparent; border: 0; border-radius: 12px; color: #52615a; cursor: pointer; font: inherit; font-weight: 800; padding: 13px; }
+.account-access-tabs button.active { background: #fff; box-shadow: 0 4px 18px rgba(16, 42, 28, .1); color: #173c27; }
+.account-access-form { display: grid; gap: 17px; padding: clamp(28px, 4vw, 54px); }
+.account-access-form > div span { color: #3a8f31; font-size: 12px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
+.account-access-form h2 { font-family: Georgia, serif; font-size: 34px; letter-spacing: -.025em; line-height: 1.05; margin: 9px 0; }
+.account-access-form p { color: #637069; line-height: 1.5; margin: 0 0 7px; }
+.account-access-form label { color: #334039; display: grid; font-size: 13px; font-weight: 800; gap: 7px; }
+.account-access-form input { background: #fff; border: 1px solid #ccd7ce; border-radius: 10px; color: #102119; font: inherit; min-height: 46px; padding: 0 13px; }
+.account-access-form input:focus { border-color: #4b9d3d; box-shadow: 0 0 0 3px rgba(75, 157, 61, .14); outline: 0; }
+.account-access-form > button { background: linear-gradient(135deg, #1f6b2f, #54a934); border: 0; border-radius: 10px; color: #fff; cursor: pointer; font: inherit; font-weight: 900; min-height: 50px; padding: 0 18px; }
+.account-access-form > button:disabled { cursor: wait; opacity: .6; }
+.account-access-form > small { color: #758078; line-height: 1.45; text-align: center; }
+.account-access-loading { align-content: center; justify-items: center; }
+.account-access-loading strong { color: #cfddd4; }
+.account-access-mark { display: grid; margin-bottom: 18px; place-items: center; }
+.account-access-mark img { height: 72px; width: 72px; }
+.account-access-mark span { animation: account-pulse 1.4s ease-in-out infinite; border: 2px solid #6cbd42; border-radius: 50%; height: 92px; position: absolute; width: 92px; }
+@keyframes account-pulse { 50% { opacity: .2; transform: scale(.86); } }
+
+@media (max-width: 900px) {
+  .account-access { display: block; }
+  .account-access-story { min-height: 520px; }
+  .account-access-panel { margin: -54px 16px 24px; position: relative; }
+}
+
+@media (max-width: 560px) {
+  .account-access-story { min-height: 500px; padding: 24px; }
+  .account-access-copy { padding-top: 50px; }
+  .account-access-copy h1 { font-size: 43px; }
+  .account-access-offers { align-items: stretch; flex-direction: column; }
+  .account-access-panel { border-radius: 18px; }
+  .account-access-form { padding: 28px 22px; }
+}
