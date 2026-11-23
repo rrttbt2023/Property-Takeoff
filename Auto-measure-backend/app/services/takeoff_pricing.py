@@ -7,7 +7,7 @@ PROPERTY_TYPE_RATE_PER_ACRE_CENTS = {
     "industrial_warehouse": 240,
     "hoa_multifamily": 540,
     "office_medical": 450,
-    "school_campus": 420,
+    "school_campus": 120,
     "municipal": 300,
     "other": 390,
 }

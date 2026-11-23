@@ -474,8 +474,20 @@ def test_managed_takeoff_quote_and_acceptance_workflow(monkeypatch) -> None:
             "boundary": boundary,
         },
     )
+    school_estimate = client.post(
+        "/api/takeoff-requests/estimate",
+        headers=customer_headers,
+        json={
+            "property_type": "school_campus",
+            "measurement_scope": "full_property",
+            "service_types": ["Plowable pavement", "Sidewalks"],
+            "boundary": boundary,
+        },
+    )
     assert industrial_estimate.status_code == 200
     assert hoa_estimate.status_code == 200
+    assert school_estimate.status_code == 200
+    assert school_estimate.json()["low_cents"] < industrial_estimate.json()["low_cents"]
     assert industrial_estimate.json()["low_cents"] < hoa_estimate.json()["low_cents"]
     created = client.post(
         "/api/takeoff-requests",
