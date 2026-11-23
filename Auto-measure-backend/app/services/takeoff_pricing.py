@@ -168,16 +168,11 @@ def estimate_takeoff_quote(
         "currency": "USD",
         "estimated_square_feet": safe_square_feet,
         "estimated_acres": round(area_acres, 2),
-        "estimated_hours_low": low_hours,
-        "estimated_hours_high": high_hours,
-        "estimated_hours_midpoint": midpoint_hours,
-        "hourly_rate_cents": HOURLY_RATE_CENTS,
         "property_type": safe_property_type,
         "service_types": services,
         "area_source": "boundary",
         "disclaimer": (
-            "Planning estimate based on approximately $30 per virtual measuring hour. "
-            "Final hours are confirmed after the boundary, imagery, requested layers, "
-            "and site complexity are reviewed."
+            "Planning estimate only. Final price is confirmed after the boundary, "
+            "imagery, requested layers, and site complexity are reviewed."
         ),
     }

@@ -330,10 +330,6 @@ class TakeoffQuoteEstimateResponse(BaseModel):
     currency: str = "USD"
     estimated_square_feet: int = Field(..., ge=1_000)
     estimated_acres: float = Field(..., ge=0)
-    estimated_hours_low: float = Field(..., ge=0)
-    estimated_hours_high: float = Field(..., ge=0)
-    estimated_hours_midpoint: float = Field(..., ge=0)
-    hourly_rate_cents: int = Field(..., ge=0)
     property_type: TakeoffPropertyType
     service_types: list[str] = Field(default_factory=list)
     area_source: Literal["boundary"] = "boundary"
