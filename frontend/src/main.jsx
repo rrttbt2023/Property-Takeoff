@@ -12,6 +12,22 @@ import "./styles.css";
 // The worker cannot infer its sibling URL after Vite bundles the map library.
 setWorkerUrl(mapWorkerUrl);
 
+const MODULE_RECOVERY_KEY = "property-takeoff-module-recovery";
+let moduleReloadAttempted = false;
+window.addEventListener("vite:preloadError", (event) => {
+  event.preventDefault();
+  if (moduleReloadAttempted) return;
+  moduleReloadAttempted = true;
+  try {
+    const previous = Number(window.sessionStorage.getItem(MODULE_RECOVERY_KEY) || 0);
+    if (Date.now() - previous < 30_000) return;
+    window.sessionStorage.setItem(MODULE_RECOVERY_KEY, String(Date.now()));
+  } catch {
+    // A reload still gives the browser a fresh module graph when storage is unavailable.
+  }
+  window.location.reload();
+});
+
 const sentryDsn = String(import.meta.env.VITE_SENTRY_DSN || "").trim();
 if (sentryDsn) {
   Sentry.init({

@@ -13,7 +13,9 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: process.env.PW_BROWSER === "webkit"
+    ? [{ name: "webkit", use: { ...devices["Desktop Safari"] } }]
+    : [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: [
     {
       command: "E2E_BACKEND_PORT=8010 bash ../scripts/run-e2e-backend.sh",
