@@ -1,4 +1,6 @@
 import "maplibre-gl/dist/maplibre-gl.css";
+import { setWorkerUrl } from "maplibre-gl";
+import mapWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
 
 import React from "react";
@@ -6,6 +8,9 @@ import ReactDOM from "react-dom/client";
 import * as Sentry from "@sentry/react";
 import App from "./App.jsx";
 import "./styles.css";
+
+// The worker cannot infer its sibling URL after Vite bundles the map library.
+setWorkerUrl(mapWorkerUrl);
 
 const sentryDsn = String(import.meta.env.VITE_SENTRY_DSN || "").trim();
 if (sentryDsn) {

@@ -1,5 +1,6 @@
 /* global process */
 import { defineConfig, devices } from "@playwright/test";
+import { loadEnv } from "vite";
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -28,6 +29,7 @@ export default defineConfig({
       env: {
         VITE_SHARED_API_BASE_URL: ".",
         VITE_ENABLE_AI: "false",
+        VITE_MAPTILER_KEY: loadEnv("development", process.cwd(), "VITE_MAPTILER_KEY").VITE_MAPTILER_KEY || "local-browser-test",
         VITE_PROXY_TARGET: "http://127.0.0.1:8010",
       },
     },

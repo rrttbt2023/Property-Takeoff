@@ -1,11 +1,12 @@
 // src/App.jsx
-import React, { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useCallback, useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
 import * as turf from "@turf/turf";
 import { strToU8, zipSync } from "fflate";
 
 import { loadKmlOrKmz } from "./kml";
+import { frameOpenedProject, getProjectMapBounds } from "./projects/projectMapView";
 import {
   PROJECT_SCHEMA_VERSION,
   isValidProjectPayload,
@@ -765,6 +766,7 @@ function useRafThrottle(fn) {
   useEffect(() => {
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
     };
   }, []);
 
@@ -7117,7 +7119,8 @@ export default function App() {
   const suppressDrawSyncRef = useRef(false);
   const suppressDrawSyncRafRef = useRef(null);
   const suppressDrawSyncTimeoutRef = useRef(null);
-  const pendingProjectFitRef = useRef(null);
+  const [workspaceMap, setWorkspaceMap] = useState(null);
+  const [projectOpenSequence, setProjectOpenSequence] = useState(0);
   const measureModeRef = useRef(false);
   const pdfMeasureKindRef = useRef("distance");
   const drawingBoundaryRef = useRef(false);
@@ -11120,8 +11123,7 @@ export default function App() {
   // Make outlines thinner while editing/drawing
   const refreshPolygonOutlines = useCallback(() => {
     const map = mapRef.current;
-    if (!map) return;
-    if (!map.isStyleLoaded()) return;
+    if (!map?.getLayer("bm-empty")) return;
 
     const allFeatures = [];
 
@@ -13096,21 +13098,7 @@ export default function App() {
       const nextActive = data.activeLayer || "plowable";
       activeLayerRef.current = nextActive;
       reloadDrawForActiveLayer(normalized, data.layerVisible || layerVisibleRef.current);
-      requestAnimationFrame(() => {
-        fitMapToProject(data.boundary || null, normalized);
-      });
-      setTimeout(() => {
-        const map = mapRef.current;
-        if (!map) return;
-        if (map.isStyleLoaded()) {
-          fitMapToProject(data.boundary || null, normalized);
-          return;
-        }
-        pendingProjectFitRef.current = {
-          boundary: data.boundary || null,
-          layers: normalized,
-        };
-      }, 150);
+      if (resolvedWorkflowMode === WORKFLOW_MODE_LOCATION) setProjectOpenSequence((n) => n + 1);
       resetUndoRedoHistory(normalized);
       resetPdfUndoRedoHistory(loadedPdfAnnotations);
 
@@ -13200,6 +13188,7 @@ export default function App() {
 
       if (markAutosaveAvailable) setAutosaveDraftAvailable(true);
       if (switchToWorkspace) {
+        setShowWorkflowPicker(false);
         setAppScreen(
           resolvedWorkflowMode === WORKFLOW_MODE_PDF
             ? APP_SCREEN_PDF
@@ -13209,7 +13198,6 @@ export default function App() {
       if (successToast) pushToast(successToast, "info");
     },
     [
-      fitMapToProject,
       baseMap,
       normalizeFeature,
       pushToast,
@@ -16321,6 +16309,7 @@ export default function App() {
 
     if (nextBoundary && isPolygonLike(nextBoundary)) {
       setBoundary(nextBoundary);
+      fitMapToProject(nextBoundary, null);
       setDrawingBoundary(false);
       drawingBoundaryRef.current = false;
       if (!projectName.trim()) {
@@ -16338,7 +16327,7 @@ export default function App() {
         7000
       );
     }
-  }, [getLookupFeatureLabel, inferBoundaryFromVectorPoint, projectName, pushToast]);
+  }, [fitMapToProject, getLookupFeatureLabel, inferBoundaryFromVectorPoint, projectName, pushToast]);
 
   const lookupPropertyByAddress = useCallback(async (featureOverride = null) => {
     const q = propertyLookupQuery.trim();
@@ -16892,6 +16881,7 @@ export default function App() {
 
         const poly = polygonFeatures[0];
         setBoundary(to2DFeature(poly));
+        fitMapToProject(poly, null);
         setDrawingBoundary(false);
         drawingBoundaryRef.current = false;
 
@@ -16907,6 +16897,7 @@ export default function App() {
     },
     [
       ensureDrawBorderLayers,
+      fitMapToProject,
       normalizeFeature,
       projectName,
       pushToast,
@@ -17495,6 +17486,7 @@ export default function App() {
           properties: { ...(drawnPoly.properties || {}), lookup_source: "manual_draw" },
         });
         setBoundary(nextBoundary);
+        fitMapToProject(nextBoundary, null);
         setDrawingBoundary(false);
         drawingBoundaryRef.current = false;
 
@@ -18030,12 +18022,7 @@ export default function App() {
       ensureDrawBorderLayers();
       refreshDrawStrokeWidths();
       refreshPolygonOutlinesRaf();
-        refreshDraftDimensionsOverlayRaf();
-        if (pendingProjectFitRef.current) {
-        const p = pendingProjectFitRef.current;
-        fitMapToProject(p.boundary, p.layers);
-        pendingProjectFitRef.current = null;
-      }
+      refreshDraftDimensionsOverlayRaf();
     });
 
     let azureTileErrorHandled = false;
@@ -18074,6 +18061,13 @@ export default function App() {
 
     mapRef.current = map;
     drawRef.current = draw;
+    // The inline style can host saved geometry before any imagery tiles arrive.
+    const onStyleReady = () => {
+      setWorkspaceMap(map);
+      refreshPolygonOutlinesRaf();
+    };
+    if (map.getLayer("bm-empty")) onStyleReady();
+    else map.once("style.load", onStyleReady);
 
     return () => {
       try {
@@ -18090,10 +18084,12 @@ export default function App() {
         map.off("touchend", commitDirectSelectEdit);
         map.off("click", onMapClickMeasure);
         map.off("error", onMapError);
+        map.off("style.load", onStyleReady);
       } catch {
       /* intentionally ignore non-critical map/draw errors */
     }
       mapRef.current = null;
+      setWorkspaceMap(null);
       drawRef.current = null;
       map.remove();
     };
@@ -18756,6 +18752,13 @@ export default function App() {
     }
   }, [effectiveBaseMap, objects3d, showBasemapContext, terrain3d]);
 
+  const readProjectOpenBounds = useEffectEvent(() => getProjectMapBounds(layerFeatures, boundary));
+  useEffect(() => {
+    if (appScreen !== APP_SCREEN_LOCATION || workflowMode !== WORKFLOW_MODE_LOCATION ||
+        !workspaceMap || workspaceMap !== mapRef.current) return;
+    return frameOpenedProject(workspaceMap, readProjectOpenBounds());
+  }, [appScreen, workflowMode, workspaceMap, projectOpenSequence]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -18864,11 +18867,10 @@ export default function App() {
     ensureDrawBorderLayers();
   }, [ensureDrawBorderLayers]);
 
-  // Draw boundary + fit view + outside mask
+  // Redrawing the boundary or its mask must not move the project camera.
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !boundary) return;
-    if (!map.isStyleLoaded()) return;
+    const map = workspaceMap;
+    if (!map || map !== mapRef.current) return;
 
     const srcId = "boundary-src";
     const lineId = "boundary-line";
@@ -18884,6 +18886,7 @@ export default function App() {
     for (const id of [maskSrcId, srcId]) {
       if (map.getSource(id)) map.removeSource(id);
     }
+    if (!boundary) return;
 
     const beforeId = getDrawVertexLayerId(map) || undefined;
 
@@ -18935,15 +18938,8 @@ export default function App() {
       beforeId
     );
 
-    try {
-      const bbox = turf.bbox(boundary);
-      map.fitBounds(bbox, { padding: 40, duration: 600 });
-    } catch {
-      /* intentionally ignore non-critical map/draw errors */
-    }
-
     refreshPolygonOutlinesRaf();
-  }, [boundary, maskOutsideBoundary, refreshPolygonOutlinesRaf]);
+  }, [workspaceMap, boundary, maskOutsideBoundary, refreshPolygonOutlinesRaf]);
 
   // ---------- UI actions ----------
   const autoMeasureExperimental = useCallback(() => {
