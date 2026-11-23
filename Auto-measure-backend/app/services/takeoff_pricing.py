@@ -12,12 +12,12 @@ PROPERTY_TYPE_MULTIPLIERS = {
     "other": 1.10,
 }
 
-SERVICE_RATES_PER_10K_SQFT_CENTS = {
-    "plowable pavement": 900,
-    "sidewalks": 700,
-    "turf": 750,
-    "landscape beds": 850,
-    "other": 650,
+SUPPORTED_SERVICES = {
+    "plowable pavement",
+    "sidewalks",
+    "turf",
+    "landscape beds",
+    "other",
 }
 
 SERVICE_ALIASES = {
@@ -34,11 +34,16 @@ SERVICE_ALIASES = {
 }
 
 SQ_METERS_TO_SQ_FEET = 10.76391041671
+SQ_FEET_PER_ACRE = 43_560
 EARTH_RADIUS_METERS = 6_371_008.8
+HOURLY_RATE_CENTS = 3_000
+BASE_REVIEW_HOURS = 0.75
+FIRST_SERVICE_COMPLEXITY = 0.45
+ADDITIONAL_SERVICE_COMPLEXITY = 0.12
 
 
-def _round_to_five_dollars(value: float) -> int:
-    return max(0, int(round(value / 500.0) * 500))
+def _round_to_quarter_hour(value: float) -> float:
+    return max(0.0, round(value * 4.0) / 4.0)
 
 
 def _normalized_services(service_types: list[Any]) -> list[str]:
@@ -48,7 +53,7 @@ def _normalized_services(service_types: list[Any]) -> list[str]:
         if not candidate:
             continue
         candidate = SERVICE_ALIASES.get(candidate, candidate)
-        if candidate not in SERVICE_RATES_PER_10K_SQFT_CENTS:
+        if candidate not in SUPPORTED_SERVICES:
             candidate = "other"
         if candidate not in normalized:
             normalized.append(candidate)
@@ -136,27 +141,43 @@ def estimate_takeoff_quote(
     )
     safe_square_feet = max(1_000, min(100_000_000, int(estimated_square_feet)))
     services = _normalized_services(service_types)
-    service_rate = sum(
-        SERVICE_RATES_PER_10K_SQFT_CENTS[service] for service in services
+    area_acres = safe_square_feet / SQ_FEET_PER_ACRE
+    service_complexity = FIRST_SERVICE_COMPLEXITY + (
+        ADDITIONAL_SERVICE_COMPLEXITY * max(0, len(services) - 1)
     )
-    area_blocks = max(1.0, safe_square_feet / 10_000.0)
-    midpoint = 4_500 + (
-        service_rate * area_blocks * PROPERTY_TYPE_MULTIPLIERS[safe_property_type]
+    midpoint_hours = _round_to_quarter_hour(
+        (
+            BASE_REVIEW_HOURS
+            + math.sqrt(max(0.1, area_acres)) * service_complexity
+        )
+        * PROPERTY_TYPE_MULTIPLIERS[safe_property_type]
     )
-    midpoint_cents = max(9_500, _round_to_five_dollars(midpoint))
-    low_cents = max(7_500, _round_to_five_dollars(midpoint_cents * 0.85))
-    high_cents = max(low_cents + 2_500, _round_to_five_dollars(midpoint_cents * 1.20))
+    midpoint_hours = max(1.0, midpoint_hours)
+    low_hours = max(1.0, _round_to_quarter_hour(midpoint_hours * 0.80))
+    high_hours = max(
+        low_hours + 0.5,
+        _round_to_quarter_hour(midpoint_hours * 1.25),
+    )
+    low_cents = int(round(low_hours * HOURLY_RATE_CENTS))
+    high_cents = int(round(high_hours * HOURLY_RATE_CENTS))
+    midpoint_cents = int(round(midpoint_hours * HOURLY_RATE_CENTS))
     return {
         "low_cents": low_cents,
         "high_cents": high_cents,
         "midpoint_cents": midpoint_cents,
         "currency": "USD",
         "estimated_square_feet": safe_square_feet,
+        "estimated_acres": round(area_acres, 2),
+        "estimated_hours_low": low_hours,
+        "estimated_hours_high": high_hours,
+        "estimated_hours_midpoint": midpoint_hours,
+        "hourly_rate_cents": HOURLY_RATE_CENTS,
         "property_type": safe_property_type,
         "service_types": services,
         "area_source": "boundary",
         "disclaimer": (
-            "Planning estimate only. Final price is confirmed after boundary, imagery, "
-            "requested layers, and site complexity are reviewed."
+            "Planning estimate based on approximately $30 per virtual measuring hour. "
+            "Final hours are confirmed after the boundary, imagery, requested layers, "
+            "and site complexity are reviewed."
         ),
     }

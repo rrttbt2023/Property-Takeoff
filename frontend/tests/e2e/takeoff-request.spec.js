@@ -41,7 +41,9 @@ test("a customer sees the guided boundary-based quote workflow", async ({ page }
   await page.getByRole("button", { name: "Finish boundary" }).click();
 
   await expect(page.locator(".takeoff-boundary-area")).not.toContainText("Boundary not drawn");
+  await expect(page.locator(".takeoff-boundary-map-shell")).toHaveAttribute("data-boundary-visible", "true");
   await expect(page.locator(".hd-takeoff-estimate")).not.toContainText("draw a boundary");
+  await expect(page.locator(".hd-takeoff-estimate")).toContainText("$30/hr");
   await expect(page.getByRole("button", { name: "Submit Quote Request" })).toBeEnabled();
 });
 
@@ -69,6 +71,7 @@ test("a touch customer can place and finish a quote boundary", async ({ browser 
     }
     await page.getByRole("button", { name: "Finish boundary" }).click();
     await expect(page.locator(".takeoff-boundary-area")).not.toContainText("Boundary not drawn");
+    await expect(page.locator(".takeoff-boundary-map-shell")).toHaveAttribute("data-boundary-visible", "true");
     await expect(page.getByRole("button", { name: "Submit Quote Request" })).toBeEnabled();
   } finally {
     await context.close();

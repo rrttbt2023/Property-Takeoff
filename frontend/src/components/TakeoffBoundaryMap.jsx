@@ -9,6 +9,10 @@ const SQ_FEET_PER_ACRE = 43_560;
 const DRAFT_SOURCE_ID = "takeoff-boundary-draft";
 const DRAFT_LINE_LAYER_ID = "takeoff-boundary-draft-line";
 const DRAFT_POINT_LAYER_ID = "takeoff-boundary-draft-points";
+const COMPLETED_SOURCE_ID = "takeoff-boundary-completed";
+const COMPLETED_FILL_LAYER_ID = "takeoff-boundary-completed-fill";
+const COMPLETED_HALO_LAYER_ID = "takeoff-boundary-completed-halo";
+const COMPLETED_LINE_LAYER_ID = "takeoff-boundary-completed-line";
 
 // Mapbox Draw still ships Mapbox GL class names; align them with MapLibre's DOM.
 if (MapboxDraw.constants?.classes) {
@@ -79,6 +83,7 @@ function TakeoffBoundaryMap({
   const draftingRef = useRef(false);
   const draftCoordinatesRef = useRef([]);
   const updateDraftRef = useRef(() => {});
+  const updateCompletedRef = useRef(() => {});
   const completeDraftRef = useRef(() => false);
   const [mapStatus, setMapStatus] = useState("Draw the outer property boundary to estimate its area.");
   const [locating, setLocating] = useState(false);
@@ -128,6 +133,15 @@ function TakeoffBoundaryMap({
     mapRef.current = map;
     drawRef.current = draw;
 
+    const updateCompletedBoundary = (feature) => {
+      const source = map.getSource(COMPLETED_SOURCE_ID);
+      if (!source) return;
+      source.setData({
+        type: "FeatureCollection",
+        features: feature ? [feature] : [],
+      });
+    };
+
     const syncBoundary = (event) => {
       if (event?.type === "draw.create") {
         const newestId = event.features?.[0]?.id;
@@ -141,6 +155,7 @@ function TakeoffBoundaryMap({
       const squareFeet = feature
         ? Math.max(0, Math.round(turf.area(feature) * SQ_METERS_TO_SQ_FEET))
         : 0;
+      updateCompletedBoundary(feature);
       setBoundarySquareFeet(squareFeet);
       onChangeRef.current?.(feature);
       onSquareFeetChangeRef.current?.(squareFeet);
@@ -199,6 +214,7 @@ function TakeoffBoundaryMap({
     };
 
     updateDraftRef.current = updateDraft;
+    updateCompletedRef.current = updateCompletedBoundary;
     completeDraftRef.current = completeDraft;
 
     const addDraftCoordinate = (coordinate) => {
@@ -276,6 +292,41 @@ function TakeoffBoundaryMap({
 
     map.on("load", () => {
       loadedRef.current = true;
+      const firstDrawLayerId = drawStyles()
+        .map((style) => style.id)
+        .find((layerId) => map.getLayer(layerId));
+      map.addSource(COMPLETED_SOURCE_ID, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      map.addLayer({
+        id: COMPLETED_FILL_LAYER_ID,
+        type: "fill",
+        source: COMPLETED_SOURCE_ID,
+        paint: {
+          "fill-color": "#66b84d",
+          "fill-opacity": 0.16,
+        },
+      }, firstDrawLayerId);
+      map.addLayer({
+        id: COMPLETED_HALO_LAYER_ID,
+        type: "line",
+        source: COMPLETED_SOURCE_ID,
+        paint: {
+          "line-color": "#071208",
+          "line-opacity": 0.82,
+          "line-width": 9,
+        },
+      }, firstDrawLayerId);
+      map.addLayer({
+        id: COMPLETED_LINE_LAYER_ID,
+        type: "line",
+        source: COMPLETED_SOURCE_ID,
+        paint: {
+          "line-color": "#b8ff78",
+          "line-width": 5,
+        },
+      }, firstDrawLayerId);
       map.addSource(DRAFT_SOURCE_ID, {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
@@ -326,6 +377,7 @@ function TakeoffBoundaryMap({
       draftingRef.current = false;
       draftCoordinatesRef.current = [];
       updateDraftRef.current = () => {};
+      updateCompletedRef.current = () => {};
       completeDraftRef.current = () => false;
       canvas.removeEventListener("pointerdown", handlePointerDown, true);
       canvas.removeEventListener("pointerup", handlePointerUp, true);
@@ -342,6 +394,7 @@ function TakeoffBoundaryMap({
     const existing = draw.getAll().features;
     if (!value && existing.length) {
       draw.deleteAll();
+      updateCompletedRef.current(null);
       setBoundarySquareFeet(0);
       setMapStatus("Boundary cleared. Draw the outer property boundary to estimate its area.");
     }
@@ -401,6 +454,7 @@ function TakeoffBoundaryMap({
       return;
     }
     draw.deleteAll();
+    updateCompletedRef.current(null);
     draw.changeMode("simple_select");
     setBoundarySquareFeet(0);
     onChangeRef.current?.(null);
@@ -433,6 +487,7 @@ function TakeoffBoundaryMap({
 
   const clearBoundary = () => {
     drawRef.current?.deleteAll();
+    updateCompletedRef.current(null);
     draftingRef.current = false;
     setIsDrafting(false);
     draftCoordinatesRef.current = [];
@@ -466,7 +521,7 @@ function TakeoffBoundaryMap({
           <button type="button" onClick={clearBoundary} disabled={!value}>Clear</button>
         </div>
       </div>
-      <div className="takeoff-boundary-map-shell">
+      <div className="takeoff-boundary-map-shell" data-boundary-visible={boundarySquareFeet > 0 ? "true" : "false"}>
         <div ref={containerRef} className="takeoff-boundary-map" />
         <output className={`takeoff-boundary-area${boundarySquareFeet ? " ready" : ""}`}>
           <small>Quote boundary</small>

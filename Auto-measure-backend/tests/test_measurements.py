@@ -433,8 +433,15 @@ def test_managed_takeoff_quote_and_acceptance_workflow(monkeypatch) -> None:
     )
     assert estimate.status_code == 200
     estimate_body = estimate.json()
-    assert estimate_body["low_cents"] >= 7_500
+    assert estimate_body["low_cents"] >= 3_000
     assert estimate_body["high_cents"] > estimate_body["low_cents"]
+    assert estimate_body["hourly_rate_cents"] == 3_000
+    assert estimate_body["low_cents"] == int(
+        estimate_body["estimated_hours_low"] * estimate_body["hourly_rate_cents"]
+    )
+    assert estimate_body["high_cents"] == int(
+        estimate_body["estimated_hours_high"] * estimate_body["hourly_rate_cents"]
+    )
     assert estimate_body["area_source"] == "boundary"
     assert estimate_body["estimated_square_feet"] > 1_000
     created = client.post(
