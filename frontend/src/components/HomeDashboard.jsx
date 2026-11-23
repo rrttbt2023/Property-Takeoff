@@ -7,6 +7,9 @@ import {
 } from "../projects/projectLibrary";
 import TakeoffBoundaryMap from "./TakeoffBoundaryMap";
 import "./home-dashboard.css";
+import "./field-desk.css";
+import { getSharedProject } from "../api";
+import { readStartIntent, setStartIntent } from "./startIntent";
 
 const PricingAdminPanel = lazy(() => import("./PricingAdminPanel"));
 const ProposalBuilder = lazy(() => import("./ProposalBuilder"));
@@ -155,62 +158,38 @@ function getInitials(name) {
   return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "MS";
 }
 
-function collectPolygonRings(geometry) {
-  if (!geometry || !Array.isArray(geometry.coordinates)) return [];
-  if (geometry.type === "Polygon") return geometry.coordinates.slice(0, 1);
-  if (geometry.type === "MultiPolygon") {
-    return geometry.coordinates.flatMap((polygon) => polygon.slice(0, 1));
-  }
-  return [];
-}
-
-function previewShapes(entry) {
-  const payload = entry?.payload || {};
-  const raw = [];
-  const addFeature = (feature, layer) => {
-    for (const ring of collectPolygonRings(feature?.geometry || feature)) {
-      if (Array.isArray(ring) && ring.length >= 3) raw.push({ layer, ring });
+function previewShapes(payload) {
+  const polygons = [];
+  const add = (feature, layer) => {
+    const geometry = feature?.geometry || feature;
+    const parts = geometry?.type === "Polygon" ? [geometry.coordinates]
+      : geometry?.type === "MultiPolygon" ? geometry.coordinates : [];
+    for (const rings of parts || []) {
+      const valid = (rings || []).map((ring) => (ring || []).filter((p) =>
+        Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]))).filter((ring) => ring.length >= 3);
+      if (valid.length) polygons.push({ layer, rings: valid });
     }
   };
-
-  addFeature(payload.boundary, "boundary");
-  const layers = payload.layerFeatures || payload.layers || {};
+  add(payload?.boundary, "boundary");
+  const layers = payload?.layerFeatures || payload?.layers || {};
   for (const layer of Object.keys(PREVIEW_LAYER_COLORS)) {
-    const features = Array.isArray(layers?.[layer]) ? layers[layer].slice(0, 80) : [];
-    for (const feature of features) addFeature(feature, layer);
+    for (const feature of Array.isArray(layers[layer]) ? layers[layer] : []) add(feature, layer);
   }
-  if (!raw.length) return [];
-
-  const points = raw.flatMap(({ ring }) => ring).filter(
-    (point) => Array.isArray(point) && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1]))
-  );
-  if (!points.length) return [];
-  let minX = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  for (const point of points) {
-    const x = Number(point[0]);
-    const y = Number(point[1]);
-    minX = Math.min(minX, x);
-    maxX = Math.max(maxX, x);
-    minY = Math.min(minY, y);
-    maxY = Math.max(maxY, y);
+  if (!polygons.length) return [];
+  const measured = polygons.filter(({ layer }) => layer !== "boundary");
+  let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
+  for (const { rings } of measured.length ? measured : polygons) {
+    for (const [x, y] of rings[0]) {
+      west = Math.min(west, x); east = Math.max(east, x);
+      south = Math.min(south, y); north = Math.max(north, y);
+    }
   }
-  const spanX = Math.max(0.000001, maxX - minX);
-  const spanY = Math.max(0.000001, maxY - minY);
-  const scale = Math.min(660 / spanX, 320 / spanY);
-  const offsetX = 50 + (660 - spanX * scale) / 2;
-  const offsetY = 35 + (320 - spanY * scale) / 2;
-
-  return raw.map(({ layer, ring }, index) => ({
-    layer,
-    key: `${layer}-${index}`,
-    points: ring.map((point) => {
-      const x = offsetX + (Number(point[0]) - minX) * scale;
-      const y = 355 - (offsetY + (Number(point[1]) - minY) * scale);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(" "),
+  const longitudeScale = Math.max(0.01, Math.cos((north + south) * Math.PI / 360));
+  const scale = Math.min(690 / Math.max(1e-9, (east - west) * longitudeScale), 320 / Math.max(1e-9, north - south));
+  return polygons.map(({ layer, rings }, key) => ({
+    layer, key, path: rings.map((ring) => ring.map(([x,y], index) =>
+      `${index ? "L" : "M"}${(380 + (x - (west + east) / 2) * longitudeScale * scale).toFixed(1)} ${(195 - (y - (north + south) / 2) * scale).toFixed(1)}`
+    ).join("") + "Z").join(""),
   }));
 }
 
@@ -261,56 +240,48 @@ async function imageFileToPreviewDataUrl(file) {
   }
 }
 
-function ProjectGeometryPreview({ entry, imageUrl = "" }) {
-  const shapes = useMemo(() => previewShapes(entry), [entry]);
-  const [zoom, setZoom] = useState(1);
+function DeskPreview({ entry, payload, pdf, imageUrl, renderPlanPreview }) {
+  const [remote, setRemote] = useState(null);
+  const [plan, setPlan] = useState(null);
+  const remoteId = !payload && !entry?.payload && entry?.storageScope === "shared" ? entry.id : "";
+  useEffect(() => {
+    if (!remoteId) return;
+    let active = true;
+    getSharedProject(remoteId).then((project) => {
+      if (active) setRemote({ id: remoteId, payload: project?.payload });
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [remoteId]);
+  const data = payload || entry?.payload || (remote?.id === remoteId ? remote?.payload : null);
+  const shapes = useMemo(() => pdf ? [] : previewShapes(data), [pdf, data]);
+  useEffect(() => {
+    if (!pdf || !data?.pdfSourceAsset) return;
+    let active = true;
+    let url;
+    renderPlanPreview(data).then((result) => {
+      if (!active || !result) return;
+      url = URL.createObjectURL(result.blob);
+      setPlan({ data, url, page: result.pageNumber });
+    }).catch(() => {});
+    return () => { active = false; if (url) URL.revokeObjectURL(url); };
+  }, [pdf, data, renderPlanPreview]);
+  const page = pdf && plan?.data === data ? plan : null;
+  return <figure className="desk-preview">
+    {page ? <img src={page.url} alt={`Saved plan with markups, page ${page.page}`} />
+      : shapes.length ? <svg viewBox="0 0 760 390" role="img" aria-label="Measured project outline">
+        {shapes.map(({ key, layer, path }) => <path key={key} d={path} fillRule="evenodd"
+          fill={layer === "boundary" ? "none" : PREVIEW_LAYER_COLORS[layer] + "55"}
+          stroke={PREVIEW_LAYER_COLORS[layer] || "#ffffff"} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}
+      </svg> : imageUrl ? <img src={imageUrl} alt="Selected site preview" />
+      : <div className="desk-no-preview"><Icon name={pdf ? "file" : "map"} size={34} />
+        <span>{pdf ? "Plan preview unavailable" : data ? "No measured polygons yet" : "No saved outline on this device"}</span></div>}
+    <figcaption>{page ? `Plan sheet / Page ${page.page}` : shapes.length ? "Survey view / Measured geometry" : imageUrl ? "Site photograph" : "Project preview"}</figcaption>
+  </figure>;
+}
 
-  return (
-    <div className="hd-plan-preview" aria-label="Saved project geometry preview">
-      <div className="hd-preview-stage" style={{ transform: `scale(${zoom})` }}>
-      {imageUrl ? (
-        <img src={imageUrl} alt={`Preview for ${entry?.projectName || "saved project"}`} />
-      ) : <svg viewBox="0 0 760 390" preserveAspectRatio="xMidYMid slice">
-        <defs>
-          <linearGradient id="hd-aerial" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor="#274536" />
-            <stop offset="0.48" stopColor="#385641" />
-            <stop offset="1" stopColor="#1f3940" />
-          </linearGradient>
-          <pattern id="hd-grid" width="50" height="50" patternUnits="userSpaceOnUse" patternTransform="rotate(14)">
-            <path d="M 50 0 L 0 0 0 50" fill="none" stroke="rgba(255,255,255,.08)" strokeWidth="1" />
-          </pattern>
-        </defs>
-        <rect width="760" height="390" fill="url(#hd-aerial)" />
-        <path d="M-60 110 820 290M-40 285 760 35" stroke="rgba(210,216,202,.22)" strokeWidth="46" />
-        <path d="M-60 110 820 290M-40 285 760 35" stroke="rgba(30,38,39,.38)" strokeWidth="34" />
-        <rect width="760" height="390" fill="url(#hd-grid)" />
-        {shapes.length ? shapes.map((shape) => (
-          <polygon
-            key={shape.key}
-            points={shape.points}
-            fill={shape.layer === "boundary" ? "rgba(255,255,255,.06)" : `${PREVIEW_LAYER_COLORS[shape.layer]}55`}
-            stroke={shape.layer === "boundary" ? "#ffffff" : PREVIEW_LAYER_COLORS[shape.layer]}
-            strokeWidth={shape.layer === "boundary" ? 3 : 2.4}
-            vectorEffect="non-scaling-stroke"
-          />
-        )) : (
-          <g fill="none" strokeLinecap="round" strokeLinejoin="round">
-            <path d="m112 292 52-166 148-51 93 67 122-35 116 80-31 125-196 31-117-52Z" fill="rgba(62,145,219,.24)" stroke="#4fa7f2" strokeWidth="5" />
-            <path d="m182 245 33-89 87-31 51 38-31 91-94 28Z" fill="rgba(88,181,75,.3)" stroke="#64c653" strokeWidth="4" />
-            <path d="m432 151 84-23 74 53-27 70-95 15-42-48Z" fill="rgba(245,165,36,.28)" stroke="#f5a524" strokeWidth="4" />
-          </g>
-        )}
-      </svg>}
-      </div>
-      <div className="hd-preview-controls">
-        <button type="button" onClick={() => setZoom((value) => Math.min(2, value + 0.2))} aria-label="Zoom preview in">+</button>
-        <button type="button" onClick={() => setZoom((value) => Math.max(1, value - 0.2))} aria-label="Zoom preview out">-</button>
-        {zoom > 1 ? <button type="button" onClick={() => setZoom(1)} aria-label="Reset preview zoom">1:1</button> : null}
-      </div>
-      <div className="hd-preview-badge"><Icon name={imageUrl ? "file" : "polygon"} size={14} /> {imageUrl ? "Selected project image" : "Live project geometry"}</div>
-    </div>
-  );
+function folderColor(name) {
+  const inks = ["#be894d", "#6d9c77", "#699db2", "#aa8fa6", "#869bbf"];
+  return inks[Array.from(name).reduce((n, ch) => (n * 31 + ch.codePointAt(0)) >>> 0, 0) % inks.length];
 }
 
 function SectionTitle({ title, action, onAction }) {
@@ -326,6 +297,7 @@ function HomeDashboard({
   theme,
   onToggleTheme,
   resumeCard,
+  renderPlanPreview,
   onResume,
   stats,
   projects,
@@ -419,8 +391,13 @@ function HomeDashboard({
   const recentProjects = useMemo(() => sortedProjects(projects), [projects]);
   const recentProject = recentProjects[0] || null;
   const browserProjectCount = recentProjects.filter((entry) => entry?.payload).length;
-  const [selectedPreviewProjectId, setSelectedPreviewProjectId] = useState("");
-  const [activeNavigation, setActiveNavigation] = useState("dashboard");
+  const [startIntent] = useState(readStartIntent);
+  const [activeNavigation, setActiveNavigation] = useState(() => startIntent === "quote" ? "takeoffs"
+    : startIntent === "measure" ? (workspaceAccess ? "location-projects" : "billing") : "dashboard");
+  useEffect(() => {
+    if (startIntent) setStartIntent("");
+    if (startIntent && showMembershipPrompt) onDismissMembershipPrompt?.();
+  }, [startIntent, showMembershipPrompt, onDismissMembershipPrompt]);
   const [folderMessage, setFolderMessage] = useState("");
   const [previewImageLoadingId, setPreviewImageLoadingId] = useState("");
   const [previewImageError, setPreviewImageError] = useState("");
@@ -496,8 +473,11 @@ function HomeDashboard({
   const takeoffBoundaryReady = !!takeoffForm.boundary && Number(takeoffForm.estimatedSquareFeet) >= 1_000;
   const takeoffQuoteReady = takeoffBoundaryReady && !!takeoffEstimate && !takeoffEstimateLoading;
 
-  const previewProject =
-    recentProjects.find((entry) => entry.id === selectedPreviewProjectId) || recentProject;
+  const previewProject = resumeCard
+    ? recentProjects.find((entry) => entry.id === resumeCard.projectId)
+    : recentProject;
+  const hasResume = workspaceAccess && !!(resumeCard || previewProject);
+  const previewPdf = (resumeCard?.workflowMode || entryMode(previewProject)) === WORKFLOW_MODE_PDF;
   const activityProjects = recentProjects.slice(0, 4);
   const pinnedSet = pinnedProjectIds instanceof Set ? pinnedProjectIds : new Set();
   const queuedProjectOperations = new Map(
@@ -517,18 +497,23 @@ function HomeDashboard({
     (entry) => String(entry?.storageScope || "").trim().toLowerCase() === "shared"
   ) || null;
   const allPinnedProjects = recentProjects.filter((entry) => pinnedSet.has(String(entry.id || "").trim()));
-  const folderCards = (folderOptions || []).map((folderName) => ({
-    name: folderName,
-    count: recentProjects.filter((entry) => (
-      entryMode(entry) === projectTab
-      && (String(entry.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME) === folderName
-    )).length,
-  }));
+  const folderCards = useMemo(() => {
+    const summaries = new Map();
+    for (const entry of recentProjects) {
+      if (entryMode(entry) !== projectTab) continue;
+      const name = entry.folderName?.trim() || DEFAULT_PROJECT_FOLDER_NAME;
+      const summary = summaries.get(name) || { count: 0, editedAt: "" };
+      summary.count++;
+      if (!summary.editedAt) summary.editedAt = entryEditedAt(entry);
+      summaries.set(name, summary);
+    }
+    return (folderOptions || []).map((name) => ({ name, count: 0, ...summaries.get(name) }));
+  }, [folderOptions, projectTab, recentProjects]);
   const isDark = theme !== "light";
   const pageDetails = {
     dashboard: {
-      title: resumeCard?.title || "Project Dashboard",
-      description: resumeCard?.workflowMode === WORKFLOW_MODE_PDF ? "PDF / Image Mode" : "Location Mode",
+      title: "Project Dashboard",
+      description: "Snow & landscape field desk",
     },
     "location-projects": { title: "Location Projects", description: "Map-based property takeoffs" },
     "pdf-projects": { title: "PDF / Image Projects", description: "Plans, markups, and calibrated measurements" },
@@ -659,7 +644,8 @@ function HomeDashboard({
   const showFolderInProjects = (folderName) => {
     onProjectSearchChange("");
     onFolderFilterChange(folderName);
-    showPage("all-projects");
+    if (collapsedFolders?.[`${projectTab}:${folderName}`]) onToggleFolder(projectTab, folderName);
+    showPage(projectTab === WORKFLOW_MODE_PDF ? "pdf-projects" : "location-projects");
   };
   const createFolder = () => {
     const normalizedName = String(newFolderName || "").trim();
@@ -709,7 +695,6 @@ function HomeDashboard({
     }
     return { key: "local", label: "Local only", icon: "database", detail: "This project is currently stored only on this device." };
   };
-  const previewProjectHealth = previewProject ? getProjectHealth(previewProject) : null;
   const restoreRecovery = async (record) => {
     const restoreId = `${record?.recoveryId || record?.projectId || "recovery"}:${record?.savedAt || "latest"}`;
     setRestoringRecoveryId(restoreId);
@@ -759,7 +744,7 @@ function HomeDashboard({
 
   return (
     <div className="home-dashboard" data-theme={isDark ? "dark" : "light"}>
-      {showMembershipPrompt && !workspaceAccess && !isStaff ? (
+      {!startIntent && showMembershipPrompt && !workspaceAccess && !isStaff ? (
         <div className="hd-membership-backdrop" role="presentation">
           <section className="hd-membership-modal" role="dialog" aria-modal="true" aria-labelledby="membership-welcome-title">
             <button type="button" className="hd-membership-close" onClick={onDismissMembershipPrompt} aria-label="Close membership offer"><Icon name="close" size={18} /></button>
@@ -828,123 +813,39 @@ function HomeDashboard({
             <Icon name="pin" size={24} />
             <div>
               <h1>{currentPage.title}</h1>
-              <p><span className="hd-status-dot" />{currentPage.description}{activeNavigation === "dashboard" ? <><span className="hd-meta-separator" />Last edited: {formatDate(resumeCard?.lastEditedAt, { short: true, fallback: "No recent edit" })}</> : null}</p>
+              <p><span className="hd-status-dot" />{currentPage.description}</p>
             </div>
           </div>
           <div className="hd-top-actions">
-            <button type="button" className="hd-theme-toggle" onClick={onToggleTheme} aria-pressed={isDark}>
+            <button type="button" className="hd-theme-toggle" onClick={onToggleTheme} aria-label="Dark dashboard theme" aria-pressed={isDark}>
               <Icon name={isDark ? "moon" : "sun"} size={17} />
               <span>{isDark ? "Dark project hub" : "Brighter project hub"}</span>
               <i><b /></i>
             </button>
-            {resumeCard ? <button type="button" className="hd-button hd-button-outline" onClick={onResume}>Resume Where I Left Off</button> : null}
-            <button type="button" className="hd-button hd-button-primary" onClick={workspaceAccess ? onNewLocation : () => showPage("billing")}><Icon name={workspaceAccess ? "plus" : "credit"} />{workspaceAccess ? "New Project" : "Choose Plan"}</button>
+            {activeNavigation !== "dashboard" && resumeCard && workspaceAccess ? <button type="button" className="hd-button hd-button-outline" onClick={onResume}>Resume Where I Left Off</button> : null}
+            {activeNavigation !== "dashboard" ? <button type="button" className="hd-button hd-button-primary" onClick={workspaceAccess ? onNewLocation : () => showPage("billing")}><Icon name={workspaceAccess ? "plus" : "credit"} />{workspaceAccess ? "New Project" : "Choose Plan"}</button> : null}
           </div>
         </header>
 
         {activeNavigation === "dashboard" ? <>
-        <section className="hd-hero">
-          <div className="hd-hero-copy">
-            <h2>Plan smarter.<br />Measure faster.<br /><em>Win more.</em></h2>
-            <p>Accurate snow and landscape takeoffs from map or plan in minutes.</p>
-            <div className="hd-hero-actions">
-              <button type="button" className="hd-button hd-button-primary" onClick={startLocationProject}><Icon name="pin" />{workspaceAccess ? "Measure on Map" : "Unlock Map Measuring"}</button>
-              <button type="button" className="hd-button hd-button-glass" onClick={startPdfProject}><Icon name="file" />{workspaceAccess ? "Measure from PDF/Image" : "Unlock PDF Measuring"}</button>
-            </div>
-          </div>
-          <div className="hd-summary-card">
-            <SectionTitle title="Today's Summary" action="View Projects" onAction={showAllProjects} />
-            <div className="hd-summary-grid">
-              <div><Icon name="polygon" /><strong>{stats.totalVisible.toLocaleString()}</strong><span>{stats.activeModeLabel} Projects</span></div>
-              <div><Icon name="star" /><strong>{stats.pinnedCount.toLocaleString()}</strong><span>Pinned Sites</span></div>
-              <div><Icon name="map" /><strong>{stats.activePolygonCount.toLocaleString()}</strong><span>{projectTab === WORKFLOW_MODE_PDF ? "Marked-up Files" : "Measured Polygons"}</span></div>
-              <div><Icon name="folder" /><strong>{stats.folderCount.toLocaleString()}</strong><span>Project Folders</span></div>
-            </div>
-          </div>
-        </section>
-
-        {!sharedAuthenticated ? (
-          <section className="hd-auth-notice">
-            <Icon name="shield" size={22} />
-            <div><strong>Your shared library is locked.</strong><span>Local projects and recovery snapshots remain available. Sign in to load and sync team projects.</span></div>
-          </section>
-        ) : null}
-
-        <section className="hd-recovery-overview">
-          <div className="hd-recovery-overview-title">
-            <span><Icon name="database" size={22} /></span>
-            <div><strong>Autosave Recovery</strong><small>{latestRecovery ? `${latestRecovery.projectName} is recoverable` : "No recovery snapshot found yet"}</small></div>
-          </div>
-          <div className="hd-recovery-overview-fact"><span>Last device save</span><strong>{latestRecovery ? formatDate(latestRecovery.savedAt) : "Not available"}</strong></div>
-          <div className="hd-recovery-overview-fact"><span>Last shared save</span><strong>{latestSharedProject ? formatDate(entryEditedAt(latestSharedProject)) : "Not synced yet"}</strong></div>
-          <div className={`hd-recovery-overview-fact ${sharedQueueCount ? "warn" : ""}`}><span>Waiting to upload</span><strong>{sharedQueueCount} change{sharedQueueCount === 1 ? "" : "s"}</strong></div>
-          <button type="button" className="hd-button hd-button-outline" onClick={() => showPage("recovery")}>Open Recovery Center</button>
-        </section>
-
-        <section className="hd-overview-grid">
-          <article className="hd-card hd-recent-card">
-            <SectionTitle title="Recent Project Preview" action={previewProject ? "Open Project" : null} onAction={() => previewProject && onOpenProject(previewProject.id)} />
-            {recentProjects.length > 1 ? (
-              <label className="hd-preview-selector">
-                <span>Previewing</span>
-                <select value={previewProject?.id || ""} onChange={(event) => setSelectedPreviewProjectId(event.target.value)}>
-                  {recentProjects.slice(0, 10).map((entry) => (
-                    <option key={entry.id} value={entry.id}>{entry.projectName || "Untitled Project"}</option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-            <div className="hd-recent-content">
-              <div>
-                <ProjectGeometryPreview
-                  key={`${previewProject?.id || "empty"}-${projectPreviewImages?.[String(previewProject?.id || "").trim()] ? "image" : "geometry"}`}
-                  entry={previewProject}
-                  imageUrl={projectPreviewImages?.[String(previewProject?.id || "").trim()] || ""}
-                />
-                <div className="hd-preview-legend">
-                  {Object.entries(PREVIEW_LAYER_COLORS).map(([layer, color]) => (
-                    <span key={layer}><i style={{ background: color }} />{layer === "plowable" ? "Plowable" : layer[0].toUpperCase() + layer.slice(1)}</span>
-                  ))}
-                </div>
-              </div>
-              <div className="hd-recent-details">
-                <span>Most recent project</span>
-                <h3>{previewProject?.projectName || "Your next takeoff starts here"}</h3>
-                <strong>{previewProject ? (entryMode(previewProject) === WORKFLOW_MODE_PDF ? `Page ${Math.max(1, Number(previewProject.pdfPageNumber) || 1)}` : `${Number(previewProject.polygonCount || 0).toLocaleString()} polygons`) : "No project selected"}</strong>
-                {previewProjectHealth ? <i className={`hd-project-health hd-preview-health ${previewProjectHealth.key}`} title={previewProjectHealth.detail}><Icon name={previewProjectHealth.icon} size={11} />{previewProjectHealth.label}</i> : null}
-                {previewProject ? <div className="hd-preview-facts">
-                  <span><Icon name={entryMode(previewProject) === WORKFLOW_MODE_PDF ? "file" : "map"} size={14} />{entryMode(previewProject) === WORKFLOW_MODE_PDF ? "PDF / Image" : "Location"}</span>
-                  <span><Icon name="polygon" size={14} />Boundary {previewProject.hasBoundary ? "saved" : "not set"}</span>
-                  <span><Icon name="folder" size={14} />{String(previewProject.folderName || "").trim() || DEFAULT_PROJECT_FOLDER_NAME}</span>
-                </div> : null}
-                <p>{previewProject ? `Last edited ${formatDate(entryEditedAt(previewProject))}${previewProject.savedBy ? ` by ${previewProject.savedBy}` : ""}` : "Create a location or PDF project to see a live geometry preview."}</p>
-                {previewProject ? <button type="button" className="hd-button hd-button-primary hd-preview-open" onClick={() => onOpenProject(previewProject.id)}>Continue Measuring</button> : null}
+        <section className="desk-lead" aria-label="Project field desk">
+          <div className="desk-scene" aria-hidden="true" />
+          <div className="desk-lead-inner">
+            <div className="desk-copy">
+              <span className="desk-eyebrow">{hasResume ? resumeCard ? "Last opened property" : "Recently edited property" : "Getting started"}</span>
+              <h2>{hasResume ? resumeCard?.title || previewProject.projectName : "Start a property takeoff."}</h2>
+              {hasResume ? <p>{previewPdf ? "PDF / Image" : "Location"}{previewPdf && resumeCard?.pageLabel ? ` / ${resumeCard.pageLabel}` : ""} &middot; {formatDate(resumeCard?.lastEditedAt || entryEditedAt(previewProject), { fallback: "No saved edit yet" })}</p> : <p>Measure a site from the map or work directly on a plan.</p>}
+              {hasResume ? <button type="button" className="hd-button hd-button-primary" onClick={resumeCard ? onResume : () => onOpenProject(previewProject.id)}>Continue measuring <span aria-hidden="true">&rarr;</span></button> : null}
+              <div className="desk-new">
+                <button type="button" className="hd-button hd-button-outline" onClick={startLocationProject}><Icon name="map" />Measure on Map</button>
+                <button type="button" className="hd-button hd-button-outline" onClick={startPdfProject}><Icon name="file" />Measure from PDF/Image</button>
               </div>
             </div>
-          </article>
-
-          <article className="hd-card" id="pinned-sites">
-            <SectionTitle title="Pinned Sites" action="View All" onAction={() => showPage("pinned-sites")} />
-            <div className="hd-pinned-list">
-              {pinnedProjects.length ? pinnedProjects.slice(0, 5).map((entry) => renderPinnedProject(entry)) : <div className="hd-empty-state"><Icon name="star" /><span>Pin the projects your team uses most and they will stay here.</span></div>}
-              {previewImageError ? <div className="hd-preview-error">{previewImageError}</div> : null}
-            </div>
-          </article>
-
-          <article className="hd-card" id="activity-feed">
-            <SectionTitle title="Activity Feed" action={sharedAuthenticated ? "Refresh" : null} onAction={onRefreshShared} />
-            <div className="hd-activity-list">
-              {activityProjects.length ? activityProjects.map((entry, index) => (
-                <div className="hd-activity-item" key={entry.id}>
-                  <span><Icon name={index === 0 ? "edit" : entryMode(entry) === WORKFLOW_MODE_PDF ? "file" : "polygon"} /></span>
-                  <div><strong>{index === 0 ? "Project updated" : entryMode(entry) === WORKFLOW_MODE_PDF ? "Plan saved" : "Measurement saved"}</strong><p>{entry.projectName || "Untitled Project"}</p><small>{formatDate(entryEditedAt(entry))}</small></div>
-                </div>
-              )) : <div className="hd-empty-state"><Icon name="clock" /><span>Recent project updates will appear here.</span></div>}
-              {sharedQueueCount > 0 ? <div className="hd-activity-item hd-activity-warning"><span><Icon name="refresh" /></span><div><strong>{sharedQueueCount} update{sharedQueueCount === 1 ? "" : "s"} waiting to sync</strong><button type="button" onClick={onSyncShared} disabled={sharedSyncing}>{sharedSyncing ? "Syncing..." : "Sync now"}</button></div></div> : null}
-            </div>
-          </article>
+            {hasResume ? <DeskPreview key={resumeCard?.projectId || previewProject?.id} entry={previewProject} payload={resumeCard?.payload} pdf={previewPdf} renderPlanPreview={renderPlanPreview} imageUrl={projectPreviewImages?.[previewProject?.id]} /> : null}
+          </div>
         </section>
 
+        {workspaceAccess ? <>
         <section className="hd-dashboard-folders">
           <div className="hd-dashboard-folder-heading">
             <SectionTitle title="Project Folders" action="Manage Folders" onAction={showFolderTools} />
@@ -971,16 +872,63 @@ function HomeDashboard({
           </div>
           <div className="hd-folder-grid hd-dashboard-folder-grid">
             {folderCards.map((folder) => (
-              <article className="hd-folder-card" key={folder.name}>
+              <article className="hd-folder-card" key={folder.name} style={{ "--folder-ink": folderColor(folder.name) }}>
                 <button type="button" className="hd-folder-card-open" onClick={() => showFolderInProjects(folder.name)}>
-                  <span className="hd-folder-card-icon"><Icon name="folder" size={44} strokeWidth={1.45} /></span>
-                  <span><strong>{folder.name}</strong><small>{folder.count} project{folder.count === 1 ? "" : "s"}</small></span>
+                  <span className="hd-folder-card-icon"><Icon name="folder" size={50} strokeWidth={1.45} /></span>
+                  <span><strong>{folder.name}</strong><small>{folder.count} project{folder.count === 1 ? "" : "s"}</small>{folder.editedAt ? <small>Edited {formatDate(folder.editedAt, { short: true })}</small> : null}</span>
                   <Icon name="chevron" size={18} />
                 </button>
               </article>
             ))}
           </div>
         </section>
+        <div className="desk-totals" aria-label="Library totals">
+          <span><b>{stats.totalVisible}</b> {stats.activeModeLabel} projects</span>
+          <span><b>{stats.pinnedCount}</b> pinned sites</span>
+          <span><b>{stats.folderCount}</b> folders</span>
+        </div>
+        </> : null}
+        {!sharedAuthenticated ? (
+          <section className="hd-auth-notice">
+            <Icon name="shield" size={22} />
+            <div><strong>Your shared library is locked.</strong><span>Local projects and recovery snapshots remain available. Sign in to load and sync team projects.</span></div>
+          </section>
+        ) : null}
+
+        <section className="hd-recovery-overview">
+          <div className="hd-recovery-overview-title">
+            <span><Icon name="database" size={22} /></span>
+            <div><strong>Autosave Recovery</strong><small>{latestRecovery ? `${latestRecovery.projectName} is recoverable` : "No recovery snapshot found yet"}</small></div>
+          </div>
+          <div className="hd-recovery-overview-fact"><span>Last device save</span><strong>{latestRecovery ? formatDate(latestRecovery.savedAt) : "Not available"}</strong></div>
+          <div className="hd-recovery-overview-fact"><span>Last shared save</span><strong>{latestSharedProject ? formatDate(entryEditedAt(latestSharedProject)) : "Not synced yet"}</strong></div>
+          <div className={`hd-recovery-overview-fact ${sharedQueueCount ? "warn" : ""}`}><span>Waiting to upload</span><strong>{sharedQueueCount} change{sharedQueueCount === 1 ? "" : "s"}</strong></div>
+          <button type="button" className="hd-button hd-button-outline" onClick={() => showPage("recovery")}>Open Recovery Center</button>
+        </section>
+
+        <section className="hd-overview-grid">
+          <article className="hd-card" id="pinned-sites">
+            <SectionTitle title="Pinned Sites" action="View All" onAction={() => showPage("pinned-sites")} />
+            <div className="hd-pinned-list">
+              {pinnedProjects.length ? pinnedProjects.slice(0, 5).map((entry) => renderPinnedProject(entry)) : <div className="hd-empty-state"><Icon name="star" /><span>Pin the projects your team uses most and they will stay here.</span></div>}
+              {previewImageError ? <div className="hd-preview-error">{previewImageError}</div> : null}
+            </div>
+          </article>
+
+          <article className="hd-card" id="activity-feed">
+            <SectionTitle title="Activity Feed" action={sharedAuthenticated ? "Refresh" : null} onAction={onRefreshShared} />
+            <div className="hd-activity-list">
+              {activityProjects.length ? activityProjects.map((entry, index) => (
+                <div className="hd-activity-item" key={entry.id}>
+                  <span><Icon name={index === 0 ? "edit" : entryMode(entry) === WORKFLOW_MODE_PDF ? "file" : "polygon"} /></span>
+                  <div><strong>{index === 0 ? "Project updated" : entryMode(entry) === WORKFLOW_MODE_PDF ? "Plan saved" : "Measurement saved"}</strong><p>{entry.projectName || "Untitled Project"}</p><small>{formatDate(entryEditedAt(entry))}</small></div>
+                </div>
+              )) : <div className="hd-empty-state"><Icon name="clock" /><span>Recent project updates will appear here.</span></div>}
+              {sharedQueueCount > 0 ? <div className="hd-activity-item hd-activity-warning"><span><Icon name="refresh" /></span><div><strong>{sharedQueueCount} update{sharedQueueCount === 1 ? "" : "s"} waiting to sync</strong><button type="button" onClick={onSyncShared} disabled={sharedSyncing}>{sharedSyncing ? "Syncing..." : "Sync now"}</button></div></div> : null}
+            </div>
+          </article>
+        </section>
+
         </> : null}
 
         {activeNavigation === "import" ? (
@@ -1052,7 +1000,7 @@ function HomeDashboard({
             <div className="hd-folder-grid">
               {folderCards.map((folder) => (
                 <article className="hd-folder-card" key={folder.name}>
-                  <button type="button" className="hd-folder-card-open" onClick={() => { onFolderFilterChange(folder.name); showPage(projectTab === WORKFLOW_MODE_PDF ? "pdf-projects" : "location-projects"); }}>
+                  <button type="button" className="hd-folder-card-open" onClick={() => showFolderInProjects(folder.name)}>
                     <span className="hd-folder-card-icon"><Icon name="folder" size={44} strokeWidth={1.45} /></span>
                     <span><strong>{folder.name}</strong><small>{folder.count} project{folder.count === 1 ? "" : "s"}</small></span>
                     <Icon name="chevron" size={18} />

@@ -64,10 +64,33 @@
 .account-access-mark span { animation: account-pulse 1.4s ease-in-out infinite; border: 2px solid #6cbd42; border-radius: 50%; height: 92px; position: absolute; width: 92px; }
 @keyframes account-pulse { 50% { opacity: .2; transform: scale(.86); } }
 
+.account-access-story:has(.field-study) { justify-content: center; gap: clamp(24px, 4vh, 56px); }
+.account-access-copy:has(.field-study) { padding: 0; width: 100%; }
+.account-access-copy:has(.field-study) h1 { font-size: clamp(38px, 4.2vw, 62px); }
+.field-study { margin: 24px 0 10px; overflow: hidden; background: #0b2020; border: 1px solid #51645b; border-radius: 12px; }
+.field-study header, .field-study-key { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 9px 14px; }
+.field-study header { justify-content: space-between; color: #dbebd9; font-size: 11px; letter-spacing: .09em; text-transform: uppercase; }
+.field-study header span { color: #b1c2b7; font-size: 10px; }
+.field-study-map { position: relative; }
+.field-study-map svg { display: block; width: 100%; }
+.field-study-map input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize; }
+.field-study-map:focus-within { outline: 3px solid #d8fbab; outline-offset: -3px; }
+.field-study-divider { position: absolute; top: 0; bottom: 0; width: 2px; background: white; pointer-events: none; }
+.field-study-divider i { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); background: #fff; border-radius: 20px; color: #173b31; font: bold 20px/28px Georgia,serif; text-align: center; width: 36px; }
+.field-study-key { font-size: 11px; color: #ecf0e9; }
+.field-study-key span { margin-right: auto; color: #b1c2b7; }
+.field-study-key b::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; background: #97d4ff; }
+.field-study-key b:nth-last-child(2)::before { background: #ffe293; }
+.field-study-key b:last-child::before { background: #c5f298; }
+.field-study-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 12px 12px; }
+.field-study-actions button { flex: 1 1 165px; min-height: 46px; padding: 8px 10px; color: #f1faf1; background: #19332c; border: 1px solid #577368; border-radius: 7px; cursor: pointer; font: 700 14px "Avenir Next", sans-serif; }
+.field-study-actions button:first-child { color: #16311d; background: #c2de9c; border-color: #b2d18d; }
+.field-study-terms { color: #cad8cb; font-size: 12px; }
+
 @media (max-width: 900px) {
   .account-access { display: block; }
   .account-access-story { min-height: 520px; }
-  .account-access-panel { margin: -54px 16px 24px; position: relative; }
+  .account-access-panel { margin: 18px 16px 24px; position: relative; }
 }
 
 @media (max-width: 560px) {

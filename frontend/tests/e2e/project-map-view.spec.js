@@ -91,6 +91,8 @@ test("opening and resuming a saved project frame the measurements on the real ma
   await page.getByRole("checkbox", { name: "Dim outside boundary" }).click();
   await expect.poll(() => page.evaluate(() => window.testLocationMap.getCenter().lng)).toBeCloseTo(-90);
   await page.getByRole("button", { name: "Back to Home" }).click();
-  await page.getByRole("button", { name: "Resume Where I Left Off" }).click();
+  await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+  await expect(page.getByRole("img", { name: "Measured project outline" })).toBeVisible();
+  await page.getByRole("button", { name: "Continue measuring" }).click();
   await expect.poll(checkCamera).toBe(true);
 });

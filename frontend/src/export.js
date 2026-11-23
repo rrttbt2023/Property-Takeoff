@@ -916,6 +916,21 @@ function buildAnnotatedPlanSvgMarkup({
 </svg>`;
 }
 
+export async function buildPlanThumbnail({ imageUrl, logicalWidth, logicalHeight, annotations, savedMeasurements }) {
+  const image = await loadImage(imageUrl);
+  const width = logicalWidth || image.naturalWidth;
+  const height = logicalHeight || image.naturalHeight;
+  const scale = Math.min(1, 720 / Math.max(width, height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+  const svg = buildAnnotatedPlanSvgMarkup({
+    imageHref: canvas.toDataURL("image/png"), width, height, annotations, savedMeasurements,
+  });
+  return new Blob([svg], { type: "image/svg+xml" });
+}
+
 async function renderAnnotatedPlanCanvas({
   imageUrl,
   annotations = [],

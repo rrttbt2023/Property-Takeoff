@@ -3274,7 +3274,8 @@ async function renderPdfPageToImageFile(pdfFile, options = {}) {
     const nativeMax = Math.max(baseViewport.width || 1, baseViewport.height || 1);
     const targetScale = maxDimension / nativeMax;
     const scale = Math.max(1, Math.min(9, targetScale));
-    const viewport = page.getViewport({ scale });
+    const viewport = page.getViewport({ scale: options.thumbnail ? Math.min(scale, 720 / nativeMax) : scale });
+    const logicalViewport = options.thumbnail ? page.getViewport({ scale }) : viewport;
 
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(viewport.width));
@@ -3291,6 +3292,8 @@ async function renderPdfPageToImageFile(pdfFile, options = {}) {
     const baseName = safeFilename(String(pdfFile.name || "pdf-plan").replace(/\.pdf$/i, ""));
     return {
       imageFile: new File([pngBlob], `${baseName}-p${pageNumber}.png`, { type: "image/png" }),
+      logicalWidth: Math.round(logicalViewport.width),
+      logicalHeight: Math.round(logicalViewport.height),
       pageNumber,
       pageCount: pdfDoc.numPages,
     };
@@ -3806,6 +3809,40 @@ function restoreFileFromProjectPayload(serialized) {
   const lastModified = Number(serialized.lastModified) || Date.now();
   const bytes = base64ToUint8Array(base64);
   return new File([bytes], name, { type, lastModified });
+}
+
+async function renderDashboardPlan(payload) {
+  const source = restoreFileFromProjectPayload(payload?.pdfSourceAsset);
+  if (!source) return null;
+  const sourceKey = buildFileSourceKey(source);
+  const sameSource = (props) => !props?.pdfSourceKey || props.pdfSourceKey === sourceKey;
+  const annotations = (payload.pdfAnnotations || []).filter((item) => sameSource(item.properties));
+  const measurements = (payload.pdfSavedMeasurements || []).filter(sameSource);
+  const currentPage = Math.max(1, Number(payload.pdfPageNumber) || 1);
+  const marks = [...annotations.map((item) => item.properties || {}), ...measurements];
+  const markedPages = [...new Set(marks.map((mark) => Number(mark.pdfPageNumber) || 1))];
+  const lastSave = (page) => {
+    const meta = payload.pdfPageSaveMeta?.[createPdfContextKey({sourceKey, pageNumber: page})];
+    return [meta?.savedAt, meta?.autosavedAt].filter(Boolean).sort().at(-1) || "";
+  };
+  const pageNumber = markedPages.reverse().sort((a, b) =>
+    lastSave(b).localeCompare(lastSave(a)) || Number(b === currentPage) - Number(a === currentPage)
+  )[0] || currentPage;
+  const rendered = isPdfFile(source)
+    ? await renderPdfPageToImageFile(source, { pageNumber, maxDimension: 3200, thumbnail: true })
+    : null;
+  const url = URL.createObjectURL(rendered?.imageFile || source);
+  try {
+    const { buildPlanThumbnail } = await loadExportModule();
+    const blob = await buildPlanThumbnail({
+      imageUrl: url, logicalWidth: rendered?.logicalWidth, logicalHeight: rendered?.logicalHeight,
+      annotations: annotations.filter((item) => !item.properties?.pdfPageNumber || Number(item.properties.pdfPageNumber) === pageNumber),
+      savedMeasurements: measurements.filter((item) => (Number(item.pdfPageNumber) || 1) === pageNumber),
+    });
+    return { blob, pageNumber: rendered?.pageNumber || 1 };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 async function loadEstimateSpreadsheetReader() {
@@ -14519,6 +14556,8 @@ export default function App() {
   const homeResumeCard = useMemo(() => {
     if (hasCurrentProjectData) {
       return {
+        projectId: currentProjectLibraryId,
+        payload: { layerFeatures, boundary, pdfSourceAsset, pdfPageNumber, pdfAnnotations, pdfSavedMeasurements, pdfPageSaveMeta },
         title: String(projectName || "").trim() || "Untitled Project",
         workflowMode,
         pageLabel:
@@ -14540,6 +14579,7 @@ export default function App() {
           : WORKFLOW_MODE_LOCATION;
       return {
         title: String(source.projectName || "").trim() || "Untitled Project",
+        projectId: usableResumeProject?.projectId || source.id,
         workflowMode: nextMode,
         pageLabel:
           nextMode === WORKFLOW_MODE_PDF
@@ -14559,6 +14599,7 @@ export default function App() {
   }, [
     activeSharedProjectMeta?.lastEditedAt,
     activeSharedProjectMeta?.savedBy,
+    currentProjectLibraryId, layerFeatures, boundary, pdfSourceAsset, pdfAnnotations, pdfSavedMeasurements, pdfPageSaveMeta,
     hasCurrentProjectData,
     lastManualSaveAt,
     pdfPageNumber,
@@ -20798,6 +20839,7 @@ export default function App() {
             setHomeAppearance((previous) => (previous === "light" ? "dark" : "light"))
           }
           resumeCard={homeResumeCard}
+          renderPlanPreview={renderDashboardPlan}
           onResume={resumeLastProjectFromHome}
           stats={homeProjectStats}
           projects={visibleProjectLibrary}

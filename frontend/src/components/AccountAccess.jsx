@@ -7,6 +7,8 @@ import {
 } from "../api";
 
 import "./account-access.css";
+import SiteComparison from "./SiteComparison";
+import { readStartIntent, setStartIntent } from "./startIntent";
 
 function AccountAccess({
   checking,
@@ -19,7 +21,18 @@ function AccountAccess({
   registerSubmitting,
   onRegister,
 }) {
-  const [mode, setMode] = useState("login");
+  const [intent, setIntent] = useState(readStartIntent);
+  const [mode, setMode] = useState(() => intent ? "register" : "login");
+  const panelRef = useRef(null);
+  const start = (choice) => {
+    setStartIntent(choice);
+    setIntent(choice);
+    setMode("register");
+    requestAnimationFrame(() => {
+      panelRef.current?.scrollIntoView({ block: "center" });
+      panelRef.current?.querySelector("form input")?.focus({ preventScroll: true });
+    });
+  };
   const [mfaCode, setMfaCode] = useState("");
   const [recoveryEmail, setRecoveryEmail] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -105,14 +118,12 @@ function AccountAccess({
           <span className="account-access-kicker">Snow and landscape estimating</span>
           <h1>Measure confidently.<br />Quote the property.<br /><em>Win the work.</em></h1>
           <p>Build accurate map and plan takeoffs yourself, or send a site to our measurement team for delivery within 24 hours.</p>
-          <div className="account-access-offers">
-            <span><strong>$9.99</strong><small>per month for the measuring workspace</small></span>
-            <span><strong>24 hr</strong><small>managed takeoff turnaround after quote approval</small></span>
-          </div>
+          <SiteComparison onStart={start} />
+          <small className="field-study-terms">Self-service: $9.99/month. Managed takeoffs: quoted per site, delivered within 24 hours of approval.</small>
         </div>
       </section>
 
-      <section className="account-access-panel">
+      <section className="account-access-panel" ref={panelRef}>
         <div className="account-access-tabs" role="tablist">
           <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Sign in</button>
           <button type="button" className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>Create account</button>
@@ -132,7 +143,7 @@ function AccountAccess({
           </form>
         ) : mode === "register" ? (
           <form className="account-access-form" onSubmit={(event) => onRegister(event, registration)}>
-            <div><span>Start measuring</span><h2>Create your company workspace.</h2><p>Registration is free. Choose the $9.99 Basic plan when you are ready to use the measuring tools.</p></div>
+            <div><span>{intent === "quote" ? "Managed takeoff" : "Start measuring"}</span><h2>Create your company workspace.</h2><p>{intent === "quote" ? "Next, outline your site and request a measurement quote. No subscription is needed." : "Registration is free. Choose the $9.99 Basic plan when you are ready to use the measuring tools."}</p></div>
             <label>Your name<input value={registration.displayName} onChange={(event) => updateRegistration("displayName", event.target.value)} autoComplete="name" placeholder="Alex Smith" /></label>
             <label>Company name<input value={registration.organizationName} onChange={(event) => updateRegistration("organizationName", event.target.value)} autoComplete="organization" placeholder="Evergreen Services" /></label>
             <label>Work email<input type="email" value={registration.email} onChange={(event) => updateRegistration("email", event.target.value)} autoComplete="email" placeholder="alex@company.com" /></label>
