@@ -18116,7 +18116,7 @@ export default function App({ tourStep, onTourStep, onTourCanvas } = {}) {
       ensurePdfAnnotationLayers(map);
       refreshPdfAnnotationsSource(pdfAnnotationsRef.current);
 
-      if (googleMapsKey) {
+      if (googleMapsKey && !isGuestTour) {
         try {
           await ensureGoogleBasemapLayer(map);
         } catch (error) {
@@ -18198,7 +18198,12 @@ export default function App({ tourStep, onTourStep, onTourCanvas } = {}) {
       setWorkspaceMap(map);
       refreshPolygonOutlinesRaf();
     };
-    if (map.getLayer("bm-empty")) onStyleReady();
+    // Draw connects its input handlers on map load, after the style is ready.
+    // A guest following the highlight immediately must not lose the first click.
+    if (isGuestTour) {
+      if (map.getSource("mapbox-gl-draw-hot")) onStyleReady();
+      else map.once("load", onStyleReady);
+    } else if (map.getLayer("bm-empty")) onStyleReady();
     else map.once("style.load", onStyleReady);
 
     return () => {
@@ -18217,6 +18222,7 @@ export default function App({ tourStep, onTourStep, onTourCanvas } = {}) {
         map.off("click", onMapClickMeasure);
         map.off("error", onMapError);
         map.off("style.load", onStyleReady);
+        map.off("load", onStyleReady);
       } catch {
       /* intentionally ignore non-critical map/draw errors */
     }

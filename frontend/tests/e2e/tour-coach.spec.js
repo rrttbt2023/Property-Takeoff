@@ -2,6 +2,28 @@ import { expect, test } from "@playwright/test";
 
 const highlighted = (page,id) => page.locator(`[data-tour-target="${id}"][data-coached]`);
 
+test("Draw waits for the map input handlers even if the sample aerial is slow", async ({page}) => {
+  let holdImage = false, release, started;
+  const gate = new Promise(resolve => { release = resolve; });
+  const requested = new Promise(resolve => { started = resolve; });
+  await page.route("**/*field-study-aerial*.jpg*", async route => {
+    if (holdImage) { started(); await gate; }
+    await route.continue();
+  });
+  await page.setViewportSize({width:1366,height:840});
+  await page.goto("/?tour=1");
+  holdImage = true;
+  try {
+    await highlighted(page,"open-site").click();
+    await requested;
+    await expect(page.getByRole("button",{name:"Draw Mode (P)",exact:true})).toBeDisabled();
+    await expect(highlighted(page,"draw")).toHaveCount(0);
+  } finally { release(); }
+  await highlighted(page,"draw").click();
+  await page.locator(".map canvas").click({position:{x:140,y:220}});
+  await expect(page.getByRole("note")).toContainText("Place corner 2");
+});
+
 test("desktop coach follows committed corners, not pointer moves or sample polygons", async ({page}) => {
   await page.setViewportSize({width:1366,height:840});
   await page.goto("/?tour=1");
