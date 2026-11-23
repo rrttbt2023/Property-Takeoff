@@ -2,14 +2,14 @@ import math
 from typing import Any
 
 
-PROPERTY_TYPE_MULTIPLIERS = {
-    "commercial_retail": 1.00,
-    "industrial_warehouse": 0.90,
-    "hoa_multifamily": 1.15,
-    "office_medical": 1.00,
-    "school_campus": 1.25,
-    "municipal": 1.20,
-    "other": 1.10,
+PROPERTY_TYPE_RATE_PER_ACRE_CENTS = {
+    "commercial_retail": 360,
+    "industrial_warehouse": 240,
+    "hoa_multifamily": 540,
+    "office_medical": 450,
+    "school_campus": 420,
+    "municipal": 300,
+    "other": 390,
 }
 
 SUPPORTED_SERVICES = {
@@ -36,14 +36,13 @@ SERVICE_ALIASES = {
 SQ_METERS_TO_SQ_FEET = 10.76391041671
 SQ_FEET_PER_ACRE = 43_560
 EARTH_RADIUS_METERS = 6_371_008.8
-HOURLY_RATE_CENTS = 3_000
-BASE_REVIEW_HOURS = 0.75
-FIRST_SERVICE_COMPLEXITY = 0.45
-ADDITIONAL_SERVICE_COMPLEXITY = 0.12
+BASE_REVIEW_CENTS = 3_000
+ADDITIONAL_SERVICE_MULTIPLIER = 0.35
+PARTIAL_AREA_MULTIPLIER = 0.65
 
 
-def _round_to_quarter_hour(value: float) -> float:
-    return max(0.0, round(value * 4.0) / 4.0)
+def _round_to_five_dollars(value: float) -> int:
+    return max(0, int(round(value / 500.0) * 500))
 
 
 def _normalized_services(service_types: list[Any]) -> list[str]:
@@ -135,32 +134,42 @@ def estimate_takeoff_quote(
     property_type: str,
     estimated_square_feet: int,
     service_types: list[Any],
+    measurement_scope: str = "full_property",
 ) -> dict[str, Any]:
     safe_property_type = (
-        property_type if property_type in PROPERTY_TYPE_MULTIPLIERS else "other"
+        property_type if property_type in PROPERTY_TYPE_RATE_PER_ACRE_CENTS else "other"
+    )
+    safe_measurement_scope = (
+        measurement_scope
+        if measurement_scope in {"full_property", "partial_property"}
+        else "full_property"
     )
     safe_square_feet = max(1_000, min(100_000_000, int(estimated_square_feet)))
     services = _normalized_services(service_types)
     area_acres = safe_square_feet / SQ_FEET_PER_ACRE
-    service_complexity = FIRST_SERVICE_COMPLEXITY + (
-        ADDITIONAL_SERVICE_COMPLEXITY * max(0, len(services) - 1)
+    service_multiplier = 1.0 + (
+        ADDITIONAL_SERVICE_MULTIPLIER * max(0, len(services) - 1)
     )
-    midpoint_hours = _round_to_quarter_hour(
-        (
-            BASE_REVIEW_HOURS
-            + math.sqrt(max(0.1, area_acres)) * service_complexity
-        )
-        * PROPERTY_TYPE_MULTIPLIERS[safe_property_type]
+    scope_multiplier = (
+        PARTIAL_AREA_MULTIPLIER
+        if safe_measurement_scope == "partial_property"
+        else 1.0
     )
-    midpoint_hours = max(1.0, midpoint_hours)
-    low_hours = max(1.0, _round_to_quarter_hour(midpoint_hours * 0.80))
-    high_hours = max(
-        low_hours + 0.5,
-        _round_to_quarter_hour(midpoint_hours * 1.25),
+    variable_cents = (
+        PROPERTY_TYPE_RATE_PER_ACRE_CENTS[safe_property_type]
+        * area_acres
+        * service_multiplier
+        * scope_multiplier
     )
-    low_cents = int(round(low_hours * HOURLY_RATE_CENTS))
-    high_cents = int(round(high_hours * HOURLY_RATE_CENTS))
-    midpoint_cents = int(round(midpoint_hours * HOURLY_RATE_CENTS))
+    midpoint_cents = max(
+        BASE_REVIEW_CENTS,
+        _round_to_five_dollars(BASE_REVIEW_CENTS + variable_cents),
+    )
+    low_cents = max(BASE_REVIEW_CENTS, _round_to_five_dollars(midpoint_cents * 0.85))
+    high_cents = max(
+        low_cents + 1_500,
+        _round_to_five_dollars(midpoint_cents * 1.20),
+    )
     return {
         "low_cents": low_cents,
         "high_cents": high_cents,
@@ -169,6 +178,7 @@ def estimate_takeoff_quote(
         "estimated_square_feet": safe_square_feet,
         "estimated_acres": round(area_acres, 2),
         "property_type": safe_property_type,
+        "measurement_scope": safe_measurement_scope,
         "service_types": services,
         "area_source": "boundary",
         "disclaimer": (

@@ -36,6 +36,7 @@ def init_db() -> None:
                 address TEXT NOT NULL,
                 service_types_json TEXT NOT NULL,
                 property_type TEXT NOT NULL DEFAULT 'commercial_retail',
+                measurement_scope TEXT NOT NULL DEFAULT 'full_property',
                 estimated_square_feet INTEGER,
                 estimate_low_cents INTEGER,
                 estimate_high_cents INTEGER,
@@ -97,6 +98,7 @@ def init_db() -> None:
         }
         migrations = {
             "property_type": "TEXT NOT NULL DEFAULT 'commercial_retail'",
+            "measurement_scope": "TEXT NOT NULL DEFAULT 'full_property'",
             "estimated_square_feet": "INTEGER",
             "estimate_low_cents": "INTEGER",
             "estimate_high_cents": "INTEGER",
@@ -155,6 +157,7 @@ def _decode_request(conn: Any, row: Any) -> dict[str, Any]:
         "address": str(row["address"]),
         "service_types": _json_load(row["service_types_json"], []),
         "property_type": str(row["property_type"] or "commercial_retail"),
+        "measurement_scope": str(row["measurement_scope"] or "full_property"),
         "estimated_square_feet": (
             int(row["estimated_square_feet"])
             if row["estimated_square_feet"] is not None
@@ -203,6 +206,7 @@ def create_request(
     address: str,
     service_types: list[str],
     property_type: str,
+    measurement_scope: str,
     estimated_square_feet: int,
     estimate_low_cents: int,
     estimate_high_cents: int,
@@ -218,9 +222,9 @@ def create_request(
             """
             INSERT INTO takeoff_requests (
                 id, organization_id, created_by, title, address, service_types_json,
-                property_type, estimated_square_feet, estimate_low_cents,
+                property_type, measurement_scope, estimated_square_feet, estimate_low_cents,
                 estimate_high_cents, boundary_json, notes, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)
             """,
             (
                 request_id,
@@ -230,6 +234,7 @@ def create_request(
                 address,
                 json.dumps(service_types, ensure_ascii=True),
                 property_type,
+                measurement_scope,
                 max(1_000, int(estimated_square_feet)),
                 max(0, int(estimate_low_cents)),
                 max(0, int(estimate_high_cents)),

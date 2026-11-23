@@ -471,12 +471,13 @@ export function listTakeoffRequests(limit = 100) {
   return sharedRequest(`/api/takeoff-requests?limit=${encodeURIComponent(limit)}`);
 }
 
-export function estimateTakeoffRequest({ propertyType, serviceTypes, boundary }) {
+export function estimateTakeoffRequest({ propertyType, measurementScope, serviceTypes, boundary }) {
   return sharedRequest("/api/takeoff-requests/estimate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       property_type: String(propertyType || "commercial_retail").trim(),
+      measurement_scope: String(measurementScope || "full_property").trim(),
       service_types: Array.isArray(serviceTypes) ? serviceTypes : [],
       boundary: boundary && typeof boundary === "object" ? boundary : null,
     }),
@@ -488,6 +489,7 @@ export function createTakeoffRequest({
   address,
   serviceTypes,
   propertyType,
+  measurementScope,
   estimatedSquareFeet,
   boundary,
   notes,
@@ -500,6 +502,7 @@ export function createTakeoffRequest({
       address: String(address || "").trim(),
       service_types: Array.isArray(serviceTypes) ? serviceTypes : [],
       property_type: String(propertyType || "commercial_retail").trim(),
+      measurement_scope: String(measurementScope || "full_property").trim(),
       estimated_square_feet: Number(estimatedSquareFeet),
       boundary: boundary && typeof boundary === "object" ? boundary : null,
       notes: String(notes || "").trim(),

@@ -427,6 +427,7 @@ def test_managed_takeoff_quote_and_acceptance_workflow(monkeypatch) -> None:
         headers=customer_headers,
         json={
             "property_type": "commercial_retail",
+            "measurement_scope": "partial_property",
             "service_types": ["Plowable pavement", "Sidewalks"],
             "boundary": boundary,
         },
@@ -439,7 +440,43 @@ def test_managed_takeoff_quote_and_acceptance_workflow(monkeypatch) -> None:
     assert "estimated_hours_low" not in estimate_body
     assert "estimated_hours_high" not in estimate_body
     assert estimate_body["area_source"] == "boundary"
+    assert estimate_body["measurement_scope"] == "partial_property"
     assert estimate_body["estimated_square_feet"] > 1_000
+    full_estimate = client.post(
+        "/api/takeoff-requests/estimate",
+        headers=customer_headers,
+        json={
+            "property_type": "commercial_retail",
+            "measurement_scope": "full_property",
+            "service_types": ["Plowable pavement", "Sidewalks"],
+            "boundary": boundary,
+        },
+    )
+    assert full_estimate.status_code == 200
+    assert estimate_body["low_cents"] < full_estimate.json()["low_cents"]
+    industrial_estimate = client.post(
+        "/api/takeoff-requests/estimate",
+        headers=customer_headers,
+        json={
+            "property_type": "industrial_warehouse",
+            "measurement_scope": "full_property",
+            "service_types": ["Plowable pavement", "Sidewalks"],
+            "boundary": boundary,
+        },
+    )
+    hoa_estimate = client.post(
+        "/api/takeoff-requests/estimate",
+        headers=customer_headers,
+        json={
+            "property_type": "hoa_multifamily",
+            "measurement_scope": "full_property",
+            "service_types": ["Plowable pavement", "Sidewalks"],
+            "boundary": boundary,
+        },
+    )
+    assert industrial_estimate.status_code == 200
+    assert hoa_estimate.status_code == 200
+    assert industrial_estimate.json()["low_cents"] < hoa_estimate.json()["low_cents"]
     created = client.post(
         "/api/takeoff-requests",
         headers=customer_headers,
@@ -448,6 +485,7 @@ def test_managed_takeoff_quote_and_acceptance_workflow(monkeypatch) -> None:
             "address": "1200 N Dupont Hwy, Dover, DE",
             "service_types": ["Plowable pavement", "Sidewalks"],
             "property_type": "commercial_retail",
+            "measurement_scope": "partial_property",
             "estimated_square_feet": 240_000,
             "boundary": boundary,
             "notes": "Exclude the loading dock.",
@@ -455,6 +493,7 @@ def test_managed_takeoff_quote_and_acceptance_workflow(monkeypatch) -> None:
     )
     assert created.status_code == 201
     assert created.json()["property_type"] == "commercial_retail"
+    assert created.json()["measurement_scope"] == "partial_property"
     assert created.json()["estimated_square_feet"] == estimate_body["estimated_square_feet"]
     assert created.json()["estimate_low_cents"] == estimate_body["low_cents"]
     assert created.json()["estimate_high_cents"] == estimate_body["high_cents"]

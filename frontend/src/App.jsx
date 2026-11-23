@@ -20794,6 +20794,7 @@ export default function App() {
           billingStatus={billingStatus}
           billingWorking={billingWorking}
           mapboxToken={mapboxToken}
+          googleMapsKey={googleMapsKey}
           showMembershipPrompt={showMembershipPrompt}
           onDismissMembershipPrompt={() => setShowMembershipPrompt(false)}
           onStartSubscription={handleStartSubscription}

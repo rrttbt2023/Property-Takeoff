@@ -105,6 +105,7 @@ def estimate_takeoff_request(
             property_type=payload.property_type,
             estimated_square_feet=estimated_square_feet,
             service_types=payload.service_types,
+            measurement_scope=payload.measurement_scope,
         )
     )
 
@@ -125,6 +126,7 @@ def create_takeoff_request(
         property_type=payload.property_type,
         estimated_square_feet=estimated_square_feet,
         service_types=service_types,
+        measurement_scope=payload.measurement_scope,
     )
     item = create_request(
         organization_id=str(session.get("organization_id") or ""),
@@ -133,6 +135,7 @@ def create_takeoff_request(
         address=payload.address.strip(),
         service_types=service_types,
         property_type=payload.property_type,
+        measurement_scope=payload.measurement_scope,
         estimated_square_feet=estimated_square_feet,
         estimate_low_cents=int(estimate["low_cents"]),
         estimate_high_cents=int(estimate["high_cents"]),

@@ -33,6 +33,19 @@ const TAKEOFF_PROPERTY_OPTIONS = [
   ["other", "Other"],
 ];
 
+const TAKEOFF_SCOPE_OPTIONS = [
+  {
+    value: "full_property",
+    label: "Full property",
+    detail: "Measure the selected surface types throughout the entire outlined site.",
+  },
+  {
+    value: "partial_property",
+    label: "Only part of the property",
+    detail: "Measure only the requested sections inside the outline for a lower planning range.",
+  },
+];
+
 function formatMoney(cents) {
   if (!Number.isFinite(Number(cents))) return "Pending";
   return new Intl.NumberFormat("en-US", {
@@ -51,6 +64,10 @@ function formatQuoteRange(lowCents, highCents) {
 
 function propertyTypeLabel(value) {
   return TAKEOFF_PROPERTY_OPTIONS.find(([key]) => key === value)?.[1] || "Other";
+}
+
+function measurementScopeLabel(value) {
+  return value === "partial_property" ? "Partial area" : "Full property";
 }
 
 function Icon({ name, size = 18, strokeWidth = 1.8 }) {
@@ -344,6 +361,7 @@ function HomeDashboard({
   billingStatus,
   billingWorking,
   mapboxToken,
+  googleMapsKey,
   showMembershipPrompt,
   onDismissMembershipPrompt,
   onStartSubscription,
@@ -406,6 +424,7 @@ function HomeDashboard({
     address: "",
     serviceTypes: [],
     propertyType: "commercial_retail",
+    measurementScope: "full_property",
     estimatedSquareFeet: "",
     boundary: null,
     notes: "",
@@ -418,6 +437,7 @@ function HomeDashboard({
   const [takeoffEstimateError, setTakeoffEstimateError] = useState("");
   const [addressSearchNonce, setAddressSearchNonce] = useState(0);
   const estimatePropertyType = takeoffForm.propertyType;
+  const estimateMeasurementScope = takeoffForm.measurementScope;
   const estimateSquareFeet = takeoffForm.estimatedSquareFeet;
   const estimateBoundary = takeoffForm.boundary;
   const estimateServicesKey = takeoffForm.serviceTypes.join("|");
@@ -445,6 +465,7 @@ function HomeDashboard({
       try {
         const estimate = await onEstimateTakeoffRequest({
           propertyType: estimatePropertyType,
+          measurementScope: estimateMeasurementScope,
           serviceTypes,
           boundary: estimateBoundary,
         });
@@ -462,7 +483,7 @@ function HomeDashboard({
       active = false;
       window.clearTimeout(timer);
     };
-  }, [estimateBoundary, estimatePropertyType, estimateServicesKey, estimateSquareFeet, isStaff, onEstimateTakeoffRequest]);
+  }, [estimateBoundary, estimateMeasurementScope, estimatePropertyType, estimateServicesKey, estimateSquareFeet, isStaff, onEstimateTakeoffRequest]);
 
   const takeoffPropertyReady = takeoffForm.title.trim().length >= 2 && takeoffForm.address.trim().length >= 3;
   const takeoffServicesReady = takeoffForm.serviceTypes.length > 0;
@@ -568,6 +589,7 @@ function HomeDashboard({
           address: takeoffForm.address,
           serviceTypes: takeoffForm.serviceTypes,
           propertyType: takeoffForm.propertyType,
+          measurementScope: takeoffForm.measurementScope,
           estimatedSquareFeet,
           boundary: takeoffForm.boundary,
           notes: takeoffForm.notes,
@@ -579,6 +601,7 @@ function HomeDashboard({
         address: "",
         serviceTypes: [],
         propertyType: "commercial_retail",
+        measurementScope: "full_property",
         estimatedSquareFeet: "",
         boundary: null,
         notes: "",
@@ -1065,6 +1088,16 @@ function HomeDashboard({
                     </label>;
                   })}</div>
                 </fieldset>
+                <fieldset className="hd-takeoff-scope">
+                  <legend>How much of the outlined property needs measurement?</legend>
+                  <div>{TAKEOFF_SCOPE_OPTIONS.map((option) => {
+                    const selected = takeoffForm.measurementScope === option.value;
+                    return <label key={option.value} className={selected ? "selected" : ""}>
+                      <input type="radio" name="takeoff-measurement-scope" value={option.value} checked={selected} onChange={() => setTakeoffForm((previous) => ({ ...previous, measurementScope: option.value }))} />
+                      <span><strong>{option.label}</strong><small>{option.detail}</small></span>
+                    </label>;
+                  })}</div>
+                </fieldset>
               </section>
 
               <section className="hd-takeoff-step hd-takeoff-wide">
@@ -1073,6 +1106,7 @@ function HomeDashboard({
                   address={takeoffForm.address}
                   addressSearchNonce={addressSearchNonce}
                   mapboxToken={mapboxToken}
+                  googleMapsKey={googleMapsKey}
                   value={takeoffForm.boundary}
                   onChange={(boundary) => setTakeoffForm((previous) => ({ ...previous, boundary }))}
                   onSquareFeetChange={(squareFeet) => setTakeoffForm((previous) => ({
@@ -1089,7 +1123,7 @@ function HomeDashboard({
                   <div>
                     <small>Estimated measurement quote</small>
                     <strong>{takeoffEstimateLoading ? "Calculating..." : takeoffEstimateError ? "Estimate temporarily unavailable" : formatQuoteRange(takeoffEstimate?.low_cents, takeoffEstimate?.high_cents)}</strong>
-                    {takeoffEstimate ? <div className="hd-takeoff-estimate-facts"><span><b>{Number(takeoffEstimate.estimated_square_feet).toLocaleString()}</b><small>square feet</small></span><span><b>{Number(takeoffEstimate.estimated_acres ?? (Number(takeoffEstimate.estimated_square_feet) / 43560)).toFixed(2)}</b><small>boundary acres</small></span><span><b>{takeoffForm.serviceTypes.length}</b><small>areas selected</small></span><span><b>{propertyTypeLabel(takeoffEstimate.property_type)}</b><small>property type</small></span></div> : <p>Choose an area and draw a boundary of at least 1,000 sq ft to calculate the range.</p>}
+                    {takeoffEstimate ? <div className="hd-takeoff-estimate-facts"><span><b>{Number(takeoffEstimate.estimated_square_feet).toLocaleString()}</b><small>square feet</small></span><span><b>{Number(takeoffEstimate.estimated_acres ?? (Number(takeoffEstimate.estimated_square_feet) / 43560)).toFixed(2)}</b><small>boundary acres</small></span><span><b>{takeoffForm.serviceTypes.length}</b><small>areas selected</small></span><span><b>{propertyTypeLabel(takeoffEstimate.property_type)}</b><small>property type</small></span><span><b>{measurementScopeLabel(takeoffEstimate.measurement_scope)}</b><small>measurement scope</small></span></div> : <p>Choose an area and draw a boundary of at least 1,000 sq ft to calculate the range.</p>}
                     {takeoffForm.serviceTypes.length ? <div className="hd-takeoff-estimate-services">{takeoffForm.serviceTypes.map((service) => <span key={service}><Icon name="check" size={13} />{service}</span>)}</div> : null}
                     <em>Planning estimate only. Final price is confirmed after our team reviews the boundary, imagery, requested measurements, and site complexity.</em>
                   </div>
@@ -1110,7 +1144,7 @@ function HomeDashboard({
                 return <article className="hd-card hd-takeoff-request" key={request.id}>
                   <div className="hd-takeoff-request-top"><div><span className={`hd-takeoff-status status-${request.status}`}>{String(request.status || "submitted").replaceAll("_", " ")}</span><h3>{request.title}</h3><p>{request.address}</p></div><strong>{quote}</strong></div>
                   {isStaff ? <small className="hd-takeoff-customer">{request.organization_name || "Customer workspace"}</small> : null}
-                  <div className="hd-takeoff-facts"><span><small>Requested</small><strong>{formatDate(request.created_at)}</strong></span><span><small>Property</small><strong>{propertyTypeLabel(request.property_type)}</strong></span><span><small>Estimated area</small><strong>{request.estimated_square_feet ? `${Number(request.estimated_square_feet).toLocaleString()} sq ft` : "Not provided"}</strong></span><span><small>Planning range</small><strong>{formatQuoteRange(request.estimate_low_cents, request.estimate_high_cents)}</strong></span><span><small>Services</small><strong>{request.service_types?.join(", ") || "As directed"}</strong></span><span><small>Delivery due</small><strong>{request.due_at ? formatDate(request.due_at) : "Starts after approval"}</strong></span><span><small>Boundary</small><strong>{request.boundary ? "Drawn on map" : "Not provided"}</strong></span><span><small>Files</small><strong>{request.files?.length || 0}</strong></span></div>
+                  <div className="hd-takeoff-facts"><span><small>Requested</small><strong>{formatDate(request.created_at)}</strong></span><span><small>Property</small><strong>{propertyTypeLabel(request.property_type)}</strong></span><span><small>Scope</small><strong>{measurementScopeLabel(request.measurement_scope)}</strong></span><span><small>Estimated area</small><strong>{request.estimated_square_feet ? `${Number(request.estimated_square_feet).toLocaleString()} sq ft` : "Not provided"}</strong></span><span><small>Planning range</small><strong>{formatQuoteRange(request.estimate_low_cents, request.estimate_high_cents)}</strong></span><span><small>Services</small><strong>{request.service_types?.join(", ") || "As directed"}</strong></span><span><small>Delivery due</small><strong>{request.due_at ? formatDate(request.due_at) : "Starts after approval"}</strong></span><span><small>Boundary</small><strong>{request.boundary ? "Drawn on map" : "Not provided"}</strong></span><span><small>Files</small><strong>{request.files?.length || 0}</strong></span></div>
                   {request.notes ? <p className="hd-takeoff-notes">{request.notes}</p> : null}
                   {request.quote_notes ? <div className="hd-takeoff-quote-note"><strong>Quote details</strong><p>{request.quote_notes}</p></div> : null}
                   {request.delivery_notes ? <div className="hd-takeoff-delivery"><strong>Delivery notes</strong><p>{request.delivery_notes}</p></div> : null}

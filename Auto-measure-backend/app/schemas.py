@@ -315,10 +315,12 @@ TakeoffPropertyType = Literal[
     "municipal",
     "other",
 ]
+TakeoffMeasurementScope = Literal["full_property", "partial_property"]
 
 
 class TakeoffQuoteEstimateRequest(BaseModel):
     property_type: TakeoffPropertyType = "commercial_retail"
+    measurement_scope: TakeoffMeasurementScope = "full_property"
     service_types: list[str] = Field(..., min_length=1, max_length=20)
     boundary: dict[str, Any]
 
@@ -331,6 +333,7 @@ class TakeoffQuoteEstimateResponse(BaseModel):
     estimated_square_feet: int = Field(..., ge=1_000)
     estimated_acres: float = Field(..., ge=0)
     property_type: TakeoffPropertyType
+    measurement_scope: TakeoffMeasurementScope = "full_property"
     service_types: list[str] = Field(default_factory=list)
     area_source: Literal["boundary"] = "boundary"
     disclaimer: str
@@ -341,6 +344,7 @@ class TakeoffRequestCreate(BaseModel):
     address: str = Field(..., min_length=3, max_length=300)
     service_types: list[str] = Field(..., min_length=1, max_length=20)
     property_type: TakeoffPropertyType = "commercial_retail"
+    measurement_scope: TakeoffMeasurementScope = "full_property"
     estimated_square_feet: int | None = Field(None, ge=1_000, le=100_000_000)
     boundary: dict[str, Any]
     notes: str = Field("", max_length=5000)
@@ -371,6 +375,7 @@ class TakeoffRequestRecord(BaseModel):
     address: str
     service_types: list[str] = Field(default_factory=list)
     property_type: TakeoffPropertyType = "commercial_retail"
+    measurement_scope: TakeoffMeasurementScope = "full_property"
     estimated_square_feet: int | None = Field(None, ge=1_000)
     estimate_low_cents: int | None = Field(None, ge=0)
     estimate_high_cents: int | None = Field(None, ge=0)

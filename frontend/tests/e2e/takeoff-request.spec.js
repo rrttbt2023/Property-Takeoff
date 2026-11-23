@@ -20,10 +20,12 @@ test("a customer sees the guided boundary-based quote workflow", async ({ page }
   await page.getByLabel("Property address").fill("1200 N Dupont Hwy, Dover, DE 19901");
   await page.getByRole("checkbox", { name: /Parking lots & plowable pavement/ }).check();
   await page.getByRole("checkbox", { name: /Sidewalks & walkways/ }).check();
+  await page.getByRole("radio", { name: /Only part of the property/ }).check();
 
   await expect(page.locator(".takeoff-boundary-status")).toContainText(/Property found|lookup is unavailable/);
   const mapCanvas = page.locator(".takeoff-boundary-map canvas").first();
   await expect(mapCanvas).toBeVisible();
+  await expect(page.locator(".takeoff-boundary-toolbar").getByText("Google satellite", { exact: true })).toBeVisible({ timeout: 15_000 });
   await mapCanvas.scrollIntoViewIfNeeded();
   await page.getByRole("button", { name: "Draw boundary" }).click();
   await expect(page.locator(".takeoff-boundary-status")).toContainText("Tap or click around the property");
@@ -45,6 +47,7 @@ test("a customer sees the guided boundary-based quote workflow", async ({ page }
   await expect(page.locator(".hd-takeoff-estimate")).not.toContainText("draw a boundary");
   await expect(page.locator(".hd-takeoff-estimate")).not.toContainText("/hr");
   await expect(page.locator(".hd-takeoff-estimate")).not.toContainText("virtual measuring hour");
+  await expect(page.locator(".hd-takeoff-estimate")).toContainText("Partial area");
   await expect(page.getByRole("button", { name: "Submit Quote Request" })).toBeEnabled();
 });
 

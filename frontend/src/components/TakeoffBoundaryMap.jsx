@@ -13,6 +13,8 @@ const COMPLETED_SOURCE_ID = "takeoff-boundary-completed";
 const COMPLETED_FILL_LAYER_ID = "takeoff-boundary-completed-fill";
 const COMPLETED_HALO_LAYER_ID = "takeoff-boundary-completed-halo";
 const COMPLETED_LINE_LAYER_ID = "takeoff-boundary-completed-line";
+const GOOGLE_SOURCE_ID = "takeoff-google-satellite";
+const GOOGLE_LAYER_ID = "takeoff-google-satellite-layer";
 
 // Mapbox Draw still ships Mapbox GL class names; align them with MapLibre's DOM.
 if (MapboxDraw.constants?.classes) {
@@ -67,6 +69,7 @@ function drawStyles() {
 
 function TakeoffBoundaryMap({
   address,
+  googleMapsKey,
   mapboxToken,
   value,
   onChange,
@@ -90,6 +93,9 @@ function TakeoffBoundaryMap({
   const [boundarySquareFeet, setBoundarySquareFeet] = useState(0);
   const [isDrafting, setIsDrafting] = useState(false);
   const [draftPointCount, setDraftPointCount] = useState(0);
+  const [imageryProvider, setImageryProvider] = useState(
+    googleMapsKey ? "Loading Google satellite" : mapboxToken ? "Mapbox satellite fallback" : "Street map fallback"
+  );
 
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -132,6 +138,51 @@ function TakeoffBoundaryMap({
     map.addControl(draw, "top-right");
     mapRef.current = map;
     drawRef.current = draw;
+
+    const installGoogleSatellite = async () => {
+      if (!googleMapsKey) return false;
+      const response = await fetch(
+        `https://tile.googleapis.com/v1/createSession?key=${encodeURIComponent(googleMapsKey)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mapType: "satellite",
+            language: "en-US",
+            region: "US",
+            scale: window.devicePixelRatio > 1.25 ? "scaleFactor2x" : "scaleFactor1x",
+            highDpi: window.devicePixelRatio > 1.25,
+          }),
+        }
+      );
+      if (!response.ok) throw new Error(`Google imagery session failed (${response.status}).`);
+      const payload = await response.json();
+      const session = String(payload?.session || payload?.sessionToken || "").trim();
+      if (!session) throw new Error("Google imagery session was empty.");
+      if (mapRef.current !== map) return false;
+      const tileUrl =
+        `https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}` +
+        `?session=${encodeURIComponent(session)}` +
+        `&key=${encodeURIComponent(googleMapsKey)}`;
+      map.addSource(GOOGLE_SOURCE_ID, {
+        type: "raster",
+        tiles: [tileUrl],
+        tileSize: 256,
+        maxzoom: 22,
+        attribution: "© Google",
+      });
+      map.addLayer({
+        id: GOOGLE_LAYER_ID,
+        type: "raster",
+        source: GOOGLE_SOURCE_ID,
+        paint: {
+          "raster-resampling": "linear",
+          "raster-fade-duration": 80,
+        },
+      }, COMPLETED_FILL_LAYER_ID);
+      setImageryProvider("Google satellite");
+      return true;
+    };
 
     const updateCompletedBoundary = (feature) => {
       const source = map.getSource(COMPLETED_SOURCE_ID);
@@ -359,11 +410,23 @@ function TakeoffBoundaryMap({
         draw.add(initialValue);
         syncBoundary();
       }
+      void installGoogleSatellite().catch(() => {
+        setImageryProvider(mapboxToken ? "Mapbox satellite fallback" : "Street map fallback");
+      });
     });
     map.on("draw.create", syncBoundary);
     map.on("draw.update", syncBoundary);
     map.on("draw.delete", syncBoundary);
     map.on("click", handleMapClick);
+    const handleMapError = (event) => {
+      const sourceId = String(event?.sourceId || event?.source?.id || "");
+      if (sourceId !== GOOGLE_SOURCE_ID) return;
+      if (map.getLayer(GOOGLE_LAYER_ID)) {
+        map.setLayoutProperty(GOOGLE_LAYER_ID, "visibility", "none");
+      }
+      setImageryProvider(mapboxToken ? "Mapbox satellite fallback" : "Street map fallback");
+    };
+    map.on("error", handleMapError);
     const canvas = map.getCanvas();
     canvas.addEventListener("pointerdown", handlePointerDown, true);
     canvas.addEventListener("pointerup", handlePointerUp, true);
@@ -382,11 +445,12 @@ function TakeoffBoundaryMap({
       canvas.removeEventListener("pointerdown", handlePointerDown, true);
       canvas.removeEventListener("pointerup", handlePointerUp, true);
       canvas.removeEventListener("pointercancel", handlePointerCancel, true);
+      map.off("error", handleMapError);
       drawRef.current = null;
       mapRef.current = null;
       map.remove();
     };
-  }, [mapboxToken]);
+  }, [googleMapsKey, mapboxToken]);
 
   useEffect(() => {
     const draw = drawRef.current;
@@ -406,24 +470,40 @@ function TakeoffBoundaryMap({
       setMapStatus("Enter the property address first.");
       return;
     }
-    if (!mapboxToken) {
-      setMapStatus("Address lookup is unavailable until the Mapbox token is configured.");
+    if (!googleMapsKey && !mapboxToken) {
+      setMapStatus("Address lookup is unavailable until a map provider is configured.");
       return;
     }
     setLocating(true);
     setMapStatus("Finding the property...");
     try {
-      const params = new URLSearchParams({
-        q: query,
-        country: "us",
-        limit: "1",
-        autocomplete: "false",
-        access_token: mapboxToken,
-      });
-      const response = await fetch(`https://api.mapbox.com/search/geocode/v6/forward?${params}`);
-      if (!response.ok) throw new Error("Address lookup failed");
-      const payload = await response.json();
-      const coordinates = payload?.features?.[0]?.geometry?.coordinates;
+      let coordinates = null;
+      if (googleMapsKey) {
+        const params = new URLSearchParams({
+          address: query,
+          key: googleMapsKey,
+          region: "us",
+        });
+        const response = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${params}`);
+        if (!response.ok) throw new Error("Address lookup failed");
+        const payload = await response.json();
+        const location = payload?.results?.[0]?.geometry?.location;
+        if (Number.isFinite(Number(location?.lng)) && Number.isFinite(Number(location?.lat))) {
+          coordinates = [Number(location.lng), Number(location.lat)];
+        }
+      } else {
+        const params = new URLSearchParams({
+          q: query,
+          country: "us",
+          limit: "1",
+          autocomplete: "false",
+          access_token: mapboxToken,
+        });
+        const response = await fetch(`https://api.mapbox.com/search/geocode/v6/forward?${params}`);
+        if (!response.ok) throw new Error("Address lookup failed");
+        const payload = await response.json();
+        coordinates = payload?.features?.[0]?.geometry?.coordinates;
+      }
       if (!Array.isArray(coordinates) || coordinates.length < 2) {
         throw new Error("Address not found");
       }
@@ -518,7 +598,7 @@ function TakeoffBoundaryMap({
       <div className="takeoff-boundary-toolbar">
         <div>
           <strong>Property boundary</strong>
-          <span>{mapboxToken ? "Satellite map" : "Street map fallback"}</span>
+          <span>{imageryProvider}</span>
         </div>
         <div className="takeoff-boundary-actions">
           <button type="button" onClick={() => void findAddress()} disabled={locating}>
