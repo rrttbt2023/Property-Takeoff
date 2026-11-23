@@ -7,6 +7,8 @@ import {
 } from "../api";
 
 import "./account-access.css";
+import PublicDialog from "./PublicDialog";
+import PublicTour from "./PublicTour";
 import SiteComparison from "./SiteComparison";
 import { readStartIntent, setStartIntent } from "./startIntent";
 
@@ -23,15 +25,26 @@ function AccountAccess({
 }) {
   const [intent, setIntent] = useState(readStartIntent);
   const [mode, setMode] = useState(() => intent ? "register" : "login");
-  const panelRef = useRef(null);
+  const [tourOpen, setTourOpen] = useState(false);
   const start = (choice) => {
+    setTourOpen(false);
     setStartIntent(choice);
     setIntent(choice);
+    setAccountMessage("");
     setMode("register");
-    requestAnimationFrame(() => {
-      panelRef.current?.scrollIntoView({ block: "center" });
-      panelRef.current?.querySelector("form input")?.focus({ preventScroll: true });
-    });
+  };
+  const closeSignup = () => {
+    setStartIntent("");
+    setIntent("");
+    setAccountMessage("");
+    setMode("login");
+    setRegistration(previous => ({ ...previous, password: "", botToken: "", acceptedTerms: false }));
+  };
+  const submitAuth = async (event, handler, values) => {
+    event.preventDefault();
+    setAccountMessage("");
+    const result = await handler(event, values);
+    if (result?.error) setAccountMessage(result.error);
   };
   const [mfaCode, setMfaCode] = useState("");
   const [recoveryEmail, setRecoveryEmail] = useState("");
@@ -69,30 +82,33 @@ function AccountAccess({
 
   useEffect(() => {
     if (!turnstileSiteKey || mode !== "register" || !turnstileRef.current) return undefined;
+    const container = turnstileRef.current;
+    let widgetId;
+    updateRegistration("botToken", "");
     const render = () => {
-      if (!window.turnstile || !turnstileRef.current || turnstileRef.current.dataset.widgetId) return;
-      const widgetId = window.turnstile.render(turnstileRef.current, {
+      if (!window.turnstile || !container.isConnected || widgetId != null) return;
+      widgetId = window.turnstile.render(container, {
         sitekey: turnstileSiteKey,
         callback: (token) => updateRegistration("botToken", token),
         "expired-callback": () => updateRegistration("botToken", ""),
       });
-      turnstileRef.current.dataset.widgetId = String(widgetId);
     };
     const existing = document.querySelector('script[data-property-takeoff-turnstile="1"]');
-    if (existing) {
-      render();
-      existing.addEventListener("load", render);
-      return () => existing.removeEventListener("load", render);
-    }
-    const script = document.createElement("script");
-    script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
-    script.async = true;
-    script.defer = true;
-    script.dataset.propertyTakeoffTurnstile = "1";
+    const script = existing || document.createElement("script");
     script.addEventListener("load", render);
-    document.head.appendChild(script);
-    return () => script.removeEventListener("load", render);
-  }, [mode, turnstileSiteKey]);
+    if (existing) render();
+    else {
+      script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+      script.async = true;
+      script.defer = true;
+      script.dataset.propertyTakeoffTurnstile = "1";
+      document.head.appendChild(script);
+    }
+    return () => {
+      script.removeEventListener("load", render);
+      if (widgetId != null) window.turnstile?.remove(widgetId);
+    };
+  }, [mode, intent, checking, turnstileSiteKey]);
 
   const updateRegistration = (key, value) => {
     setRegistration((previous) => ({ ...previous, [key]: value }));
@@ -107,23 +123,10 @@ function AccountAccess({
     );
   }
 
-  return (
-    <main className="account-access">
-      <section className="account-access-story">
-        <div className="account-access-brand">
-          <img src="/logo.png" alt="McKenna Site Management" />
-          <div><strong>Property Takeoff</strong><span>by McKenna Site Management</span></div>
-        </div>
-        <div className="account-access-copy">
-          <span className="account-access-kicker">Snow and landscape estimating</span>
-          <h1>Measure confidently.<br />Quote the property.<br /><em>Win the work.</em></h1>
-          <p>Build accurate map and plan takeoffs yourself, or send a site to our measurement team for delivery within 24 hours.</p>
-          <SiteComparison onStart={start} />
-          <small className="field-study-terms">Self-service: $9.99/month. Managed takeoffs: quoted per site, delivered within 24 hours of approval.</small>
-        </div>
-      </section>
-
-      <section className="account-access-panel" ref={panelRef}>
+  const accountPanel = (
+      <section className="account-access-panel">
+        {intent && <div className="signup-path"><strong>{intent === "measure" ? "Measure it myself" : "Request a measured takeoff"}</strong>
+          <span>{intent === "measure" ? "1. Account / 2. Secure checkout / 3. Measure" : "1. Free account / 2. Submit your site"}</span></div>}
         <div className="account-access-tabs" role="tablist">
           <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Sign in</button>
           <button type="button" className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>Create account</button>
@@ -132,7 +135,7 @@ function AccountAccess({
         {accountMessage ? <div className="account-access-message" role="status">{accountMessage}</div> : null}
 
         {mode === "login" ? (
-          <form className="account-access-form" onSubmit={(event) => onLogin(event, { mfaCode })}>
+          <form className="account-access-form" onSubmit={(event) => submitAuth(event, onLogin, { mfaCode })}>
             <div><span>Welcome back</span><h2>Open your project workspace.</h2><p>Your projects, folders, billing, and measurement requests stay together.</p></div>
             <label>Email or username<input value={loginUsername} onChange={(event) => onLoginUsernameChange(event.target.value)} autoComplete="username" placeholder="you@company.com" /></label>
             <label>Password<input type="password" value={loginPassword} onChange={(event) => onLoginPasswordChange(event.target.value)} autoComplete="current-password" placeholder="Your password" /></label>
@@ -142,16 +145,16 @@ function AccountAccess({
             <small>McKenna staff can continue using the existing shared-login credentials.</small>
           </form>
         ) : mode === "register" ? (
-          <form className="account-access-form" onSubmit={(event) => onRegister(event, registration)}>
-            <div><span>{intent === "quote" ? "Managed takeoff" : "Start measuring"}</span><h2>Create your company workspace.</h2><p>{intent === "quote" ? "Next, outline your site and request a measurement quote. No subscription is needed." : "Registration is free. Choose the $9.99 Basic plan when you are ready to use the measuring tools."}</p></div>
+          <form className="account-access-form" onSubmit={(event) => submitAuth(event, onRegister, registration)}>
+            <div><span>{intent === "quote" ? "Managed takeoff" : "Start measuring"}</span><h2>{intent === "measure" ? "Get started with Basic." : intent === "quote" ? "Start your quote request." : "Create your company workspace."}</h2><p>{intent === "quote" ? "Next, outline your site and request a measurement quote. No subscription is needed." : intent === "measure" ? "Create your account, then review the $9.99 monthly subscription in secure checkout. Measuring unlocks after your membership is confirmed." : "Registration is free. Choose the $9.99 Basic plan when you are ready to use the measuring tools."}</p></div>
             <label>Your name<input value={registration.displayName} onChange={(event) => updateRegistration("displayName", event.target.value)} autoComplete="name" placeholder="Alex Smith" /></label>
             <label>Company name<input value={registration.organizationName} onChange={(event) => updateRegistration("organizationName", event.target.value)} autoComplete="organization" placeholder="Evergreen Services" /></label>
             <label>Work email<input type="email" value={registration.email} onChange={(event) => updateRegistration("email", event.target.value)} autoComplete="email" placeholder="alex@company.com" /></label>
             <label>Password<input type="password" value={registration.password} onChange={(event) => updateRegistration("password", event.target.value)} autoComplete="new-password" placeholder="10+ characters with a number" /></label>
             {turnstileSiteKey ? <div ref={turnstileRef} className="account-access-turnstile" /> : null}
             <label className="account-access-consent"><input type="checkbox" checked={registration.acceptedTerms} onChange={(event) => updateRegistration("acceptedTerms", event.target.checked)} required /><span>I agree to the <a href="/terms.html" target="_blank" rel="noreferrer">Terms</a>, <a href="/privacy.html" target="_blank" rel="noreferrer">Privacy Policy</a>, and <a href="/acceptable-use.html" target="_blank" rel="noreferrer">Acceptable Use Policy</a>.</span></label>
-            <button type="submit" disabled={registerSubmitting || !registration.acceptedTerms || (turnstileSiteKey && !registration.botToken)}>{registerSubmitting ? "Creating workspace..." : "Create free account"}</button>
-            <small>No card is required to create an account or request a managed takeoff quote.</small>
+            <button type="submit" disabled={registerSubmitting || !registration.acceptedTerms || (turnstileSiteKey && !registration.botToken)}>{registerSubmitting ? "Creating workspace..." : intent === "measure" ? "Create account & continue to checkout" : intent === "quote" ? "Create account & request quote" : "Create free account"}</button>
+            <small>{intent === "measure" ? "You will not be charged until you confirm payment in Stripe." : "No card is required to create an account or request a managed takeoff quote."}</small>
           </form>
         ) : mode === "forgot" ? (
           <form className="account-access-form" onSubmit={async (event) => {
@@ -193,6 +196,28 @@ function AccountAccess({
           </form>
         )}
       </section>
+  );
+
+  return (
+    <main className="account-access">
+      <section className="account-access-story">
+        <div className="account-access-brand">
+          <img src="/logo.png" alt="McKenna Site Management" />
+          <div><strong>Property Takeoff</strong><span>by McKenna Site Management</span></div>
+        </div>
+        <div className="account-access-copy">
+          <span className="account-access-kicker">Snow and landscape estimating</span>
+          <h1>Measure confidently.<br />Quote the property.<br /><em>Win the work.</em></h1>
+          <p>Build accurate map and plan takeoffs yourself, or send a site to our measurement team for delivery within 24 hours.</p>
+          <button type="button" className="account-tour-trigger" onClick={() => setTourOpen(true)}>Take a tour <span aria-hidden="true">&rarr;</span></button>
+          <SiteComparison onStart={start} />
+          <small className="field-study-terms">Self-service: $9.99/month. Managed takeoffs: quoted per site, delivered within 24 hours of approval.</small>
+        </div>
+      </section>
+
+      {intent ? <PublicDialog label={intent === "measure" ? "Measuring membership signup" : "Takeoff quote signup"}
+        busy={loginSubmitting || registerSubmitting} onClose={closeSignup}>{accountPanel}</PublicDialog> : accountPanel}
+      {tourOpen && <PublicTour onClose={() => setTourOpen(false)} onStart={start} />}
     </main>
   );
 }

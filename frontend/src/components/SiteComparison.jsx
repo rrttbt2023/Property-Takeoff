@@ -35,6 +35,6 @@ export default function SiteComparison({ onStart }) {
         <button type="button" key={layer.key} aria-pressed={!hidden.includes(layer.key)} style={{"--layer-color": layer.color}}
           onClick={() => toggle(layer.key)}>{layer.label}</button>)}</div>
     </div>
-    <div className="field-study-actions"><button type="button" onClick={() => onStart("measure")}>Measure it myself</button><button type="button" onClick={() => onStart("quote")}>Request a measured takeoff</button></div>
+    {onStart && <div className="field-study-actions"><button type="button" onClick={() => onStart("measure")}>Measure it myself</button><button type="button" onClick={() => onStart("quote")}>Request a measured takeoff</button></div>}
   </section>;
 }

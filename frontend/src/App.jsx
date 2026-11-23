@@ -45,6 +45,7 @@ import {
   saveSharedProject,
   registerSharedAccess,
   resendVerificationEmail,
+  verifyEmail,
   setupAccountMfa,
   confirmAccountMfa,
   setSharedAuthToken,
@@ -5407,7 +5408,7 @@ export default function App() {
       const password = String(sharedLoginPassword || "");
       if (!username || !password) {
         pushToast("Enter username and password to access shared files.", "warn", 4200);
-        return;
+        return { error: "Enter your username and password." };
       }
       setSharedLoginSubmitting(true);
       setSharedProjectLibraryStatus("connecting");
@@ -5448,6 +5449,7 @@ export default function App() {
       } catch (error) {
         setSharedProjectLibraryStatus("locked");
         pushToast(`Shared login failed: ${error?.message || "invalid credentials"}.`, "error", 6200);
+        return { error: error?.message || "Sign-in failed. Please try again." };
       } finally {
         setSharedLoginSubmitting(false);
       }
@@ -5464,7 +5466,7 @@ export default function App() {
       const organizationName = String(registration?.organizationName || "").trim();
       if (!email || !password || !displayName || !organizationName) {
         pushToast("Complete every account field first.", "warn", 4200);
-        return;
+        return { error: "Enter your name, company, work email, and password." };
       }
       setSharedRegisterSubmitting(true);
       try {
@@ -5509,6 +5511,7 @@ export default function App() {
         pushToast("Your company workspace is ready.", "info", 4200);
       } catch (error) {
         pushToast(`Account creation failed: ${error?.message || "please try again"}.`, "error", 6200);
+        return { error: error?.message || "Account creation failed. Please try again." };
       } finally {
         setSharedRegisterSubmitting(false);
       }
@@ -5580,6 +5583,7 @@ export default function App() {
     } catch (error) {
       pushToast(`Could not start checkout: ${error?.message || "request failed"}.`, "error", 6200);
       setBillingWorking(false);
+      return { error: error?.message || "Checkout is unavailable. Please try again." };
     }
   }, [pushToast]);
 
@@ -5617,9 +5621,28 @@ export default function App() {
   }, [pushToast]);
 
   const handleResendVerification = useCallback(async () => {
-    await resendVerificationEmail(sharedAuth?.email || sharedAuth?.username || "");
-    pushToast("If verification is still pending, a new email is on its way.", "info", 5200);
+    try {
+      await resendVerificationEmail(sharedAuth?.email || sharedAuth?.username || "");
+      pushToast("If verification is still pending, a new email is on its way.", "info", 5200);
+    } catch (error) {
+      pushToast(error?.message || "Could not send a verification email.", "error", 5200);
+    }
   }, [pushToast, sharedAuth?.email, sharedAuth?.username]);
+
+  useEffect(() => {
+    if (!sharedAccessAuthenticated || sharedAuthChecking) return;
+    const url = new URL(window.location.href);
+    const token = url.searchParams.get("verify");
+    if (!token) return;
+    url.searchParams.delete("verify");
+    window.history.replaceState(window.history.state, "", url);
+    void verifyEmail(token).then(async () => {
+      pushToast("Email verified. You can continue checkout or request your quote.", "info", 5000);
+      const session = await getSharedAccessSession();
+      setSharedAuth(previous => previous?.authenticated && previous.username === session.username
+        ? { ...previous, emailVerified: Boolean(session.email_verified) } : previous);
+    }).catch(error => pushToast(error?.message || "Could not confirm email verification.", "error", 5000));
+  }, [sharedAccessAuthenticated, sharedAuthChecking, pushToast]);
 
   const handleDeleteAccount = useCallback(async () => {
     if (!window.confirm("Permanently delete this company workspace, projects, requests, and uploads? This cannot be undone.")) return;

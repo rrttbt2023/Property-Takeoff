@@ -4,6 +4,36 @@ import { Buffer } from "node:buffer";
 
 test.use({ viewport: { width: 820, height: 1180 }, hasTouch: true });
 
+test("a guest can tour all work areas and choose either signup without submitting anything", async ({ page }) => {
+  const writes = [];
+  page.on("request", request => {
+    if (request.url().includes("/api/") && request.method() === "POST") writes.push(request.url());
+  });
+  await page.goto("/");
+  const launch = page.getByRole("button", { name: "Take a tour" });
+  await launch.click();
+  const tour = page.getByRole("dialog", {name: "Guided tour"});
+  await tour.getByRole("button", {name: /Open measured property/}).click();
+  await tour.getByRole("button", {name: "Mulch beds"}).click();
+  await tour.getByRole("button", {name: /^Next step/}).click();
+  await tour.getByRole("button", {name: "Calibrate with 60 ft"}).click();
+  await expect(tour.getByText("2,400 sq ft")).toBeVisible();
+  await tour.getByRole("button", {name: /^Next step/}).click();
+  await tour.getByRole("button", {name: "Show sample boundary"}).click();
+  await expect(tour.locator(".tour-boundary path")).toBeVisible();
+  await tour.getByRole("button", {name: /^Next step/}).click();
+  await tour.getByRole("button", {name: /Sign up for the monthly plan/}).click();
+  await expect(page.getByRole("dialog", {name: "Measuring membership signup"})).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.has("start")).toBe(false);
+  await launch.click();
+  await tour.getByRole("button", {name: "Step 5: Next steps"}).click();
+  await tour.getByRole("button", {name: /Request a measured takeoff/}).click();
+  await expect(page.getByRole("dialog", {name:"Takeoff quote signup"})).toBeVisible();
+  expect(writes).toEqual([]);
+});
+
 test("public comparison keeps the aerial fixed and independently toggles all four measured surfaces", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
@@ -41,6 +71,13 @@ for (const [choice, destination] of [
   ["Request a measured takeoff", "Managed Takeoffs"],
 ]) {
   test(choice + " keeps its destination after authentication", async ({ page }) => {
+    let checkouts = 0;
+    const fakeCheckout = "https://checkout.stripe.com/c/pay/example-only";
+    await page.route("**/api/billing/checkout", route => {
+      checkouts++;
+      return route.fulfill({json: {url: fakeCheckout}});
+    });
+    await page.route(fakeCheckout, route => route.fulfill({contentType:"text/html", body:"Sandbox checkout"}));
     await page.goto("/");
     const slider = page.getByRole("slider");
     await slider.focus();
@@ -49,6 +86,7 @@ for (const [choice, destination] of [
     await slider.press("End");
     await expect(slider).toHaveAttribute("aria-valuetext", "0% measured overlay visible");
     await page.getByRole("button", { name: choice }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
     if (choice === "Request a measured takeoff") {
       await page.getByRole("button", { name: "Sign in", exact: true }).click();
       await page.getByLabel("Email or username").fill("e2e-staff");
@@ -60,11 +98,28 @@ for (const [choice, destination] of [
       await page.getByLabel("Work email").fill(`desk-${Date.now()}@example.com`);
       await page.getByLabel("Password", { exact: true }).fill("Example-password-123");
       await page.locator(".account-access-consent input").check();
-      await page.getByRole("button", { name: "Create free account" }).click();
+      await page.getByRole("button", { name: "Create account & continue to checkout" }).click();
+      await expect(page).toHaveURL(fakeCheckout);
+      expect(checkouts).toBe(1);
+      await page.goto("/?billing=canceled");
+      await expect(page.getByText(/Checkout was canceled/)).toBeVisible();
+      await expect(page.getByRole("button", { name: "Location Projects", exact: true })).toHaveCount(0);
     }
     await expect(page.getByRole("heading", { name: destination, exact: true }).first()).toBeVisible();
     await expect(page.getByRole("dialog")).not.toBeVisible();
     expect(new URL(page.url()).searchParams.has("start")).toBe(false);
+    expect(checkouts).toBe(choice === "Measure it myself" ? 1 : 0);
+    if (choice === "Measure it myself") {
+      await page.route("**/api/billing/checkout", route => route.fulfill({status: 503, json: { detail: "Checkout temporarily unavailable" }}));
+      await page.getByRole("button", {name:"Start Basic for $9.99/month"}).click();
+      await expect(page.getByRole("alert")).toContainText("Checkout temporarily unavailable");
+      await page.goto("/?billing=success");
+      await expect(page.getByText(/Waiting for subscription confirmation/)).toBeVisible();
+      await expect(page.getByRole("button", {name:"Start measuring", exact:true})).toHaveCount(0);
+      await page.route("**/api/billing/status", route => route.fulfill({json:{workspace_access:true, subscription_status:"active"}}));
+      await page.getByRole("button", {name:"Refresh Status"}).click();
+      await expect(page.getByRole("button", {name:"Start measuring", exact:true})).toBeVisible();
+    }
   });
 }
 

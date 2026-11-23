@@ -99,6 +99,45 @@
 .field-study-actions button:first-child { color: #16311d; background: #c2de9c; border-color: #b2d18d; }
 .field-study-terms { color: #cad8cb; font-size: 12px; }
 
+.account-tour-trigger { background: transparent; border: 1px solid #86a895; border-radius: 30px; color: #eef8e9; padding: 8px 18px; min-height: 44px; font: 700 14px "Avenir Next", sans-serif; cursor: pointer; }
+.account-tour-trigger span { margin-left: 8px; }
+.public-dialog { box-sizing: border-box; color: #142a22; background: #f4f7f1; border: 1px solid #839b89; border-radius: 18px; padding: 0; width: min(500px, calc(100% - 24px)); max-height: calc(100dvh - 32px); overflow-y: auto; overscroll-behavior: contain; margin: auto; font-family: "Avenir Next", "Trebuchet MS", sans-serif; box-shadow: 0 25px 95px #06181188; }
+.public-dialog::backdrop { background: rgba(2,15,13,.78); }
+.public-dialog-wide { width: min(640px, calc(100% - 24px)); }
+.public-dialog-bar { display: flex; align-items: center; justify-content: space-between; background: #12352c; color: #fff; padding: 3px 16px; position: sticky; top: 0; z-index: 2; }
+.public-dialog-bar > span { font: bold 16px Georgia, serif; }
+.public-dialog-bar button, .tour-footer button, .tour-track button, .tour-sample button, .tour-choices button { cursor: pointer; min-height: 44px; font: 700 14px "Avenir Next", sans-serif; border-radius: 8px; }
+.public-dialog-bar button { color: #fff; background: transparent; border: 0; }
+.public-dialog .account-access-panel { margin: 0; border-radius: 0; box-shadow: none; }
+.public-dialog .account-access-form { padding: 20px clamp(16px, 5vw, 34px); gap: 12px; }
+.signup-path { padding: 16px 20px; color: #16392e; display: grid; gap: 4px; }
+.signup-path strong { font: 600 23px Georgia, serif; }
+.signup-path span, .tour-sample > small, .tour-guide > small { color: #416352; font-weight: 750; font-size: 12px; letter-spacing: .04em; }
+.tour-content { padding: clamp(14px,3vw,25px); }
+.tour-track, .tour-footer, .tour-choices { display: flex; gap: 8px; }
+.tour-track button { flex: 1; background: transparent; color: #436254; border: 0; border-bottom: 3px solid #b9cbb9; border-radius: 0; }
+.tour-track button[aria-current="step"] { color: #0d3823; border-color: #3e864d; background: #e6efdf; }
+.tour-guide { margin: 18px 0; padding: 12px 14px; border-left: 3px solid #608e63; background: #e7efe3; }
+.tour-guide h2 { font: 600 clamp(22px,3vw,32px)/1.1 Georgia, serif; margin: 5px 0 8px; color: #142f22; }
+.tour-guide p, .tour-sample p { margin: 5px 0; line-height: 1.5; font-size: 14px; }
+.tour-content .field-study { margin: 0; }
+.tour-sample { padding: 12px; background: white; border: 1px solid #c7d4c7; border-radius: 10px; }
+.tour-project { display: grid; grid-template-columns: 34% 1fr; align-items: center; gap: 12px; text-align: left; width: 100%; margin-top: 10px; padding: 8px; }
+.tour-project img, .tour-boundary img, .tour-plan svg { width: 100%; display: block; }
+.tour-project > span { display: grid; gap: 4px; }
+.tour-project strong { font: bold 22px Georgia, serif; }
+.tour-project span span { font-size: 12px; }
+.tour-plan svg { max-height: 178px; background: #eef4ec; margin: 10px 0; }
+.tour-boundary { position: relative; margin: 8px 0; }
+.tour-boundary img { max-height: 210px; object-fit: cover; }
+.tour-boundary svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.tour-choices { flex-wrap: wrap; }
+.tour-choices button { flex: 1 1 190px; display: grid; align-content: start; gap: 6px; text-align: left; padding: 16px; color: #173b2c; background: #e7f1de; border: 1px solid #98b293; }
+.tour-choices button span { font-size: 13px; font-weight: 500; }
+.tour-footer { justify-content: space-between; margin-top: 16px; }
+.tour-footer button, .tour-sample button { border: 1px solid #abbdac; background: #fff; color: #1d5138; padding: 7px 14px; }
+.tour-footer button + button { background: #215f42; color: #fff; border-color: #215f42; }
+
 @media (max-width: 900px) {
   .account-access { display: block; }
   .account-access-story { min-height: 520px; }

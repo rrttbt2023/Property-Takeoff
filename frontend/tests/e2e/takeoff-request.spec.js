@@ -3,14 +3,16 @@ import { devices, expect, test } from "@playwright/test";
 async function createQuoteAccount(page, prefix) {
   const email = `${prefix}-${Date.now()}@example.com`;
   await page.goto("/");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Request a measured takeoff" }).click();
+  await expect(page.getByRole("dialog", { name: "Takeoff quote signup" })).toBeVisible();
   await page.getByLabel("Your name").fill("Takeoff Test User");
   await page.getByLabel("Company name").fill("Takeoff Test Company");
   await page.getByLabel("Work email").fill(email);
   await page.getByLabel("Password", { exact: true }).fill("Takeoff-test-password-123");
   await page.locator(".account-access-consent input").check();
-  await page.getByRole("button", { name: "Create free account" }).click();
-  await page.getByRole("button", { name: "Request a Measurement Quote Instead" }).click();
+  await page.getByRole("button", { name: "Create account & request quote" }).click();
+  await expect(page.getByRole("heading", {name:"Request a measurement quote"})).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 }
 
 test("a customer sees the guided boundary-based quote workflow", async ({ page }) => {

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import {
   DEFAULT_PROJECT_FOLDER_NAME,
@@ -355,8 +355,43 @@ function HomeDashboard({
   const recentProject = recentProjects[0] || null;
   const browserProjectCount = recentProjects.filter((entry) => entry?.payload).length;
   const [startIntent] = useState(readStartIntent);
+  const [billingReturn] = useState(() => {
+    const value = new URL(window.location.href).searchParams.get("billing");
+    return ["success", "canceled"].includes(value) ? value : "";
+  });
   const [activeNavigation, setActiveNavigation] = useState(() => startIntent === "quote" ? "takeoffs"
-    : startIntent === "measure" ? (workspaceAccess ? "location-projects" : "billing") : "dashboard");
+    : billingReturn ? "billing" : startIntent === "measure" ? (workspaceAccess ? "location-projects" : "billing") : "dashboard");
+  const launchedCheckout = useRef(false);
+  const checkoutPending = useRef(false);
+  const [checkoutError, setCheckoutError] = useState("");
+  const openCheckout = async () => {
+    if (checkoutPending.current || billingWorking || workspaceAccess || isStaff) return;
+    launchedCheckout.current = true;
+    checkoutPending.current = true;
+    setCheckoutError("");
+    try {
+      const result = await onStartSubscription();
+      if (result?.error) setCheckoutError(result.error);
+    } finally {
+      checkoutPending.current = false;
+    }
+  };
+  const beginIntentCheckout = useEffectEvent(openCheckout);
+  useEffect(() => {
+    if (startIntent !== "measure" || billingReturn || activeNavigation !== "billing" || !sharedAuthenticated ||
+        sharedAuthChecking || !billingStatus || workspaceAccess || isStaff || launchedCheckout.current) return;
+    void beginIntentCheckout();
+  }, [startIntent, billingReturn, activeNavigation, sharedAuthenticated, sharedAuthChecking, billingStatus, workspaceAccess, isStaff]);
+  const refreshAfterCheckout = useEffectEvent(() => onRefreshAccount());
+  useEffect(() => {
+    if (billingReturn !== "success" || workspaceAccess || !sharedAuthenticated || sharedAuthChecking || activeNavigation !== "billing") return;
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      if (++attempts >= 6) window.clearInterval(timer);
+      void refreshAfterCheckout();
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [billingReturn, workspaceAccess, sharedAuthenticated, sharedAuthChecking, activeNavigation]);
   useEffect(() => {
     if (startIntent) setStartIntent("");
     if (startIntent && showMembershipPrompt) onDismissMembershipPrompt?.();
@@ -1097,8 +1132,13 @@ function HomeDashboard({
               <div className="hd-plan-price"><strong>$9.99</strong><span>/ month</span></div>
               <div className="hd-plan-features"><span><Icon name="check" />Location map measuring</span><span><Icon name="check" />PDF and image takeoffs</span><span><Icon name="check" />Project folders and version history</span><span><Icon name="check" />Reports, KML, PDF, and PNG exports</span></div>
               <div className="hd-plan-state"><small>Current status</small><strong>{isStaff ? "Staff access" : String(billingStatus?.subscription_status || "inactive").replaceAll("_", " ")}</strong>{billingStatus?.current_period_end ? <span>Current period ends {formatDate(billingStatus.current_period_end)}</span> : null}</div>
+              {billingReturn === "canceled" && !workspaceAccess && <p role="status">Checkout was canceled. Your account is ready; measuring stays locked until you subscribe.</p>}
+              {billingReturn === "success" && <p role="status">{workspaceAccess ? "Your membership is confirmed. You can start measuring." : "Waiting for subscription confirmation. We will check again shortly, or you can refresh the status."}</p>}
+              {checkoutError && <p role="alert">Checkout could not start: {checkoutError}</p>}
+              {checkoutError && !emailVerified && <button type="button" className="hd-button hd-button-outline" onClick={onResendVerification}>Resend verification email</button>}
               <div className="hd-plan-actions">
-                {!workspaceAccess && !isStaff ? <button type="button" className="hd-button hd-button-primary" onClick={onStartSubscription} disabled={billingWorking}>{billingWorking ? "Opening secure checkout..." : "Start Basic for $9.99/month"}</button> : null}
+                {!workspaceAccess && !isStaff && billingReturn !== "success" ? <button type="button" className="hd-button hd-button-primary" onClick={openCheckout} disabled={billingWorking}>{billingWorking ? "Opening secure checkout..." : "Start Basic for $9.99/month"}</button> : null}
+                {workspaceAccess && billingReturn === "success" && <button type="button" className="hd-button hd-button-primary" onClick={startLocationProject}>Start measuring</button>}
                 {billingStatus?.customer_portal_available ? <button type="button" className="hd-button hd-button-outline" onClick={onOpenBillingPortal} disabled={billingWorking}>Manage Billing</button> : null}
                 <button type="button" className="hd-button hd-button-outline" onClick={onRefreshAccount} disabled={takeoffRequestsLoading}>Refresh Status</button>
               </div>
