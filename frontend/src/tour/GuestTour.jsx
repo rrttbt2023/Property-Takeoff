@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import PublicDialog from "../components/PublicDialog";
 import App from "../App";
+import TourCoach from "./TourCoach";
 import "./guest-tour.css";
 
 const stops = [
   ["Project dashboard", "Open Evergreen Office with Continue measuring, or browse its project folder."],
-  ["Location measuring", "Select a colored polygon to inspect it. Try another surface layer or draw on this sample site."],
+  ["Location measuring", "Try drawing a polygon to measure part of the sample property."],
   ["PDF / Image measuring", "Use the drawing tools on the sample sheet. Use the 60 ft reference if you want to try calibration."],
   ["Proposal Builder", "Choose Evergreen Office to load its measured quantities. Change a unit price to see the proposal total update."],
   ["Managed takeoffs", "Choose the surfaces you need, then draw a boundary on the sample site. Nothing is submitted."],
@@ -15,6 +16,7 @@ const stops = [
 export default function GuestTour() {
   const [step, go] = useState(0);
   const [toolsOpen,setToolsOpen] = useState(false);
+  const [tips,setTips] = useState(true);
   const title = useRef(null);
   useEffect(() => { title.current?.focus({preventScroll:true}); }, [step]);
   const navigate = index => { setToolsOpen(false); go(index); };
@@ -25,13 +27,15 @@ export default function GuestTour() {
         <h2 ref={title} tabIndex={-1}>{stops[step][0]}</h2>
         <p>{stops[step][1]} <span>Sample data only.</span></p></div>
       <nav aria-label="Tour controls">
-        {(step===1 || step===2) && <button className="guest-tool-toggle" aria-expanded={toolsOpen} onClick={()=>setToolsOpen(!toolsOpen)}>{toolsOpen ? "Show canvas" : "Show tools"}</button>}
+        {(step===1 || step===2) && <button className="guest-tool-toggle" data-tour-target={toolsOpen ? undefined : "tools"} aria-expanded={toolsOpen} onClick={()=>setToolsOpen(!toolsOpen)}>{toolsOpen ? "Show canvas" : "Show tools"}</button>}
+        {step<5 && <button aria-pressed={tips} onClick={()=>setTips(!tips)}>{tips ? "Hide tips" : "Show tips"}</button>}
         {step>0 && <button onClick={()=>navigate(step-1)}>Back</button>}
         {step<stops.length-1 && <button className="guest-next" onClick={()=>navigate(step+1)}>Next step</button>}
         <button onClick={()=>leave("")}>Exit tour</button>
       </nav>
     </header>
-    <div className="guest-workspace"><App tourStep={step} onTourStep={navigate} /></div>
+    <div className="guest-workspace"><App tourStep={step} onTourStep={navigate} onTourCanvas={()=>setToolsOpen(false)} /></div>
+    {tips && step<5 && <TourCoach step={step} toolsOpen={toolsOpen} />}
     {step===stops.length-1 && <PublicDialog title="Your next step" label="Finish workspace tour" onClose={()=>navigate(step-1)}>
       <div className="guest-finish"><h2>Who will measure your site?</h2><p>Tour edits are temporary. Choose how you want to work on a real property.</p>
         <div className="tour-choices"><button onClick={()=>leave("quote")}><strong>Request a measured takeoff</strong><span>Create a free account and submit your site for a quote.</span></button>

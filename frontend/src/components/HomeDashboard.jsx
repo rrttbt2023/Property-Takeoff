@@ -843,7 +843,7 @@ function HomeDashboard({
               <span className="desk-eyebrow">{hasResume ? resumeCard ? "Last opened property" : "Recently edited property" : "Getting started"}</span>
               <h2>{hasResume ? resumeCard?.title || previewProject.projectName : "Start a property takeoff."}</h2>
               {hasResume ? <p>{previewPdf ? "PDF / Image" : "Location"}{previewPdf && resumeCard?.pageLabel ? ` / ${resumeCard.pageLabel}` : ""} &middot; {formatDate(resumeCard?.lastEditedAt || entryEditedAt(previewProject), { fallback: "No saved edit yet" })}</p> : <p>Measure a site from the map or work directly on a plan.</p>}
-              {hasResume ? <button type="button" className="hd-button hd-button-primary" onClick={resumeCard ? onResume : () => onOpenProject(previewProject.id)}>Continue measuring <span aria-hidden="true">&rarr;</span></button> : null}
+              {hasResume ? <button type="button" data-tour-target={tourPage ? "open-site" : undefined} className="hd-button hd-button-primary" onClick={resumeCard ? onResume : () => onOpenProject(previewProject.id)}>Continue measuring <span aria-hidden="true">&rarr;</span></button> : null}
               <div className="desk-new">
                 <button type="button" className="hd-button hd-button-outline" onClick={startLocationProject}><Icon name="map" />Measure on Map</button>
                 <button type="button" className="hd-button hd-button-outline" onClick={startPdfProject}><Icon name="file" />Measure from PDF/Image</button>
@@ -1055,7 +1055,7 @@ function HomeDashboard({
                   <legend className="sr-only">Areas to measure</legend>
                   <div>{TAKEOFF_SERVICE_OPTIONS.map((service) => {
                     const selected = takeoffForm.serviceTypes.includes(service.value);
-                    return <label key={service.value} className={selected ? "selected" : ""}>
+                    return <label data-tour-target={tourPage && !takeoffServicesReady && service === TAKEOFF_SERVICE_OPTIONS[0] ? "surfaces" : undefined} key={service.value} className={selected ? "selected" : ""}>
                       <input type="checkbox" checked={selected} onChange={() => toggleTakeoffService(service.value)} />
                       <span className="hd-takeoff-service-check"><Icon name="check" size={15} /></span>
                       <span><strong>{service.label}</strong><small>{service.detail}</small></span>
@@ -1078,6 +1078,7 @@ function HomeDashboard({
                 <header><span>3</span><div><h4>Draw the measurement boundary</h4><p>Outline the full property or only the section you want measured. This boundary determines the quote area.</p></div></header>
                 <TakeoffBoundaryMap
                   sampleSite={!!tourPage}
+                  tourServicesReady={!!tourPage && takeoffServicesReady}
                   address={takeoffForm.address}
                   addressSearchNonce={addressSearchNonce}
                   mapboxToken={mapboxToken}

@@ -845,6 +845,13 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
       cursorPoint = null;
     }
     onDraftChange({ coords, cursorLngLat, cursorPoint });
+    // Mapbox Draw also stores a moving cursor coordinate. Only this index
+    // counts committed corners, including points placed with the iPad crosshair.
+    if (options.onCornerCount && sessionRef?.current?.state === state &&
+        state.currentVertexPosition !== state.__reportedCorners) {
+      state.__reportedCorners = state.currentVertexPosition;
+      options.onCornerCount(state.currentVertexPosition);
+    }
   };
   const getPointerType = (e) => {
     const original = e?.originalEvent;
@@ -858,6 +865,10 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
     !!stylusOnlyRef?.current && !isStylusLikeEvent(e);
   const addPointAt = (ctx, state, lngLat, point = null) => {
     if (!ctx || !state || !lngLat) return false;
+    // The drawing library treats clicking the previous vertex as "finish".
+    // The crosshair has its own Finish button; a stationary tap is not a corner.
+    const last = state.polygon?.coordinates?.[0]?.[state.currentVertexPosition - 1];
+    if (last && Math.abs(last[0] - lngLat.lng) < 1e-10 && Math.abs(last[1] - lngLat.lat) < 1e-10) return false;
     const event = {
       lngLat,
       point:
@@ -911,7 +922,7 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
     const compactTouchPointMode = !!compactTouchUiRef?.current;
     if (shouldIgnoreForStylusOnly(e)) {
       if (allowFingerPanInStylusOnly) {
-        mode.onDrag(state, e);
+        mode.onDrag.call(this, state, e);
       } else {
         e?.originalEvent?.preventDefault?.();
         e?.originalEvent?.stopPropagation?.();
@@ -919,7 +930,7 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
       return;
     }
     if (compactTouchPointMode && !isStylusLikeEvent(e)) {
-      mode.onDrag(state, e);
+      mode.onDrag.call(this, state, e);
       return;
     }
     if (typeof baseMode.onMouseMove === "function") {
@@ -1007,6 +1018,7 @@ function createTouchPanDrawPolygonMode(baseMode, options = {}) {
     resetPanState(state);
     if (sessionRef?.current?.state === state) {
       sessionRef.current = null;
+      options.onCornerCount?.(null);
     }
     onDraftChange?.({ coords: [], cursorLngLat: null, cursorPoint: null });
     if (typeof baseMode.onStop === "function") {
@@ -4345,11 +4357,24 @@ function getTrue3DQualityProfile(preset, compactTouchUi) {
   };
 }
 
-export default function App({ tourStep, onTourStep } = {}) {
+export default function App({ tourStep, onTourStep, onTourCanvas } = {}) {
   const mapRef = useRef(null);
   const drawRef = useRef(null);
   const mapDivRef = useRef(null);
   const [tourMapUnavailable, setTourMapUnavailable] = useState(false);
+  const [tourCorners,setTourCorners] = useState(null);
+  const [tourPolygonId,setTourPolygonId] = useState("");
+  const reportTourCorners = useEffectEvent(count => {
+    if (tourStep !== 1) return;
+    setTourCorners(count);
+    if (count === 0) {
+      setDrawMode("draw_polygon");
+      setTourPolygonId("");
+      onTourCanvas?.();
+    } else if (count === null) {
+      setDrawMode("simple_select");
+    }
+  });
 
   // Keys (.env)
   const maptilerKey = import.meta.env.VITE_MAPTILER_KEY;
@@ -12104,7 +12129,7 @@ export default function App({ tourStep, onTourStep } = {}) {
         : null
     );
     if (!added) {
-      pushToast("Could not add a point there. Try again.", "warn", 2400);
+      pushToast("Pan the crosshair to a different corner, then tap Add Point.", "warn", 2400);
       return;
     }
     refreshDraftDimensionsOverlayRaf();
@@ -13289,6 +13314,8 @@ export default function App({ tourStep, onTourStep } = {}) {
     const previous = previousTourStep.current;
     if (previous !== tourStep && (previous === 1 || previous === 2)) keepTourDraft(previous);
     previousTourStep.current = tourStep;
+    setTourCorners(null);
+    setTourPolygonId("");
     if (tourStep === 1) showTourProject(tourDrafts.current[1] || sitePayload);
     else if (tourStep === 2) {
       Promise.resolve(tourDrafts.current[2] || samplePlan()).then(payload => { if (active) showTourProject(payload); })
@@ -17019,6 +17046,8 @@ export default function App({ tourStep, onTourStep } = {}) {
     boundary,
     overlapScanNonce: qcOverlapScanNonce,
   });
+  const tourPolygon = isGuestTour && tourStep === 1 && tourPolygonId && tourCorners === null
+    ? polygonRows.find(row => String(row.id) === tourPolygonId) : null;
 
   const estimateTemplateTokens = useMemo(
     () => buildEstimateTemplateTokens(projectName, totals),
@@ -17426,6 +17455,7 @@ export default function App({ tourStep, onTourStep } = {}) {
         allowFingerPanInStylusOnly: true,
         compactTouchUiRef: isCompactTouchUiRef,
         sessionRef: touchPolygonModeSessionRef,
+        onCornerCount: isGuestTour ? count => reportTourCorners(count) : null,
         onDraftChange: (payload) => {
           const coords = Array.isArray(payload?.coords) ? payload.coords : [];
           draftDimensionCoordsRef.current = coords;
@@ -17666,6 +17696,10 @@ export default function App({ tourStep, onTourStep } = {}) {
       }
       if (eventType === "draw.update" && liveDrawMode === "direct_select") {
         return;
+      }
+      if (isGuestTour && currentWorkflow === WORKFLOW_MODE_LOCATION && isDrawCreateEvent) {
+        const created = event.features?.find(isPolygonLike);
+        if (created?.id != null) setTourPolygonId(String(created.id));
       }
       syncFromDraw(draw);
       queueSharedPolygonAutosave();
@@ -22866,6 +22900,8 @@ export default function App({ tourStep, onTourStep } = {}) {
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 8 }}>
             <button
+              data-tour-target={isGuestTour && workspaceMap ? "draw" : undefined}
+              disabled={isGuestTour && !workspaceMap}
               onClick={switchToDrawMode}
               style={{
                 padding: "8px 10px",
@@ -23559,8 +23595,12 @@ export default function App({ tourStep, onTourStep } = {}) {
                 return (
                   <button
                     key={`pdf-annot-tool-${tool.key}`}
+                    data-tour-target={isGuestTour && tool.key === "pen" ? "pen" : undefined}
                     type="button"
-                    onClick={() => activatePdfAnnotationTool(tool.key)}
+                    onClick={() => {
+                      activatePdfAnnotationTool(tool.key);
+                      if (isGuestTour) onTourCanvas?.();
+                    }}
                     style={{
                       minHeight: 68,
                       padding: "8px 6px",
@@ -25513,6 +25553,8 @@ export default function App({ tourStep, onTourStep } = {}) {
       <div style={{ flex: 1, position: "relative", minWidth: 0 }}>
         <div
           className="map"
+          data-tour-target={isGuestTour && tourCorners !== null && !isCompactTouchUi ? "trace" : undefined}
+          data-tour-count={isGuestTour ? tourCorners : undefined}
           ref={mapDivRef}
           style={{
             position: "absolute",
@@ -25527,9 +25569,14 @@ export default function App({ tourStep, onTourStep } = {}) {
           }}
         />
         {isGuestTour && tourMapUnavailable && workflowMode === WORKFLOW_MODE_LOCATION &&
-          <div className="guest-no-webgl"><img src={samplePhoto} alt="Evergreen Office example aerial" /><p>Your browser cannot display the interactive map. You can still try the PDF tools in the next step.</p></div>}
+          <div className="guest-no-webgl" data-tour-target="no-map"><img src={samplePhoto} alt="Evergreen Office example aerial" /><p>Your browser cannot display the interactive map. You can still try the PDF tools in the next step.</p></div>}
 
-        {workflowMode !== WORKFLOW_MODE_PDF &&
+        {tourPolygon && <output className="guest-polygon-result" data-tour-target={tourPolygon.sqft > 0 ? "result" : undefined} aria-label="Your polygon measurement">
+          <strong>{tourPolygon.name}</strong>{tourPolygon.sqft > 0
+            ? <span>{tourPolygon.sqft.toLocaleString()} sq ft &middot; {tourPolygon.acres.toLocaleString(undefined,{maximumFractionDigits:4})} ac</span>
+            : <span>No measurable area. Try three corners that enclose some pavement.</span>}
+        </output>}
+        {!tourPolygon && workflowMode !== WORKFLOW_MODE_PDF &&
           !showTrue3DViewer &&
           draftMeasurementSummary.visible && (
             <div
@@ -25565,11 +25612,10 @@ export default function App({ tourStep, onTourStep } = {}) {
           )}
 
         {workflowMode === WORKFLOW_MODE_LOCATION &&
-          isCompactTouchUi &&
-          drawMode === "draw_polygon" &&
+          (isGuestTour ? tourCorners !== null : isCompactTouchUi && drawMode === "draw_polygon") &&
           !showTrue3DViewer && (
             <>
-              <div
+              {isCompactTouchUi && <div
                 style={{
                   position: "absolute",
                   left: "50%",
@@ -25613,7 +25659,7 @@ export default function App({ tourStep, onTourStep } = {}) {
                     boxShadow: "0 0 0 1px rgba(0,0,0,0.26)",
                   }}
                 />
-              </div>
+              </div>}
 
               <div
                 style={{
@@ -25627,8 +25673,10 @@ export default function App({ tourStep, onTourStep } = {}) {
                   pointerEvents: "auto",
                 }}
               >
-                <button
+                {isCompactTouchUi && <button
                   type="button"
+                  data-tour-target={isGuestTour ? "add-point" : undefined}
+                  data-tour-count={isGuestTour ? tourCorners : undefined}
                   onClick={addPolygonPointAtMapCenter}
                   style={{
                     padding: "12px 14px",
@@ -25643,9 +25691,11 @@ export default function App({ tourStep, onTourStep } = {}) {
                   }}
                 >
                   Add Point
-                </button>
+                </button>}
                 <button
                   type="button"
+                  data-tour-target={isGuestTour && tourCorners >= 3 ? "finish" : undefined}
+                  disabled={isGuestTour && tourCorners < 3}
                   onClick={finishPolygonFromTouchUi}
                   style={{
                     padding: "10px 14px",
@@ -26914,6 +26964,7 @@ export default function App({ tourStep, onTourStep } = {}) {
                   ref={pdfWorkspaceImageRef}
                   src={planOverlay.url}
                   alt={pdfSourceName || measurementImageFile.name || "Uploaded plan"}
+                  data-tour-target={isGuestTour && pdfAnnotationTool === "pen" ? "sheet" : undefined}
                   draggable={false}
                   onLoad={syncPdfRenderMetrics}
                   style={{
@@ -28704,6 +28755,8 @@ export default function App({ tourStep, onTourStep } = {}) {
               }}
             >
               <button
+                data-tour-target={isGuestTour && workspaceMap && workflowMode === WORKFLOW_MODE_LOCATION ? "draw" : undefined}
+                disabled={isGuestTour && !workspaceMap}
                 onClick={switchToDrawMode}
                 style={{
                   padding: "10px 6px",

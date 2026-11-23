@@ -70,6 +70,7 @@ function drawStyles() {
 
 function TakeoffBoundaryMap({
   sampleSite = false,
+  tourServicesReady = false,
   address,
   googleMapsKey,
   mapboxToken,
@@ -616,19 +617,19 @@ function TakeoffBoundaryMap({
           <button type="button" onClick={() => void findAddress()} disabled={locating || sampleSite}>
             {locating ? "Finding..." : "Find address"}
           </button>
-          <button type="button" className="primary" onClick={startDrawing} disabled={locating}>Draw boundary</button>
+          <button type="button" className="primary" data-tour-target={tourServicesReady ? "boundary-start" : undefined} onClick={startDrawing} disabled={locating}>Draw boundary</button>
           {isDrafting ? (
             <>
               <button type="button" onClick={undoDraftPoint} disabled={!draftPointCount}>Undo point</button>
-              <button type="button" className="primary" onClick={finishBoundary} disabled={draftPointCount < 3}>Finish boundary</button>
+              <button type="button" className="primary" data-tour-target={sampleSite && draftPointCount >= 3 ? "boundary-finish" : undefined} onClick={finishBoundary} disabled={draftPointCount < 3}>Finish boundary</button>
             </>
           ) : null}
           <button type="button" onClick={clearBoundary} disabled={!value}>Clear</button>
         </div>
       </div>
       <div className="takeoff-boundary-map-shell" data-boundary-visible={boundarySquareFeet > 0 ? "true" : "false"}>
-        <div ref={containerRef} className="takeoff-boundary-map" />
-        <output className={`takeoff-boundary-area${boundarySquareFeet ? " ready" : ""}`}>
+        <div ref={containerRef} className="takeoff-boundary-map" data-tour-target={sampleSite && isDrafting ? "boundary-map" : undefined} />
+        <output data-tour-target={sampleSite && boundarySquareFeet > 0 ? "boundary-done" : undefined} className={`takeoff-boundary-area${boundarySquareFeet ? " ready" : ""}`}>
           <small>Quote boundary</small>
           <strong>{formatArea(boundarySquareFeet)}</strong>
         </output>
