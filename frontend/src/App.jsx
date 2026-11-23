@@ -1,5 +1,5 @@
 // src/App.jsx
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
 import * as turf from "@turf/turf";
@@ -52,17 +52,16 @@ import {
   updateTakeoffRequest,
 } from "./api";
 import AccountAccess from "./components/AccountAccess";
-import CvWorkflowPanel from "./components/CvWorkflowPanel";
-import HomeDashboard from "./components/HomeDashboard";
-import SystemStatusPanel from "./components/SystemStatusPanel";
 import WorkflowSummaryCard from "./components/WorkflowSummaryCard";
 import useGeometryAnalysis from "./hooks/useGeometryAnalysis";
 import {
   clearProjectRecovery,
   getLatestProjectRecovery,
+  getProjectRecoverySnapshot,
   getRecoveryStorageStatus,
   hasProjectRecovery,
   listProjectRecoveries,
+  listProjectRecoveryHistory,
   queueProjectRecoverySnapshot,
 } from "./persistence/projectRecovery";
 import {
@@ -114,6 +113,10 @@ import {
   upsertProjectLibraryEntries,
   upsertSharedQueueOperation,
 } from "./projects/projectLibrary";
+
+const CvWorkflowPanel = lazy(() => import("./components/CvWorkflowPanel"));
+const HomeDashboard = lazy(() => import("./components/HomeDashboard"));
+const SystemStatusPanel = lazy(() => import("./components/SystemStatusPanel"));
 
 // ---------- Layer config (single source of truth) ----------
 const LAYER_KEYS = ["plowable", "sidewalks", "turf", "mulch"];
@@ -4429,9 +4432,12 @@ export default function App() {
   const [projectFolders, setProjectFolders] = useState(() => readStoredProjectFolders());
   const [homeProjectSearch, setHomeProjectSearch] = useState("");
   const [polygonSearchQuery, setPolygonSearchQuery] = useState("");
+  const deferredPolygonSearchQuery = useDeferredValue(polygonSearchQuery);
+  const [polygonListLimit, setPolygonListLimit] = useState(100);
   const [clientReportNotes, setClientReportNotes] = useState("");
   const [offlineCacheStatus, setOfflineCacheStatus] = useState("checking");
   const [homeProjectRecoveries, setHomeProjectRecoveries] = useState([]);
+  const [homeRecoveryHistory, setHomeRecoveryHistory] = useState([]);
   const [homeRecoveryRefreshing, setHomeRecoveryRefreshing] = useState(false);
   const [homeProjectTab, setHomeProjectTab] = useState(WORKFLOW_MODE_LOCATION);
   const [homeFolderFilter, setHomeFolderFilter] = useState("all");
@@ -4515,6 +4521,10 @@ export default function App() {
 
   const [boundary, setBoundary] = useState(null);
   const [activeLayer, setActiveLayer] = useState("plowable");
+
+  useEffect(() => {
+    setPolygonListLimit(100);
+  }, [activeLayer]);
   const [layerFeatures, setLayerFeatures] = useState({
     plowable: [],
     sidewalks: [],
@@ -13359,6 +13369,7 @@ export default function App() {
       });
       setAutosaveDraftAvailable(false);
       setHomeProjectRecoveries([]);
+      setHomeRecoveryHistory([]);
       pushToast("Autosave draft cleared.", "info");
     } catch {
       pushToast("Could not clear autosave draft.", "error");
@@ -13369,13 +13380,21 @@ export default function App() {
     setHomeRecoveryRefreshing(true);
     let storageError = null;
     let records = [];
+    let historyRecords = [];
     try {
       const storageStatus = await getRecoveryStorageStatus();
       setOfflineCacheStatus(storageStatus.state);
-      records = await listProjectRecoveries(100, {
-        organizationId: sharedAuth?.organizationId,
-        includeLegacy: Boolean(sharedAuth?.isStaff),
-      });
+      [records, historyRecords] = await Promise.all([
+        listProjectRecoveries(100, {
+          organizationId: sharedAuth?.organizationId,
+          includeLegacy: Boolean(sharedAuth?.isStaff),
+        }),
+        listProjectRecoveryHistory(120, {
+          organizationId: sharedAuth?.organizationId,
+          includeLegacy: Boolean(sharedAuth?.isStaff),
+        }),
+      ]);
+      setHomeRecoveryHistory(historyRecords);
     } catch (error) {
       storageError = error;
       setOfflineCacheStatus("unavailable");
@@ -13449,10 +13468,13 @@ export default function App() {
       return;
     }
     try {
-      const recovery = await getLatestProjectRecovery(projectId, {
+      const options = {
         organizationId: sharedAuth?.organizationId,
         includeLegacy: Boolean(sharedAuth?.isStaff),
-      });
+      };
+      const recovery = record?.recoveryId
+        ? await getProjectRecoverySnapshot(record.recoveryId, options)
+        : await getLatestProjectRecovery(projectId, options);
       if (!isValidProjectPayload(recovery?.payload)) {
         throw new Error("Recovery payload is invalid");
       }
@@ -13473,6 +13495,24 @@ export default function App() {
     sharedAuth?.isStaff,
     sharedAuth?.organizationId,
   ]);
+
+  const downloadHomeRecovery = useCallback(async (record) => {
+    try {
+      const options = {
+        organizationId: sharedAuth?.organizationId,
+        includeLegacy: Boolean(sharedAuth?.isStaff),
+      };
+      const recovery = record?.recoveryId
+        ? await getProjectRecoverySnapshot(record.recoveryId, options)
+        : await getLatestProjectRecovery(record?.projectId, options);
+      if (!isValidProjectPayload(recovery?.payload)) throw new Error("Recovery payload unavailable");
+      const safeName = String(recovery.projectName || "recovered-project").replace(/[^a-z0-9_-]+/gi, "-");
+      downloadJson(`${safeName || "recovered-project"}-recovery.json`, recovery.payload);
+      pushToast("Recovery JSON downloaded.", "info", 3200);
+    } catch {
+      pushToast("That recovery snapshot could not be downloaded.", "error", 4800);
+    }
+  }, [pushToast, sharedAuth?.isStaff, sharedAuth?.organizationId]);
 
   useEffect(() => {
     if (appScreen !== APP_SCREEN_HOME) return undefined;
@@ -14684,7 +14724,7 @@ export default function App() {
   );
 
   const polygonSearchResults = useMemo(() => {
-    const query = String(polygonSearchQuery || "").trim().toLowerCase();
+    const query = String(deferredPolygonSearchQuery || "").trim().toLowerCase();
     if (!query) return [];
     const results = [];
     for (const layerKey of LAYER_KEYS) {
@@ -14714,7 +14754,7 @@ export default function App() {
       return String(left.name).localeCompare(String(right.name));
     });
     return results.slice(0, 80);
-  }, [layerFeatures, polygonSearchQuery]);
+  }, [deferredPolygonSearchQuery, layerFeatures]);
 
   const activeOperations = useMemo(() => {
     const ops = [];
@@ -16885,12 +16925,13 @@ export default function App() {
     return features;
   }, [layerFeatures]);
 
+  const deferredLayerFeatures = useDeferredValue(layerFeatures);
   const {
     totals,
     polygonRows,
     qcSummary,
   } = useGeometryAnalysis({
-    layerFeatures,
+    layerFeatures: deferredLayerFeatures,
     boundary,
     overlapScanNonce: qcOverlapScanNonce,
   });
@@ -20749,6 +20790,7 @@ export default function App() {
     return (
       <>
         <Toasts toasts={toasts} onClose={closeToast} />
+        <Suspense fallback={<div className="app-lazy-loading">Loading project dashboard...</div>}>
         <HomeDashboard
           theme={homeAppearance}
           onToggleTheme={() =>
@@ -20832,14 +20874,17 @@ export default function App() {
           folderUploadState={sharedFolderUploadState}
           onUploadAllFolders={uploadAllLocalFolders}
           recoveryRecords={homeProjectRecoveries}
+          recoveryHistoryRecords={homeRecoveryHistory}
           recoveryStorageState={offlineCacheStatus}
           recoveryRefreshing={homeRecoveryRefreshing}
           onRefreshRecoveries={() => refreshHomeProjectRecoveries({ quiet: false })}
           onRestoreRecovery={restoreHomeProjectRecovery}
+          onDownloadRecovery={downloadHomeRecovery}
           auditEvents={securityAuditEvents}
           auditSyncing={securityAuditSyncing}
           onRefreshAudit={() => refreshSecurityAuditEvents({ quiet: false })}
         />
+        </Suspense>
       </>
     );
   }
@@ -22375,6 +22420,7 @@ export default function App() {
           saveStatusLabel={saveStatusLabel}
         />
 
+        <Suspense fallback={<div style={{ fontSize: 12, opacity: 0.72, padding: 10 }}>Loading system status...</div>}>
         <SystemStatusPanel
           backendHealth={backendHealth}
           hasMaptiler={!!maptilerKey}
@@ -22386,6 +22432,7 @@ export default function App() {
           sharedProjectLibraryStatus={sharedProjectLibraryStatus}
           apiBaseUrl={configuredApiBaseUrl}
         />
+        </Suspense>
 
         {/* Boundary upload */}
         {workflowMode === WORKFLOW_MODE_LOCATION ? (
@@ -24454,6 +24501,7 @@ export default function App() {
           ) : null}
 
           {workflowMode !== WORKFLOW_MODE_PDF && (
+          <Suspense fallback={<div style={{ fontSize: 12, opacity: 0.72, padding: 10 }}>Loading CV tools...</div>}>
           <CvWorkflowPanel
             workflowMode={workflowMode}
             workflowModePdf={WORKFLOW_MODE_PDF}
@@ -24487,6 +24535,7 @@ export default function App() {
             layerMeta={LAYER_META}
             layerFeatures={layerFeatures}
           />
+          </Suspense>
           )}
           </div>
         )}
@@ -25147,7 +25196,8 @@ export default function App() {
               Draw polygons to see them listed here.
             </div>
           ) : (
-            (layerFeatures[activeLayer] || []).map((f) => {
+            <>
+            {(layerFeatures[activeLayer] || []).slice(0, polygonListLimit).map((f) => {
               const sqft = featureSqft(f);
               const outside = !!f.properties?.outside;
 
@@ -25230,7 +25280,27 @@ export default function App() {
                   </button>
                 </div>
               );
-            })
+            })}
+            {(layerFeatures[activeLayer] || []).length > polygonListLimit ? (
+              <button
+                type="button"
+                onClick={() => setPolygonListLimit((limit) => limit + 100)}
+                style={{
+                  width: "100%",
+                  marginTop: 9,
+                  padding: 9,
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 800,
+                }}
+              >
+                Show next {Math.min(100, (layerFeatures[activeLayer] || []).length - polygonListLimit)} polygons
+              </button>
+            ) : null}
+            </>
           )}
         </div>
         )}

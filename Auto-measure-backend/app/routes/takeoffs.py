@@ -11,10 +11,13 @@ from app.repositories.takeoff_repository import (
     add_file,
     create_request,
     get_file,
+    get_pricing_config,
     get_request,
+    list_pricing_versions,
     list_requests,
     record_takeoff_checkout,
     update_request,
+    update_pricing_config,
 )
 from app.repositories.project_repository import get_record as get_project_record
 from app.repositories.project_repository import save_record as save_project_record
@@ -24,6 +27,8 @@ from app.schemas import (
     TakeoffFileRecord,
     TakeoffQuoteEstimateRequest,
     TakeoffQuoteEstimateResponse,
+    TakeoffPricingConfig,
+    TakeoffPricingConfigUpdate,
     TakeoffRequestCreate,
     TakeoffRequestRecord,
     TakeoffRequestUpdate,
@@ -106,6 +111,35 @@ def estimate_takeoff_request(
             estimated_square_feet=estimated_square_feet,
             service_types=payload.service_types,
             measurement_scope=payload.measurement_scope,
+            pricing_config=get_pricing_config(),
+        )
+    )
+
+
+@router.get("/pricing", response_model=TakeoffPricingConfig)
+def read_takeoff_pricing(
+    _: dict = Depends(require_staff_access),
+) -> TakeoffPricingConfig:
+    return TakeoffPricingConfig(**get_pricing_config())
+
+
+@router.get("/pricing/versions", response_model=list[TakeoffPricingConfig])
+def read_takeoff_pricing_versions(
+    limit: int = Query(25, ge=1, le=100),
+    _: dict = Depends(require_staff_access),
+) -> list[TakeoffPricingConfig]:
+    return [TakeoffPricingConfig(**item) for item in list_pricing_versions(limit)]
+
+
+@router.patch("/pricing", response_model=TakeoffPricingConfig)
+def save_takeoff_pricing(
+    payload: TakeoffPricingConfigUpdate,
+    session: dict = Depends(require_staff_access),
+) -> TakeoffPricingConfig:
+    return TakeoffPricingConfig(
+        **update_pricing_config(
+            payload.model_dump(),
+            str(session.get("user_id") or session.get("username") or "staff"),
         )
     )
 
@@ -127,6 +161,7 @@ def create_takeoff_request(
         estimated_square_feet=estimated_square_feet,
         service_types=service_types,
         measurement_scope=payload.measurement_scope,
+        pricing_config=get_pricing_config(),
     )
     item = create_request(
         organization_id=str(session.get("organization_id") or ""),
@@ -317,6 +352,8 @@ def update_takeoff_request(
         quote_notes=payload.quote_notes,
         delivery_notes=payload.delivery_notes,
         delivered_project_id=delivered_project_id,
+        assigned_to=payload.assigned_to,
+        priority=payload.priority,
     )
     if not item:
         raise HTTPException(status_code=404, detail="Takeoff request not found.")

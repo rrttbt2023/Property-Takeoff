@@ -539,6 +539,40 @@ def test_managed_takeoff_quote_and_acceptance_workflow(monkeypatch) -> None:
         )
         assert staff.status_code == 200
         staff_headers = {"Authorization": f"Bearer {staff.json()['token']}"}
+        assert client.get(
+            "/api/takeoff-requests/pricing", headers=customer_headers
+        ).status_code == 403
+        pricing = client.get("/api/takeoff-requests/pricing", headers=staff_headers)
+        assert pricing.status_code == 200
+        pricing_body = pricing.json()
+        assert pricing_body["property_rates_cents"]["school_campus"] > 0
+        pricing_body["property_rates_cents"]["school_campus"] = 95
+        saved_pricing = client.patch(
+            "/api/takeoff-requests/pricing",
+            headers=staff_headers,
+            json={
+                "property_rates_cents": pricing_body["property_rates_cents"],
+                "base_review_cents": pricing_body["base_review_cents"],
+                "additional_service_percent": pricing_body["additional_service_percent"],
+                "partial_area_percent": pricing_body["partial_area_percent"],
+            },
+        )
+        assert saved_pricing.status_code == 200
+        assert saved_pricing.json()["property_rates_cents"]["school_campus"] == 95
+        assert saved_pricing.json()["version"] > pricing_body["version"]
+        pricing_versions = client.get(
+            "/api/takeoff-requests/pricing/versions", headers=staff_headers
+        )
+        assert pricing_versions.status_code == 200
+        assert pricing_versions.json()
+        assigned = client.patch(
+            f"/api/takeoff-requests/{request_id}",
+            headers=staff_headers,
+            json={"assigned_to": "Lucas", "priority": "urgent"},
+        )
+        assert assigned.status_code == 200
+        assert assigned.json()["assigned_to"] == "Lucas"
+        assert assigned.json()["priority"] == "urgent"
         invalid_accept = client.patch(
             f"/api/takeoff-requests/{request_id}",
             headers=staff_headers,

@@ -471,6 +471,24 @@ export function listTakeoffRequests(limit = 100) {
   return sharedRequest(`/api/takeoff-requests?limit=${encodeURIComponent(limit)}`);
 }
 
+export function getTakeoffPricing() {
+  return sharedRequest("/api/takeoff-requests/pricing");
+}
+
+export function listTakeoffPricingVersions(limit = 25) {
+  return sharedRequest(
+    `/api/takeoff-requests/pricing/versions?limit=${encodeURIComponent(limit)}`
+  );
+}
+
+export function saveTakeoffPricing(config) {
+  return sharedRequest("/api/takeoff-requests/pricing", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config || {}),
+  });
+}
+
 export function estimateTakeoffRequest({ propertyType, measurementScope, serviceTypes, boundary }) {
   return sharedRequest("/api/takeoff-requests/estimate", {
     method: "POST",

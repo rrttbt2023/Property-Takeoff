@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   DEFAULT_PROJECT_FOLDER_NAME,
@@ -7,6 +7,10 @@ import {
 } from "../projects/projectLibrary";
 import TakeoffBoundaryMap from "./TakeoffBoundaryMap";
 import "./home-dashboard.css";
+
+const PricingAdminPanel = lazy(() => import("./PricingAdminPanel"));
+const ProposalBuilder = lazy(() => import("./ProposalBuilder"));
+const TakeoffOperationsBoard = lazy(() => import("./TakeoffOperationsBoard"));
 
 const PREVIEW_LAYER_COLORS = {
   plowable: "#2586e8",
@@ -399,10 +403,12 @@ function HomeDashboard({
   folderUploadState,
   onUploadAllFolders,
   recoveryRecords,
+  recoveryHistoryRecords,
   recoveryStorageState,
   recoveryRefreshing,
   onRefreshRecoveries,
   onRestoreRecovery,
+  onDownloadRecovery,
   auditEvents,
   auditSyncing,
   onRefreshAudit,
@@ -531,6 +537,7 @@ function HomeDashboard({
     "pinned-sites": { title: "Pinned Sites", description: "Quick access to your priority properties" },
     folders: { title: "Folders", description: "Organize projects by team, route, or service area" },
     activity: { title: "Project Activity", description: "Recent saves, edits, and shared updates" },
+    proposals: { title: "Proposal Builder", description: "Turn measured quantities into client-ready pricing" },
     recovery: { title: "Recovery Center", description: "Autosave snapshots and shared-sync health" },
     takeoffs: { title: "Managed Takeoffs", description: "Request, quote, and track 24-hour measurements" },
     billing: { title: "Plan & Billing", description: "Manage measuring access and subscription billing" },
@@ -630,6 +637,16 @@ function HomeDashboard({
       quote_notes: note,
     });
   };
+  const deliverTakeoffRequest = (request) => {
+    const projectId = window.prompt("Shared project ID to deliver", request.delivered_project_id || "");
+    if (!projectId) return;
+    const notes = window.prompt("Delivery notes", request.delivery_notes || "Measurements complete.") ?? "";
+    void onUpdateTakeoffRequest(request.id, {
+      status: "delivered",
+      delivered_project_id: projectId,
+      delivery_notes: notes,
+    });
+  };
   const showAllProjects = () => {
     onFolderFilterChange("all");
     onProjectSearchChange("");
@@ -694,7 +711,7 @@ function HomeDashboard({
   };
   const previewProjectHealth = previewProject ? getProjectHealth(previewProject) : null;
   const restoreRecovery = async (record) => {
-    const restoreId = `${record?.projectId || "recovery"}:${record?.savedAt || "latest"}`;
+    const restoreId = `${record?.recoveryId || record?.projectId || "recovery"}:${record?.savedAt || "latest"}`;
     setRestoringRecoveryId(restoreId);
     try {
       await onRestoreRecovery(record);
@@ -779,6 +796,7 @@ function HomeDashboard({
           <button type="button" className={activeNavigation === "folders" ? "active" : ""} onClick={showFolderTools}><Icon name="folder" />Folders</button></> : null}
           <p>Tools</p>
           <button type="button" className={activeNavigation === "takeoffs" ? "active" : ""} onClick={() => showPage("takeoffs")}><Icon name="briefcase" />Managed Takeoffs</button>
+          {workspaceAccess ? <button type="button" className={activeNavigation === "proposals" ? "active" : ""} onClick={() => showPage("proposals")}><Icon name="report" />Proposal Builder</button> : null}
           <button type="button" className={activeNavigation === "activity" ? "active" : ""} onClick={() => showPage("activity")}><Icon name="report" />Project Activity</button>
           <button type="button" className={activeNavigation === "recovery" ? "active" : ""} onClick={() => showPage("recovery")}><Icon name="database" />Recovery Center</button>
           <button type="button" className={activeNavigation === "billing" ? "active" : ""} onClick={() => showPage("billing")}><Icon name="credit" />Plan & Billing</button>
@@ -1138,7 +1156,7 @@ function HomeDashboard({
 
             {takeoffMessage ? <div className="hd-takeoff-message" role="status">{takeoffMessage}</div> : null}
 
-            <div className="hd-takeoff-list">
+            {isStaff ? <Suspense fallback={<div className="hd-card hd-module-loading">Loading operations board...</div>}><TakeoffOperationsBoard requests={takeoffRequests} loading={takeoffRequestsLoading} onUpdate={onUpdateTakeoffRequest} onQuote={quoteTakeoffRequest} onDeliver={deliverTakeoffRequest} /></Suspense> : <div className="hd-takeoff-list">
               {takeoffRequests?.length ? takeoffRequests.map((request) => {
                 const quote = request.quote_cents === null || request.quote_cents === undefined ? "Pending review" : `$${(Number(request.quote_cents) / 100).toFixed(2)}`;
                 return <article className="hd-card hd-takeoff-request" key={request.id}>
@@ -1151,21 +1169,14 @@ function HomeDashboard({
                   <div className="hd-takeoff-actions">
                     {!isStaff && request.status === "quoted" ? <button type="button" className="hd-button hd-button-primary" onClick={() => void onAcceptTakeoffQuote(request.id)}>{Number(request.quote_cents || 0) > 0 && request.payment_status !== "paid" ? "Pay Quote & Start" : "Accept Quote & Start"}</button> : null}
                     {!isStaff && request.status === "delivered" && request.delivered_project_id ? <button type="button" className="hd-button hd-button-primary" onClick={() => void onDownloadTakeoffDelivery(request.id)}>Download Delivered Project</button> : null}
-                    {isStaff && request.status === "submitted" ? <button type="button" className="hd-button hd-button-outline" onClick={() => void onUpdateTakeoffRequest(request.id, { status: "reviewing" })}>Start Review</button> : null}
-                    {isStaff && ["submitted", "reviewing", "quoted"].includes(request.status) ? <button type="button" className="hd-button hd-button-primary" onClick={() => void quoteTakeoffRequest(request)}>Send Quote</button> : null}
-                    {isStaff && request.status === "accepted" ? <button type="button" className="hd-button hd-button-primary" onClick={() => void onUpdateTakeoffRequest(request.id, { status: "in_progress" })}>Start Measuring</button> : null}
-                    {isStaff && request.status === "in_progress" ? <button type="button" className="hd-button hd-button-primary" onClick={() => {
-                      const projectId = window.prompt("Shared project ID to deliver", request.delivered_project_id || "");
-                      if (!projectId) return;
-                      const notes = window.prompt("Delivery notes", request.delivery_notes || "Measurements complete.") ?? "";
-                      void onUpdateTakeoffRequest(request.id, { status: "delivered", delivered_project_id: projectId, delivery_notes: notes });
-                    }}>Deliver Project</button> : null}
                   </div>
                 </article>;
               }) : <div className="hd-card hd-empty-state"><Icon name="briefcase" size={34} /><span>{takeoffRequestsLoading ? "Loading requests..." : isStaff ? "No customer takeoff requests are waiting." : "Your submitted takeoff requests will appear here."}</span></div>}
-            </div>
+            </div>}
           </section>
         ) : null}
+
+        {activeNavigation === "proposals" && workspaceAccess ? <Suspense fallback={<div className="hd-card hd-module-loading">Loading proposal builder...</div>}><ProposalBuilder projects={recentProjects} /></Suspense> : null}
 
         {activeNavigation === "billing" ? (
           <section className="hd-page hd-billing-page">
@@ -1241,6 +1252,7 @@ function HomeDashboard({
               <article className="hd-card hd-recovery-summary"><span><Icon name="clock" /></span><div><small>Latest autosave</small><strong>{latestRecovery ? formatDate(latestRecovery.savedAt) : "None yet"}</strong></div></article>
               <article className={`hd-card hd-recovery-summary ${sharedQueueCount ? "warning" : "healthy"}`}><span><Icon name={sharedQueueCount ? "upload" : "check"} /></span><div><small>Shared queue</small><strong>{sharedQueueCount ? `${sharedQueueCount} pending` : "Up to date"}</strong></div></article>
               <article className={`hd-card hd-recovery-summary ${sharedConnectionState === "connected" ? "healthy" : "warning"}`}><span><Icon name="cloud" /></span><div><small>Shared connection</small><strong>{sharedConnectionState === "connected" ? "Connected" : sharedConnectionState === "offline" ? "Offline" : sharedConnectionState === "connecting" ? "Connecting" : "Login required"}</strong></div></article>
+              <article className="hd-card hd-recovery-summary"><span><Icon name="database" /></span><div><small>Device checkpoints</small><strong>{Number(recoveryHistoryRecords?.length || 0).toLocaleString()}</strong></div></article>
             </div>
 
             <div className="hd-card hd-recovery-list-card">
@@ -1258,12 +1270,23 @@ function HomeDashboard({
                       <div className="hd-recovery-item-main"><strong>{record.projectName || "Recovered Project"}</strong><small>{record.reason === "browser-autosave" ? "Browser close/refresh fallback" : "IndexedDB autosave checkpoint"}</small></div>
                       <div className="hd-recovery-item-details"><span><small>Device autosave</small><strong>{formatDate(record.savedAt)}</strong></span><span><small>Shared save</small><strong>{linkedProject && String(linkedProject.storageScope || "").toLowerCase() === "shared" ? formatDate(entryEditedAt(linkedProject)) : "Not synced"}</strong></span><span><small>Snapshot size</small><strong>{Number(record.polygonCount || 0).toLocaleString()} polygons</strong></span></div>
                       <div className="hd-recovery-item-health"><i className={`hd-project-health ${health.key}`} title={health.detail}><Icon name={health.icon} size={13} />{health.label}</i></div>
-                      <button type="button" className="hd-button hd-button-primary hd-recovery-restore" onClick={() => void restoreRecovery(record)} disabled={restoringRecoveryId === restoreId}>{restoringRecoveryId === restoreId ? "Restoring..." : "Restore snapshot"}</button>
+                      <div className="hd-recovery-item-actions">{record.recoverySource !== "browser-autosave" ? <button type="button" className="hd-button hd-button-outline" onClick={() => void onDownloadRecovery(record)}>Download JSON</button> : null}<button type="button" className="hd-button hd-button-primary hd-recovery-restore" onClick={() => void restoreRecovery(record)} disabled={restoringRecoveryId === restoreId}>{restoringRecoveryId === restoreId ? "Restoring..." : "Restore snapshot"}</button></div>
                     </article>
                   );
                 }) : <div className="hd-empty-state"><Icon name="database" size={34} /><span>No recovery snapshots exist yet. While editing, the app creates a device checkpoint every 30 seconds and after polygon changes.</span></div>}
               </div>
             </div>
+
+            <details className="hd-card hd-recovery-history-card">
+              <summary>Checkpoint history ({Number(recoveryHistoryRecords?.length || 0).toLocaleString()})</summary>
+              <p>Each checkpoint is a separate local recovery point. Download important checkpoints before clearing browser data.</p>
+              <div className="hd-recovery-history-list">
+                {recoveryHistoryRecords?.length ? recoveryHistoryRecords.slice(0, 60).map((record) => {
+                  const restoreId = `${record.recoveryId || record.projectId}:${record.savedAt}`;
+                  return <article key={restoreId}><div><strong>{record.projectName || "Recovered Project"}</strong><small>{formatDate(record.savedAt)} · {Number(record.polygonCount || 0).toLocaleString()} polygons · {record.reason || "autosave"}</small></div><div><button type="button" className="hd-button hd-button-outline" onClick={() => void onDownloadRecovery(record)}>Download</button><button type="button" className="hd-button hd-button-primary" onClick={() => void restoreRecovery(record)} disabled={restoringRecoveryId === restoreId}>{restoringRecoveryId === restoreId ? "Restoring..." : "Restore"}</button></div></article>;
+                }) : <div className="hd-empty-state"><span>Checkpoint history appears after you edit and autosave projects.</span></div>}
+              </div>
+            </details>
           </section>
         ) : null}
 
@@ -1311,6 +1334,7 @@ function HomeDashboard({
         </section> : null}
 
         {activeNavigation === "admin" && isStaff ? <section className="hd-admin" id="admin-tools">
+          <Suspense fallback={<div className="hd-card hd-module-loading">Loading pricing controls...</div>}><PricingAdminPanel /></Suspense>
           <details className="hd-card">
             <summary><span><Icon name="shield" />Security & Legal</span><Icon name="chevron" /></summary>
             <div className="hd-admin-content"><p>Authorized business use only. Shared login events and project actions are logged for accountability and security review.</p><p>Audit events follow the backend retention policy. Shared project files remain available until deleted by a logged-in user.</p>{sharedExpiresAt ? <small>Current session expires {formatDate(sharedExpiresAt)}.</small> : null}</div>

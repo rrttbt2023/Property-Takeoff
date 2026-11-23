@@ -316,6 +316,24 @@ TakeoffPropertyType = Literal[
     "other",
 ]
 TakeoffMeasurementScope = Literal["full_property", "partial_property"]
+TakeoffPriority = Literal["low", "normal", "high", "urgent"]
+
+
+class TakeoffPricingConfig(BaseModel):
+    property_rates_cents: dict[TakeoffPropertyType, int]
+    base_review_cents: int = Field(..., ge=0, le=1_000_000)
+    additional_service_percent: int = Field(..., ge=0, le=500)
+    partial_area_percent: int = Field(..., ge=0, le=100)
+    version: int = Field(1, ge=1)
+    updated_at: str = ""
+    updated_by: str = ""
+
+
+class TakeoffPricingConfigUpdate(BaseModel):
+    property_rates_cents: dict[TakeoffPropertyType, int]
+    base_review_cents: int = Field(..., ge=0, le=1_000_000)
+    additional_service_percent: int = Field(..., ge=0, le=500)
+    partial_area_percent: int = Field(..., ge=0, le=100)
 
 
 class TakeoffQuoteEstimateRequest(BaseModel):
@@ -356,6 +374,8 @@ class TakeoffRequestUpdate(BaseModel):
     quote_notes: str | None = Field(None, max_length=5000)
     delivery_notes: str | None = Field(None, max_length=5000)
     delivered_project_id: str | None = Field(None, max_length=180)
+    assigned_to: str | None = Field(None, max_length=120)
+    priority: TakeoffPriority | None = None
 
 
 class TakeoffFileRecord(BaseModel):
@@ -385,6 +405,8 @@ class TakeoffRequestRecord(BaseModel):
     quote_cents: int | None = None
     quote_notes: str = ""
     payment_status: str = "not_required"
+    assigned_to: str = ""
+    priority: TakeoffPriority = "normal"
     quoted_at: str | None = None
     accepted_at: str | None = None
     due_at: str | None = None

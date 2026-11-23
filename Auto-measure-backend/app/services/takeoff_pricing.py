@@ -12,6 +12,13 @@ PROPERTY_TYPE_RATE_PER_ACRE_CENTS = {
     "other": 390,
 }
 
+DEFAULT_TAKEOFF_PRICING_CONFIG = {
+    "property_rates_cents": PROPERTY_TYPE_RATE_PER_ACRE_CENTS,
+    "base_review_cents": 3_000,
+    "additional_service_percent": 35,
+    "partial_area_percent": 65,
+}
+
 SUPPORTED_SERVICES = {
     "plowable pavement",
     "sidewalks",
@@ -39,6 +46,30 @@ EARTH_RADIUS_METERS = 6_371_008.8
 BASE_REVIEW_CENTS = 3_000
 ADDITIONAL_SERVICE_MULTIPLIER = 0.35
 PARTIAL_AREA_MULTIPLIER = 0.65
+
+
+def normalize_pricing_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = config if isinstance(config, dict) else {}
+    source_rates = source.get("property_rates_cents")
+    rates = {
+        key: max(0, min(100_000, int((source_rates or {}).get(key, default))))
+        for key, default in PROPERTY_TYPE_RATE_PER_ACRE_CENTS.items()
+    }
+    return {
+        "property_rates_cents": rates,
+        "base_review_cents": max(
+            0,
+            min(1_000_000, int(source.get("base_review_cents", BASE_REVIEW_CENTS))),
+        ),
+        "additional_service_percent": max(
+            0,
+            min(500, int(source.get("additional_service_percent", 35))),
+        ),
+        "partial_area_percent": max(
+            0,
+            min(100, int(source.get("partial_area_percent", 65))),
+        ),
+    }
 
 
 def _round_to_five_dollars(value: float) -> int:
@@ -135,9 +166,12 @@ def estimate_takeoff_quote(
     estimated_square_feet: int,
     service_types: list[Any],
     measurement_scope: str = "full_property",
+    pricing_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    pricing = normalize_pricing_config(pricing_config)
+    property_rates = pricing["property_rates_cents"]
     safe_property_type = (
-        property_type if property_type in PROPERTY_TYPE_RATE_PER_ACRE_CENTS else "other"
+        property_type if property_type in property_rates else "other"
     )
     safe_measurement_scope = (
         measurement_scope
@@ -148,24 +182,28 @@ def estimate_takeoff_quote(
     services = _normalized_services(service_types)
     area_acres = safe_square_feet / SQ_FEET_PER_ACRE
     service_multiplier = 1.0 + (
-        ADDITIONAL_SERVICE_MULTIPLIER * max(0, len(services) - 1)
+        (pricing["additional_service_percent"] / 100.0)
+        * max(0, len(services) - 1)
     )
     scope_multiplier = (
-        PARTIAL_AREA_MULTIPLIER
+        pricing["partial_area_percent"] / 100.0
         if safe_measurement_scope == "partial_property"
         else 1.0
     )
     variable_cents = (
-        PROPERTY_TYPE_RATE_PER_ACRE_CENTS[safe_property_type]
+        property_rates[safe_property_type]
         * area_acres
         * service_multiplier
         * scope_multiplier
     )
     midpoint_cents = max(
-        BASE_REVIEW_CENTS,
-        _round_to_five_dollars(BASE_REVIEW_CENTS + variable_cents),
+        pricing["base_review_cents"],
+        _round_to_five_dollars(pricing["base_review_cents"] + variable_cents),
     )
-    low_cents = max(BASE_REVIEW_CENTS, _round_to_five_dollars(midpoint_cents * 0.85))
+    low_cents = max(
+        pricing["base_review_cents"],
+        _round_to_five_dollars(midpoint_cents * 0.85),
+    )
     high_cents = max(
         low_cents + 1_500,
         _round_to_five_dollars(midpoint_cents * 1.20),

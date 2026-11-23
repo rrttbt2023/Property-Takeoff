@@ -229,6 +229,53 @@ export async function listProjectRecoveries(
     }));
 }
 
+export async function listProjectRecoveryHistory(
+  limit = 120,
+  { organizationId = "", includeLegacy = false } = {}
+) {
+  if (!canUseIndexedDb()) return [];
+  const db = await openRecoveryDb();
+  const transaction = db.transaction(HISTORY_STORE, "readonly");
+  const records = await requestResult(transaction.objectStore(HISTORY_STORE).getAll());
+  await transactionDone(transaction);
+  const maximum = Math.max(1, Math.min(500, Number(limit) || 120));
+  const owner = normalizeOrganizationId(organizationId);
+  return (Array.isArray(records) ? records : [])
+    .filter((record) => {
+      const recordOwner = normalizeOrganizationId(record?.ownerOrganizationId);
+      return recordOwner === owner || (includeLegacy && !recordOwner);
+    })
+    .sort((a, b) => String(b?.savedAt || "").localeCompare(String(a?.savedAt || "")))
+    .slice(0, maximum)
+    .map((record) => ({
+      recoveryId: String(record?.id || ""),
+      projectId: String(record?.projectId || "").trim(),
+      projectName: String(record?.projectName || "Untitled Project"),
+      savedAt: String(record?.savedAt || ""),
+      reason: String(record?.reason || "autosave"),
+      polygonCount: Math.max(0, Number(record?.polygonCount) || 0),
+      recoverySource: "indexeddb-history",
+    }));
+}
+
+export async function getProjectRecoverySnapshot(
+  recoveryId,
+  { organizationId = "", includeLegacy = false } = {}
+) {
+  if (!canUseIndexedDb()) return null;
+  const normalizedId = String(recoveryId || "").trim();
+  if (!normalizedId) return null;
+  const db = await openRecoveryDb();
+  const transaction = db.transaction(HISTORY_STORE, "readonly");
+  const record = await requestResult(transaction.objectStore(HISTORY_STORE).get(normalizedId));
+  await transactionDone(transaction);
+  if (!record || typeof record !== "object") return null;
+  const owner = normalizeOrganizationId(organizationId);
+  const recordOwner = normalizeOrganizationId(record.ownerOrganizationId);
+  if (recordOwner !== owner && !(includeLegacy && !recordOwner)) return null;
+  return record;
+}
+
 export async function hasProjectRecovery(options = {}) {
   try {
     return !!(await getLatestProjectRecovery("", options));

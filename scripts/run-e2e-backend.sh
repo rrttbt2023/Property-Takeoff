@@ -9,6 +9,8 @@ export AUTO_MEASURE_ALLOW_PUBLIC_SIGNUP=true
 export AUTO_MEASURE_REQUIRE_EMAIL_VERIFICATION=false
 export AUTO_MEASURE_PASSWORD_PEPPER="e2e-only-password-pepper-not-for-production"
 export AUTO_MEASURE_CSRF_SECRET="e2e-only-csrf-secret-not-for-production"
+export AUTO_MEASURE_SHARED_AUTH_USER="e2e-staff"
+export AUTO_MEASURE_SHARED_AUTH_PASS="e2e-staff-password-123"
 E2E_BACKEND_PORT="${E2E_BACKEND_PORT:-8010}"
 unset AUTO_MEASURE_DATABASE_URL DATABASE_URL
 

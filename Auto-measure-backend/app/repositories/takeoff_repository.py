@@ -5,6 +5,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.repositories.database import connect_database
+from app.services.takeoff_pricing import (
+    DEFAULT_TAKEOFF_PRICING_CONFIG,
+    normalize_pricing_config,
+)
 
 
 DEFAULT_DB_PATH = "./data/measurements.db"
@@ -54,9 +58,27 @@ def init_db() -> None:
                 delivered_at TEXT,
                 delivery_notes TEXT NOT NULL DEFAULT '',
                 delivered_project_id TEXT,
+                assigned_to TEXT NOT NULL DEFAULT '',
+                priority TEXT NOT NULL DEFAULT 'normal',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS takeoff_pricing_settings (
+                id TEXT PRIMARY KEY,
+                config_json TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS takeoff_pricing_versions (
+                id TEXT PRIMARY KEY,
+                config_json TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS takeoff_request_events (
@@ -105,6 +127,8 @@ def init_db() -> None:
             "payment_status": "TEXT NOT NULL DEFAULT 'not_required'",
             "stripe_checkout_session_id": "TEXT",
             "stripe_payment_intent_id": "TEXT",
+            "assigned_to": "TEXT NOT NULL DEFAULT ''",
+            "priority": "TEXT NOT NULL DEFAULT 'normal'",
         }
         for column, definition in migrations.items():
             if column not in existing_columns:
@@ -179,6 +203,8 @@ def _decode_request(conn: Any, row: Any) -> dict[str, Any]:
         "quote_cents": int(row["quote_cents"]) if row["quote_cents"] is not None else None,
         "quote_notes": str(row["quote_notes"] or ""),
         "payment_status": str(row["payment_status"] or "not_required"),
+        "assigned_to": str(row["assigned_to"] or ""),
+        "priority": str(row["priority"] or "normal"),
         "quoted_at": str(row["quoted_at"]) if row["quoted_at"] else None,
         "accepted_at": str(row["accepted_at"]) if row["accepted_at"] else None,
         "due_at": str(row["due_at"]) if row["due_at"] else None,
@@ -305,6 +331,8 @@ def update_request(
     quote_notes: str | None = None,
     delivery_notes: str | None = None,
     delivered_project_id: str | None = None,
+    assigned_to: str | None = None,
+    priority: str | None = None,
 ) -> dict[str, Any] | None:
     ensure_db_ready()
     now = _iso()
@@ -338,6 +366,8 @@ def update_request(
             "quote_notes": quote_notes,
             "delivery_notes": delivery_notes,
             "delivered_project_id": delivered_project_id,
+            "assigned_to": assigned_to,
+            "priority": priority,
         }
         for column, value in optional.items():
             if value is not None:
@@ -365,6 +395,98 @@ def update_request(
         )
         conn.commit()
     return get_request(request_id, include_all=True)
+
+
+def get_pricing_config() -> dict[str, Any]:
+    ensure_db_ready()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM takeoff_pricing_settings WHERE id = 'current'"
+        ).fetchone()
+    if not row:
+        return {
+            **normalize_pricing_config(DEFAULT_TAKEOFF_PRICING_CONFIG),
+            "version": 1,
+            "updated_at": "",
+            "updated_by": "system default",
+        }
+    config = normalize_pricing_config(_json_load(row["config_json"], {}))
+    return {
+        **config,
+        "version": max(1, int(row["version"] or 1)),
+        "updated_at": str(row["updated_at"] or ""),
+        "updated_by": str(row["updated_by"] or ""),
+    }
+
+
+def update_pricing_config(config: dict[str, Any], actor_user_id: str) -> dict[str, Any]:
+    ensure_db_ready()
+    normalized = normalize_pricing_config(config)
+    current = get_pricing_config()
+    version = max(1, int(current.get("version") or 1)) + 1
+    now = _iso()
+    encoded = json.dumps(normalized, ensure_ascii=True, sort_keys=True)
+    with _connect() as conn:
+        existing = conn.execute(
+            "SELECT id FROM takeoff_pricing_settings WHERE id = 'current'"
+        ).fetchone()
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            INSERT INTO takeoff_pricing_versions (
+                id, config_json, version, created_at, created_by
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                f"pricing-{secrets.token_hex(12)}",
+                json.dumps(normalize_pricing_config(current), ensure_ascii=True, sort_keys=True),
+                max(1, int(current.get("version") or 1)),
+                now,
+                str(actor_user_id),
+            ),
+        )
+        if existing:
+            conn.execute(
+                """
+                UPDATE takeoff_pricing_settings
+                SET config_json = ?, version = ?, updated_at = ?, updated_by = ?
+                WHERE id = 'current'
+                """,
+                (encoded, version, now, str(actor_user_id)),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO takeoff_pricing_settings (
+                    id, config_json, version, updated_at, updated_by
+                ) VALUES ('current', ?, ?, ?, ?)
+                """,
+                (encoded, version, now, str(actor_user_id)),
+            )
+        conn.commit()
+    return get_pricing_config()
+
+
+def list_pricing_versions(limit: int = 25) -> list[dict[str, Any]]:
+    ensure_db_ready()
+    safe_limit = max(1, min(100, int(limit)))
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM takeoff_pricing_versions
+            ORDER BY version DESC, created_at DESC LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+    return [
+        {
+            **normalize_pricing_config(_json_load(row["config_json"], {})),
+            "version": max(1, int(row["version"] or 1)),
+            "updated_at": str(row["created_at"] or ""),
+            "updated_by": str(row["created_by"] or ""),
+        }
+        for row in rows
+    ]
 
 
 def accept_quote(request_id: str, organization_id: str, user_id: str) -> dict[str, Any] | None:
