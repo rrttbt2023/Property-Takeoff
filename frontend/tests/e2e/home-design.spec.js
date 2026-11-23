@@ -4,6 +4,38 @@ import { Buffer } from "node:buffer";
 
 test.use({ viewport: { width: 820, height: 1180 }, hasTouch: true });
 
+test("public comparison keeps the aerial fixed and independently toggles all four measured surfaces", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  const demo = page.getByRole("region", { name: "Interactive example takeoff" });
+  const aerial = demo.getByRole("img");
+  await expect.poll(() => aerial.evaluate(img => img.complete && img.naturalWidth >= 900)).toBe(true);
+  const overlay = demo.locator(".field-study-overlay");
+  const sameFrame = () => demo.evaluate(node => {
+    const photo = node.querySelector("img").getBoundingClientRect();
+    const drawing = node.querySelector("svg").getBoundingClientRect();
+    return ["x","y","width","height"].every(key => Math.abs(photo[key] - drawing[key]) < 1);
+  });
+  expect(await sameFrame()).toBe(true);
+  const key = demo.getByRole("group", { name: "Measurement key" });
+  for (const [label, layer] of [["Plowable pavement","pavement"], ["Sidewalks","sidewalks"], ["Turf","turf"], ["Mulch beds","mulch"]]) {
+    const toggle = key.getByRole("button", {name: label});
+    const surface = overlay.locator(`path[data-surface="${layer}"]`);
+    await expect(surface).toHaveCount(1);
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await expect(surface).toHaveCount(0);
+    await expect(overlay.locator("path[data-surface]")).toHaveCount(3);
+    await toggle.click();
+    await expect(surface).toHaveCount(1);
+  }
+  await demo.getByRole("slider").press("End");
+  await expect(overlay.locator("clipPath rect")).toHaveAttribute("width", "0");
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
+  await expect(key.getByRole("button", { name: "Mulch beds" })).toBeVisible();
+  expect(await sameFrame()).toBe(true);
+});
+
 for (const [choice, destination] of [
   ["Measure it myself", "Plan & Billing"],
   ["Request a measured takeoff", "Managed Takeoffs"],
