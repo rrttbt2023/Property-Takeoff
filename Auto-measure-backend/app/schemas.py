@@ -368,7 +368,22 @@ class TakeoffRequestCreate(BaseModel):
     notes: str = Field("", max_length=5000)
 
 
+class TakeoffTimerCommand(BaseModel):
+    action: Literal["start", "pause", "resume", "complete"]
+    version: int = Field(ge=0)
+
+
+class MeasuringTimer(BaseModel):
+    state: Literal["idle", "running", "paused", "completed"] = "idle"
+    elapsed_ms: int = Field(0, ge=0)
+    started_at: str | None = None
+    completed_at: str | None = None
+    version: int = 0
+    layer_counts: dict[str, int] | None = None
+
+
 class TakeoffRequestUpdate(BaseModel):
+    timer: TakeoffTimerCommand | None = None
     status: TakeoffRequestStatus | None = None
     quote_cents: int | None = Field(None, ge=0, le=10_000_000)
     quote_notes: str | None = Field(None, max_length=5000)
@@ -416,6 +431,10 @@ class TakeoffRequestRecord(BaseModel):
     created_at: str
     updated_at: str
     files: list[TakeoffFileRecord] = Field(default_factory=list)
+
+
+class StaffTakeoffRequestRecord(TakeoffRequestRecord):
+    measuring_timer: MeasuringTimer
 
 
 class SecurityAuditEvent(BaseModel):

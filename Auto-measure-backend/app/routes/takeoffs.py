@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 
 from app.repositories.takeoff_repository import (
+    TakeoffConflict,
     accept_quote,
     add_file,
     create_request,
@@ -29,6 +30,7 @@ from app.schemas import (
     TakeoffQuoteEstimateResponse,
     TakeoffPricingConfig,
     TakeoffPricingConfigUpdate,
+    StaffTakeoffRequestRecord,
     TakeoffRequestCreate,
     TakeoffRequestRecord,
     TakeoffRequestUpdate,
@@ -81,13 +83,19 @@ def _request_for_session(request_id: str, session: dict) -> dict:
     )
 
 
-@router.get("", response_model=list[TakeoffRequestRecord])
+def _visible_request(item: dict, session: dict) -> StaffTakeoffRequestRecord | TakeoffRequestRecord:
+    if session.get("is_staff"):
+        return StaffTakeoffRequestRecord(**item)
+    return TakeoffRequestRecord(**item)
+
+
+@router.get("", response_model=list[StaffTakeoffRequestRecord | TakeoffRequestRecord])
 def list_takeoff_requests(
     limit: int = Query(100, ge=1, le=500),
     session: dict = Depends(require_shared_access),
-) -> list[TakeoffRequestRecord]:
+) -> list[StaffTakeoffRequestRecord | TakeoffRequestRecord]:
     return [
-        TakeoffRequestRecord(**item)
+        _visible_request(item, session)
         for item in list_requests(
             organization_id=str(session.get("organization_id") or ""),
             include_all=bool(session.get("is_staff")),
@@ -180,15 +188,15 @@ def create_takeoff_request(
     return TakeoffRequestRecord(**item)
 
 
-@router.get("/{request_id}", response_model=TakeoffRequestRecord)
+@router.get("/{request_id}", response_model=StaffTakeoffRequestRecord | TakeoffRequestRecord)
 def get_takeoff_request(
     request_id: str,
     session: dict = Depends(require_shared_access),
-) -> TakeoffRequestRecord:
+) -> StaffTakeoffRequestRecord | TakeoffRequestRecord:
     item = _request_for_session(request_id, session)
     if not item:
         raise HTTPException(status_code=404, detail="Takeoff request not found.")
-    return TakeoffRequestRecord(**item)
+    return _visible_request(item, session)
 
 
 @router.get("/{request_id}/delivery", response_model=SharedProjectRecord)
@@ -298,16 +306,19 @@ def create_takeoff_payment_checkout(
     return BillingSessionResponse(url=url)
 
 
-@router.patch("/{request_id}", response_model=TakeoffRequestRecord)
+@router.patch("/{request_id}", response_model=StaffTakeoffRequestRecord)
 def update_takeoff_request(
     request_id: str,
     payload: TakeoffRequestUpdate,
     session: dict = Depends(require_staff_access),
-) -> TakeoffRequestRecord:
+) -> StaffTakeoffRequestRecord:
+    if payload.timer and payload.model_fields_set != {"timer"}:
+        raise HTTPException(status_code=400, detail="Send the timer action as a separate update.")
     existing_request = get_request(request_id, include_all=True)
     if not existing_request:
         raise HTTPException(status_code=404, detail="Takeoff request not found.")
     delivered_project_id = payload.delivered_project_id
+    layer_counts = None
     if payload.status is not None:
         current_status = str(existing_request.get("status") or "submitted")
         if payload.status == "accepted":
@@ -338,23 +349,42 @@ def update_takeoff_request(
                 status_code=404,
                 detail="The completed staff project could not be found.",
             )
+        project = source_project.get("payload") or {}
+        layers = project.get("layerFeatures")
+        if isinstance(layers, dict) and project.get("workflowMode") != "pdf":
+            layer_counts = {
+                key: sum(
+                    1 for feature in features
+                    if isinstance(feature, dict) and isinstance(feature.get("geometry"), dict)
+                    and feature["geometry"].get("type") in {"Polygon", "MultiPolygon"}
+                )
+                for key, features in layers.items()
+                if key in {"plowable", "sidewalks", "turf", "mulch"} and isinstance(features, list)
+            }
         delivered_project_id = f"delivery-{request_id}"
         save_project_record(
             {**source_project, "id": delivered_project_id},
             organization_id=str(existing_request.get("organization_id") or ""),
             force=True,
         )
-    item = update_request(
-        request_id,
-        actor_user_id=str(session.get("user_id") or ""),
-        status=payload.status,
-        quote_cents=payload.quote_cents,
-        quote_notes=payload.quote_notes,
-        delivery_notes=payload.delivery_notes,
-        delivered_project_id=delivered_project_id,
-        assigned_to=payload.assigned_to,
-        priority=payload.priority,
-    )
+    try:
+        item = update_request(
+            request_id,
+            actor_user_id=str(session.get("user_id") or ""),
+            status=payload.status,
+            quote_cents=payload.quote_cents,
+            quote_notes=payload.quote_notes,
+            delivery_notes=payload.delivery_notes,
+            delivered_project_id=delivered_project_id,
+            assigned_to=payload.assigned_to,
+            priority=payload.priority,
+            timer_action=payload.timer.action if payload.timer else None,
+            timer_version=payload.timer.version if payload.timer else None,
+            expected_status=existing_request["status"] if payload.status else None,
+            delivered_layer_counts=layer_counts,
+        )
+    except TakeoffConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not item:
         raise HTTPException(status_code=404, detail="Takeoff request not found.")
     if payload.status == "quoted":
@@ -371,7 +401,7 @@ def update_takeoff_request(
             heading="Measurements delivered",
             message=f"The completed measurements for {item.get('title') or 'your property'} are ready to download.",
         )
-    return TakeoffRequestRecord(**item)
+    return StaffTakeoffRequestRecord(**item)
 
 
 @router.post("/{request_id}/files", response_model=TakeoffFileRecord, status_code=201)

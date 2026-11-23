@@ -1156,7 +1156,7 @@ function HomeDashboard({
 
             {takeoffMessage ? <div className="hd-takeoff-message" role="status">{takeoffMessage}</div> : null}
 
-            {isStaff ? <Suspense fallback={<div className="hd-card hd-module-loading">Loading operations board...</div>}><TakeoffOperationsBoard requests={takeoffRequests} loading={takeoffRequestsLoading} onUpdate={onUpdateTakeoffRequest} onQuote={quoteTakeoffRequest} onDeliver={deliverTakeoffRequest} /></Suspense> : <div className="hd-takeoff-list">
+            {isStaff ? <Suspense fallback={<div className="hd-card hd-module-loading">Loading operations board...</div>}><TakeoffOperationsBoard requests={takeoffRequests} loading={takeoffRequestsLoading} onUpdate={onUpdateTakeoffRequest} onQuote={quoteTakeoffRequest} onDeliver={deliverTakeoffRequest} propertyTypeLabel={propertyTypeLabel} /></Suspense> : <div className="hd-takeoff-list">
               {takeoffRequests?.length ? takeoffRequests.map((request) => {
                 const quote = request.quote_cents === null || request.quote_cents === undefined ? "Pending review" : `$${(Number(request.quote_cents) / 100).toFixed(2)}`;
                 return <article className="hd-card hd-takeoff-request" key={request.id}>

@@ -17,17 +17,85 @@ function dueLabel(request, now) {
   return { text: `${hours.toFixed(hours < 10 ? 1 : 0)}h remaining`, overdue: false };
 }
 
+const TIMER_LABELS = { idle: "Not timed yet", running: "Running", paused: "Paused", completed: "Complete" };
+
+function formatDuration(milliseconds) {
+  const seconds = Math.floor(milliseconds / 1000);
+  const pad = (value) => String(value).padStart(2, "0");
+  return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map(pad).join(":");
+}
+
+function MeasuringTimer({ request, busy, onAction }) {
+  const timer = request.measuring_timer;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!timer?.started_at) return undefined;
+    const tick = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(tick);
+  }, [timer?.started_at]);
+
+  const canEdit = ["accepted", "in_progress"].includes(request.status);
+  if (!timer || (!canEdit && timer.state === "idle")) return null;
+  const running = timer.state === "running";
+  const live = running ? Math.max(0, now - Date.parse(timer.started_at)) : 0;
+  const action = (name) => onAction(request.id, { timer: { action: name, version: timer.version } });
+  return (
+    <div className="hd-measuring-time">
+      <div><small>Measuring time</small><strong role="timer" aria-label="Active measuring time">{formatDuration(timer.elapsed_ms + live)}</strong></div>
+      <span>{TIMER_LABELS[timer.state]}</span>
+      {canEdit && (
+        <div className="hd-time-actions">
+          {timer.state === "idle" && <button className="hd-button hd-button-primary" disabled={busy} onClick={() => action("start")}>Start measuring</button>}
+          {running && <button className="hd-button hd-button-outline" disabled={busy} onClick={() => action("pause")}>Pause</button>}
+          {["paused", "completed"].includes(timer.state) && <button className="hd-button hd-button-outline" disabled={busy} onClick={() => action("resume")}>Resume</button>}
+          {["running", "paused"].includes(timer.state) && <button className="hd-button hd-button-primary" disabled={busy} onClick={() => action("complete")}>Complete measuring</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TimingHistory({ requests, propertyTypeLabel }) {
+  const finished = requests.filter((item) => item.measuring_timer?.state === "completed" && item.status !== "canceled")
+    .sort((a, b) => b.measuring_timer.completed_at.localeCompare(a.measuring_timer.completed_at));
+  if (!finished.length) return null;
+  return (
+    <details className="hd-card hd-time-history">
+      <summary>Completed measuring times ({finished.length})</summary>
+      <div className="hd-time-scroll"><table>
+        <caption>Completed jobs in the loaded queue</caption>
+        <thead><tr>{["Job", "Property type", "Boundary acres", "Requested areas", "Delivered polygons", "Active time", "Final quote"].map((label) => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+        <tbody>{finished.map((item) => {
+          const timer = item.measuring_timer;
+          const counts = timer.layer_counts;
+          const total = counts && Object.values(counts).reduce((sum, count) => sum + count, 0);
+          return <tr key={item.id}>
+            <th scope="row">{item.title}</th>
+            <td>{propertyTypeLabel(item.property_type)}</td>
+            <td>{item.estimated_square_feet ? (item.estimated_square_feet / 43560).toFixed(2) : "Unknown"}</td>
+            <td>{item.service_types?.join(", ")}</td>
+            <td>{counts ? `${total} (${counts.mulch || 0} mulch)` : "Unavailable"}</td>
+            <td>{formatDuration(timer.elapsed_ms)}</td>
+            <td>{item.quote_cents == null ? "Pending" : `$${(item.quote_cents / 100).toFixed(2)}`}</td>
+          </tr>;
+        })}</tbody>
+      </table></div>
+    </details>
+  );
+}
+
 export default function TakeoffOperationsBoard({
   requests = [],
   loading = false,
   onUpdate,
   onQuote,
   onDeliver,
+  propertyTypeLabel,
 }) {
   const [statusFilter, setStatusFilter] = useState("active");
   const [search, setSearch] = useState("");
   const [now, setNow] = useState(Date.now());
-  const [workingId, setWorkingId] = useState("");
+  const [workingIds, setWorkingIds] = useState([]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -56,11 +124,11 @@ export default function TakeoffOperationsBoard({
   }), [now, requests]);
 
   const update = async (id, changes) => {
-    setWorkingId(id);
+    setWorkingIds((ids) => [...ids, id]);
     try {
       await onUpdate(id, changes);
     } finally {
-      setWorkingId("");
+      setWorkingIds((ids) => ids.filter((working) => working !== id));
     }
   };
 
@@ -72,6 +140,7 @@ export default function TakeoffOperationsBoard({
         <article className={summary.overdue ? "danger" : ""}><small>Overdue</small><strong>{summary.overdue}</strong></article>
         <article className={summary.unassigned ? "warn" : ""}><small>Unassigned</small><strong>{summary.unassigned}</strong></article>
       </div>
+      <TimingHistory requests={requests} propertyTypeLabel={propertyTypeLabel} />
       <div className="hd-card hd-ops-toolbar">
         <label><span>Search queue</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Property, customer, or assignee" /></label>
         <label><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="active">Active work</option><option value="all">All requests</option><option value="submitted">Submitted</option><option value="reviewing">Reviewing</option><option value="quoted">Quoted</option><option value="accepted">Accepted</option><option value="in_progress">In progress</option><option value="delivered">Delivered</option><option value="canceled">Canceled</option></select></label>
@@ -79,7 +148,7 @@ export default function TakeoffOperationsBoard({
       <div className="hd-ops-list">
         {sorted.length ? sorted.map((request) => {
           const due = dueLabel(request, now);
-          const busy = workingId === request.id;
+          const busy = workingIds.includes(request.id);
           return <article className={`hd-card hd-ops-card priority-${request.priority || "normal"}`} key={request.id}>
             <header><div><span className={`hd-takeoff-status status-${request.status}`}>{statusLabel(request.status)}</span><span className={`hd-ops-priority priority-${request.priority || "normal"}`}>{request.priority || "normal"}</span><h3>{request.title}</h3><p>{request.organization_name || "Customer workspace"} · {request.address}</p></div><div className={due.overdue ? "hd-ops-due overdue" : "hd-ops-due"}><small>24-hour SLA</small><strong>{due.text}</strong></div></header>
             <div className="hd-ops-meta"><span><small>Planning range</small><strong>${Math.round(Number(request.estimate_low_cents || 0) / 100).toLocaleString()}–${Math.round(Number(request.estimate_high_cents || 0) / 100).toLocaleString()}</strong></span><span><small>Final quote</small><strong>{request.quote_cents == null ? "Pending" : `$${(Number(request.quote_cents) / 100).toFixed(2)}`}</strong></span><span><small>Measured area</small><strong>{Number(request.estimated_square_feet || 0).toLocaleString()} sq ft</strong></span><span><small>Requested areas</small><strong>{request.service_types?.length || 0}</strong></span></div>
@@ -88,10 +157,10 @@ export default function TakeoffOperationsBoard({
               <label>Priority<select value={request.priority || "normal"} onChange={(event) => void update(request.id, { priority: event.target.value })}><option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
             </div>
             {request.notes ? <p className="hd-ops-notes"><strong>Customer notes:</strong> {request.notes}</p> : null}
+            <MeasuringTimer request={request} busy={busy} onAction={update} />
             <footer>
               {request.status === "submitted" ? <button type="button" className="hd-button hd-button-outline" disabled={busy} onClick={() => void update(request.id, { status: "reviewing" })}>Start Review</button> : null}
               {["submitted", "reviewing", "quoted"].includes(request.status) ? <button type="button" className="hd-button hd-button-primary" disabled={busy} onClick={() => onQuote(request)}>Send Quote</button> : null}
-              {request.status === "accepted" ? <button type="button" className="hd-button hd-button-primary" disabled={busy} onClick={() => void update(request.id, { status: "in_progress" })}>Start Measuring</button> : null}
               {request.status === "in_progress" ? <button type="button" className="hd-button hd-button-primary" disabled={busy} onClick={() => onDeliver(request)}>Deliver Project</button> : null}
               {!['delivered', 'canceled'].includes(request.status) ? <button type="button" className="hd-button hd-button-quiet" disabled={busy} onClick={() => void update(request.id, { status: "canceled" })}>Cancel</button> : null}
             </footer>

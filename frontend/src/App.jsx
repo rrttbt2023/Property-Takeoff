@@ -5619,9 +5619,14 @@ export default function App() {
   }, [pushToast, refreshCustomerWorkspace, takeoffRequests]);
 
   const handleUpdateTakeoffRequest = useCallback(async (requestId, changes) => {
-    await updateTakeoffRequest(requestId, changes);
-    await refreshCustomerWorkspace();
-    pushToast("Takeoff request updated.", "info", 3200);
+    try {
+      const updated = await updateTakeoffRequest(requestId, changes);
+      setTakeoffRequests((requests) => requests.map((item) => item.id === requestId ? updated : item));
+      if (!changes.timer) pushToast("Takeoff request updated.", "info", 3200);
+    } catch (error) {
+      pushToast(error?.message || "Could not update this takeoff.", "error", 5200);
+      await refreshCustomerWorkspace({ quiet: true });
+    }
   }, [pushToast, refreshCustomerWorkspace]);
 
   const handleDownloadTakeoffDelivery = useCallback(async (requestId) => {

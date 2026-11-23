@@ -60,6 +60,7 @@ def init_db() -> None:
                 delivered_project_id TEXT,
                 assigned_to TEXT NOT NULL DEFAULT '',
                 priority TEXT NOT NULL DEFAULT 'normal',
+                measuring_timer_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
@@ -129,6 +130,7 @@ def init_db() -> None:
             "stripe_payment_intent_id": "TEXT",
             "assigned_to": "TEXT NOT NULL DEFAULT ''",
             "priority": "TEXT NOT NULL DEFAULT 'normal'",
+            "measuring_timer_json": "TEXT",
         }
         for column, definition in migrations.items():
             if column not in existing_columns:
@@ -205,6 +207,7 @@ def _decode_request(conn: Any, row: Any) -> dict[str, Any]:
         "payment_status": str(row["payment_status"] or "not_required"),
         "assigned_to": str(row["assigned_to"] or ""),
         "priority": str(row["priority"] or "normal"),
+        "measuring_timer": _json_load(row["measuring_timer_json"], {}),
         "quoted_at": str(row["quoted_at"]) if row["quoted_at"] else None,
         "accepted_at": str(row["accepted_at"]) if row["accepted_at"] else None,
         "due_at": str(row["due_at"]) if row["due_at"] else None,
@@ -322,6 +325,35 @@ def get_request(
         return _decode_request(conn, row) if row else None
 
 
+class TakeoffConflict(ValueError):
+    pass
+
+
+def _advance_timer(timer: dict, action: str, now: datetime) -> dict:
+    previous = timer.get("state", "idle")
+    allowed = {
+        "start": {"idle"},
+        "resume": {"paused", "completed"},
+        "pause": {"running"},
+        "complete": {"running", "paused"},
+    }
+    if previous not in allowed[action]:
+        raise TakeoffConflict(f"Cannot {action} a {previous} measuring timer.")
+    running = action in {"start", "resume"}
+    elapsed = timer.get("elapsed_ms", 0)
+    if previous == "running":
+        start = datetime.fromisoformat(timer["started_at"])
+        elapsed += max(0, int((now - start).total_seconds() * 1000))
+    return {
+        **timer,
+        "state": "running" if running else ("completed" if action == "complete" else "paused"),
+        "started_at": _iso(now) if running else None,
+        "completed_at": _iso(now) if action == "complete" else None,
+        "elapsed_ms": elapsed,
+        "version": timer.get("version", 0) + 1,
+    }
+
+
 def update_request(
     request_id: str,
     *,
@@ -333,18 +365,50 @@ def update_request(
     delivered_project_id: str | None = None,
     assigned_to: str | None = None,
     priority: str | None = None,
+    timer_action: str | None = None,
+    timer_version: int | None = None,
+    expected_status: str | None = None,
+    delivered_layer_counts: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
     ensure_db_ready()
-    now = _iso()
     with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        lock = " FOR UPDATE" if conn.backend == "postgresql" else ""
         current = conn.execute(
-            "SELECT * FROM takeoff_requests WHERE id = ?", (str(request_id),)
+            "SELECT * FROM takeoff_requests WHERE id = ?" + lock, (str(request_id),)
         ).fetchone()
         if current is None:
             return None
+        if expected_status is not None and current["status"] != expected_status:
+            raise TakeoffConflict("Another update changed the job status. Refresh the board.")
+        clock = _now()
+        now = _iso(clock)
         fields = ["updated_at = ?"]
         values: list[Any] = [now]
         details: dict[str, Any] = {}
+        timer = _json_load(current["measuring_timer_json"], {})
+        state = timer.get("state", "idle")
+        if timer_action:
+            if current["status"] not in {"accepted", "in_progress"}:
+                raise TakeoffConflict("Measuring time can only be changed on an active, accepted job.")
+            if timer_version != timer.get("version", 0):
+                raise TakeoffConflict("Another update changed this timer. Check the refreshed time.")
+            if current["status"] == "accepted" and timer_action in {"start", "resume"}:
+                status = "in_progress"
+        elif status == "in_progress" and state != "running":
+            timer_action = "start" if state == "idle" else "resume"
+        elif status == "delivered" and state in {"running", "paused"}:
+            timer_action = "complete"
+        elif status == "canceled" and state == "running":
+            timer_action = "pause"
+        if timer_action:
+            timer = _advance_timer(timer, timer_action, clock)
+            details.update(timer_action=timer_action, elapsed_ms=timer["elapsed_ms"])
+        if status == "delivered" and timer and delivered_layer_counts is not None:
+            timer["layer_counts"] = delivered_layer_counts
+        if timer_action or (status == "delivered" and timer):
+            fields.append("measuring_timer_json = ?")
+            values.append(json.dumps(timer))
         if status is not None:
             fields.append("status = ?")
             values.append(status)
@@ -375,7 +439,6 @@ def update_request(
                 values.append(value)
                 details[column] = value
         values.append(str(request_id))
-        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             f"UPDATE takeoff_requests SET {', '.join(fields)} WHERE id = ?", values
         )
@@ -388,7 +451,7 @@ def update_request(
             (
                 str(request_id),
                 str(actor_user_id),
-                status or "updated",
+                status or (f"timer_{timer_action}" if timer_action else "updated"),
                 json.dumps(details, ensure_ascii=True),
                 now,
             ),

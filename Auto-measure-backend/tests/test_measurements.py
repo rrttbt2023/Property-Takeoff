@@ -1,6 +1,7 @@
 import base64
 import os
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -648,8 +649,65 @@ def test_managed_takeoff_quote_and_acceptance_workflow(monkeypatch) -> None:
         assert refreshed["status"] == "accepted"
         assert refreshed["payment_status"] == "paid"
         assert refreshed["due_at"]
+        assert "measuring_timer" not in refreshed
+        _check_staff_timer(monkeypatch, request_id, staff_headers, customer_headers, boundary, refreshed["due_at"])
     finally:
         _restore_shared_auth_env(previous)
+
+
+def _check_staff_timer(monkeypatch, request_id, staff, customer, polygon, due_at):
+    from app.repositories import takeoff_repository
+
+    now = datetime(2026, 11, 23, 12, tzinfo=UTC)
+    monkeypatch.setattr(takeoff_repository, "_now", lambda: now)
+    url = f"/api/takeoff-requests/{request_id}"
+
+    def command(action, version, headers=staff):
+        return client.patch(url, headers=headers, json={"timer": {"action": action, "version": version}})
+
+    assert command("start", 0, customer).status_code == 403
+    assert client.get(url, headers=staff).json()["measuring_timer"]["state"] == "idle"
+    started = command("start", 0).json()
+    assert started["status"] == "in_progress"
+    assert started["due_at"] == due_at
+    assert started["measuring_timer"]["state"] == "running"
+    now += timedelta(seconds=65)
+    assert command("pause", 0).status_code == 409
+    paused = command("pause", 1).json()["measuring_timer"]
+    assert paused["elapsed_ms"] == 65000
+    assert paused["state"] == "paused"
+    assert command("pause", 1).status_code == 409
+    now += timedelta(hours=9)
+    assert client.get(url, headers=staff).json()["measuring_timer"] == paused
+    assert command("resume", 2).json()["measuring_timer"]["state"] == "running"
+    now += timedelta(seconds=35)
+    completed = command("complete", 3).json()
+    assert completed["status"] == "in_progress"
+    assert completed["measuring_timer"]["elapsed_ms"] == 100000
+    assert completed["measuring_timer"]["state"] == "completed"
+    now += timedelta(minutes=30)
+    assert command("resume", 4).status_code == 200
+    now += timedelta(seconds=10)
+    project_id = "timer-delivery-test"
+    project = client.put(
+        f"/api/projects/{project_id}", headers=staff,
+        json={"id": project_id, "project_name": "Test site", "payload": {
+            "version": 1, "workflowMode": "location",
+            "layerFeatures": {"mulch": [polygon, polygon], "turf": [polygon]},
+        }},
+    )
+    assert project.status_code == 200, project.text
+    delivered = client.patch(url, headers=staff, json={"status": "delivered", "delivered_project_id": project_id})
+    assert delivered.status_code == 200, delivered.text
+    timer = delivered.json()["measuring_timer"]
+    assert timer["elapsed_ms"] == 110000
+    assert timer["state"] == "completed"
+    assert timer["layer_counts"] == {"mulch": 2, "turf": 1}
+    assert command("resume", timer["version"]).status_code == 409
+    assert "measuring_timer" not in client.get(url, headers=customer).json()
+    records = client.get("/api/takeoff-requests", headers=customer).json()
+    assert any(item["id"] == request_id for item in records)
+    assert all("measuring_timer" not in item for item in records)
 
 
 def test_stripe_checkout_and_webhook_unlock_workspace(monkeypatch) -> None:
