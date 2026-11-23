@@ -1091,7 +1091,7 @@ function HomeDashboard({
                     <strong>{takeoffEstimateLoading ? "Calculating..." : takeoffEstimateError ? "Estimate temporarily unavailable" : formatQuoteRange(takeoffEstimate?.low_cents, takeoffEstimate?.high_cents)}</strong>
                     {takeoffEstimate ? <div className="hd-takeoff-estimate-facts"><span><b>{Number(takeoffEstimate.estimated_square_feet).toLocaleString()}</b><small>square feet</small></span><span><b>{Number(takeoffEstimate.estimated_acres ?? (Number(takeoffEstimate.estimated_square_feet) / 43560)).toFixed(2)}</b><small>boundary acres</small></span><span><b>{takeoffForm.serviceTypes.length}</b><small>areas selected</small></span><span><b>{propertyTypeLabel(takeoffEstimate.property_type)}</b><small>property type</small></span></div> : <p>Choose an area and draw a boundary of at least 1,000 sq ft to calculate the range.</p>}
                     {takeoffForm.serviceTypes.length ? <div className="hd-takeoff-estimate-services">{takeoffForm.serviceTypes.map((service) => <span key={service}><Icon name="check" size={13} />{service}</span>)}</div> : null}
-                    <em>{takeoffEstimate?.disclaimer || "Your final price is confirmed after our team reviews the boundary, imagery, requested measurements, and site complexity."}</em>
+                    <em>Planning estimate only. Final price is confirmed after our team reviews the boundary, imagery, requested measurements, and site complexity.</em>
                   </div>
                 </aside>
                 <div className="hd-takeoff-field-grid hd-takeoff-supporting">

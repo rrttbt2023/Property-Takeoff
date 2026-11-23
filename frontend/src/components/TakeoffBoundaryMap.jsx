@@ -427,7 +427,20 @@ function TakeoffBoundaryMap({
       if (!Array.isArray(coordinates) || coordinates.length < 2) {
         throw new Error("Address not found");
       }
-      mapRef.current?.flyTo({ center: coordinates, zoom: 18, duration: 900 });
+      const map = mapRef.current;
+      if (map) {
+        await new Promise((resolve) => {
+          let timeoutId = 0;
+          const finishMove = () => {
+            window.clearTimeout(timeoutId);
+            map.off("moveend", finishMove);
+            resolve();
+          };
+          map.once("moveend", finishMove);
+          map.flyTo({ center: coordinates, zoom: 18, duration: 900 });
+          timeoutId = window.setTimeout(finishMove, 1_600);
+        });
+      }
       setMapStatus("Property found. Select Draw boundary, then trace the full area to measure.");
     } catch (error) {
       setMapStatus(error?.message === "Address not found"

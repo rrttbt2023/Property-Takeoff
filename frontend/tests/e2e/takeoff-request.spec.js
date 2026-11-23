@@ -44,6 +44,7 @@ test("a customer sees the guided boundary-based quote workflow", async ({ page }
   await expect(page.locator(".takeoff-boundary-map-shell")).toHaveAttribute("data-boundary-visible", "true");
   await expect(page.locator(".hd-takeoff-estimate")).not.toContainText("draw a boundary");
   await expect(page.locator(".hd-takeoff-estimate")).not.toContainText("/hr");
+  await expect(page.locator(".hd-takeoff-estimate")).not.toContainText("virtual measuring hour");
   await expect(page.getByRole("button", { name: "Submit Quote Request" })).toBeEnabled();
 });
 
