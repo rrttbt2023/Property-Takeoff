@@ -1,8 +1,12 @@
-const RAW_API_BASE = String(import.meta.env.VITE_API_BASE_URL || "").trim();
+const DEFAULT_PRODUCTION_API_BASE = "https://property-takeoff.onrender.com";
+const RAW_API_BASE = String(
+  import.meta.env.VITE_API_BASE_URL ||
+    (import.meta.env.PROD ? DEFAULT_PRODUCTION_API_BASE : "")
+).trim();
 const API_BASE_URL = RAW_API_BASE.replace(/\/+$/, "");
 const RAW_SHARED_API_BASE = String(
   import.meta.env.VITE_SHARED_API_BASE_URL ||
-    (import.meta.env.DEV ? "/shared-api" : "")
+    (import.meta.env.DEV ? "/shared-api" : RAW_API_BASE)
 ).trim();
 const SHARED_API_BASE_URL = RAW_SHARED_API_BASE.replace(/\/+$/, "");
 let sharedAuthToken = "";

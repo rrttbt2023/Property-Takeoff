@@ -20,4 +20,12 @@ test("a public customer can register and receives the membership offer", async (
   expect(stored.token || "").toBe("");
   expect(stored.csrfToken || "").toBe("");
   expect(stored.organizationId).toBeTruthy();
+  const session = await page.evaluate(() => {
+    const raw = sessionStorage.getItem("takeoff-shared-auth-session-v1");
+    return raw ? JSON.parse(raw) : {};
+  });
+  expect(session.token).toBeTruthy();
+
+  await page.reload();
+  await expect(page.getByTitle("Log out")).toBeVisible();
 });

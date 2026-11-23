@@ -51,6 +51,12 @@ from app.services.private_storage import delete_private_file
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _production_cookie() -> bool:
+    environment = str(os.getenv("AUTO_MEASURE_ENV", "")).strip().lower()
+    render_runtime = str(os.getenv("RENDER", "")).strip().lower()
+    return environment in {"prod", "production"} or render_runtime in {"1", "true", "yes", "on"}
+
+
 def _auth_response(session: dict, *, include_token: bool) -> dict:
     response = {
         "username": str(session.get("username") or ""),
@@ -75,24 +81,25 @@ def _auth_response(session: dict, *, include_token: bool) -> dict:
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
-    production = str(os.getenv("AUTO_MEASURE_ENV", "")).strip().lower() in {"prod", "production"}
+    production = _production_cookie()
     response.set_cookie(
         key="pt_session",
         value=str(token),
         max_age=int(float(os.getenv("AUTO_MEASURE_SHARED_AUTH_TTL_HOURS", "168")) * 3600),
         httponly=True,
         secure=production,
-        samesite="lax",
+        samesite="none" if production else "lax",
         path="/",
     )
 
 
 def _clear_session_cookie(response: Response) -> None:
+    production = _production_cookie()
     response.delete_cookie(
         key="pt_session",
         path="/",
-        secure=str(os.getenv("AUTO_MEASURE_ENV", "")).strip().lower() in {"prod", "production"},
-        samesite="lax",
+        secure=production,
+        samesite="none" if production else "lax",
     )
 
 

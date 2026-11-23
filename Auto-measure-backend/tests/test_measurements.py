@@ -128,6 +128,35 @@ def test_cookie_session_requires_csrf_for_writes() -> None:
         _restore_shared_auth_env(previous)
 
 
+def test_production_cookie_supports_cross_site_frontend() -> None:
+    previous = _set_shared_auth_env(
+        AUTO_MEASURE_SHARED_AUTH_USER="production-cookie-user",
+        AUTO_MEASURE_SHARED_AUTH_PASS="production-cookie-secret",
+    )
+    previous_environment = os.environ.get("AUTO_MEASURE_ENV")
+    os.environ["AUTO_MEASURE_ENV"] = "production"
+    try:
+        response = client.post(
+            "/api/auth/login",
+            json={
+                "username": "production-cookie-user",
+                "password": "production-cookie-secret",
+            },
+        )
+        assert response.status_code == 200
+        cookie = response.headers.get("set-cookie", "")
+        assert "HttpOnly" in cookie
+        assert "Secure" in cookie
+        assert "SameSite=none" in cookie
+    finally:
+        if previous_environment is None:
+            os.environ.pop("AUTO_MEASURE_ENV", None)
+        else:
+            os.environ["AUTO_MEASURE_ENV"] = previous_environment
+        client.cookies.clear()
+        _restore_shared_auth_env(previous)
+
+
 def test_password_reset_token_is_single_use() -> None:
     account = create_customer_account(
         email="password-reset@example.com",

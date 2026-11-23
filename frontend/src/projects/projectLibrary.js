@@ -9,6 +9,7 @@ export const PROJECT_FOLDER_COLLAPSE_STORAGE_KEY = "takeoff-project-folders-coll
 export const PROJECT_VERSION_HISTORY_STORAGE_KEY = "takeoff-project-version-history-v1";
 export const SHARED_PROJECT_QUEUE_STORAGE_KEY = "takeoff-shared-project-queue-v1";
 export const SHARED_AUTH_STORAGE_KEY = "takeoff-shared-auth-v1";
+export const SHARED_AUTH_SESSION_STORAGE_KEY = "takeoff-shared-auth-session-v1";
 export const HOME_PINNED_PROJECTS_STORAGE_KEY = "takeoff-home-pinned-projects-v1";
 export const HOME_PROJECT_PREVIEWS_STORAGE_KEY = "takeoff-home-project-previews-v1";
 export const HOME_RESUME_PROJECT_STORAGE_KEY = "takeoff-home-resume-project-v1";
@@ -345,10 +346,20 @@ export function readStoredSharedAuth() {
     const raw = window.localStorage.getItem(SHARED_AUTH_STORAGE_KEY);
     if (!raw) return empty;
     const parsed = JSON.parse(raw);
+    let session = {};
+    try {
+      session = JSON.parse(
+        window.sessionStorage.getItem(SHARED_AUTH_SESSION_STORAGE_KEY) || "{}"
+      );
+    } catch {
+      session = {};
+    }
     return {
-      token: "",
-      csrfToken: "",
-      authenticated: Boolean(parsed?.authenticated && parsed?.organizationId),
+      token: String(session?.token || "").trim(),
+      csrfToken: String(session?.csrfToken || "").trim(),
+      authenticated: Boolean(
+        parsed?.authenticated && parsed?.organizationId && session?.token
+      ),
       username: String(parsed?.username || "").trim(),
       email: String(parsed?.email || "").trim(),
       displayName: String(parsed?.displayName || "").trim(),
@@ -363,6 +374,33 @@ export function readStoredSharedAuth() {
     };
   } catch {
     return empty;
+  }
+}
+
+export function writeStoredSharedAuthSession(value) {
+  if (typeof window === "undefined") return;
+  const token = String(value?.token || "").trim();
+  const csrfToken = String(value?.csrfToken || value?.csrf_token || "").trim();
+  try {
+    if (!token) {
+      window.sessionStorage.removeItem(SHARED_AUTH_SESSION_STORAGE_KEY);
+      return;
+    }
+    window.sessionStorage.setItem(
+      SHARED_AUTH_SESSION_STORAGE_KEY,
+      JSON.stringify({ token, csrfToken })
+    );
+  } catch {
+    /* Session storage is optional; the in-memory token still works. */
+  }
+}
+
+export function clearStoredSharedAuthSession() {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(SHARED_AUTH_SESSION_STORAGE_KEY);
+  } catch {
+    /* Session storage is optional. */
   }
 }
 

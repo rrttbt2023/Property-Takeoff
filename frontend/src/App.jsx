@@ -86,6 +86,7 @@ import {
   PROJECT_VERSION_HISTORY_MAX_PER_PROJECT,
   PROJECT_VERSION_HISTORY_STORAGE_KEY,
   SHARED_AUTH_STORAGE_KEY,
+  clearStoredSharedAuthSession,
   SHARED_PROJECT_LIBRARY_FETCH_LIMIT,
   SHARED_PROJECT_QUEUE_STORAGE_KEY,
   WORKFLOW_MODE_LOCATION,
@@ -109,6 +110,7 @@ import {
   readStoredSharedAuth,
   readStoredSharedProjectQueue,
   readStoredWorkflowMode,
+  writeStoredSharedAuthSession,
   upsertProjectLibraryEntries,
   upsertSharedQueueOperation,
 } from "./projects/projectLibrary";
@@ -4857,6 +4859,10 @@ export default function App() {
 
   useEffect(() => {
     setSharedAuthToken(sharedAccessToken, sharedCsrfToken);
+    writeStoredSharedAuthSession({
+      token: sharedAccessToken,
+      csrfToken: sharedCsrfToken,
+    });
   }, [sharedAccessToken, sharedCsrfToken]);
 
   useEffect(() => {
@@ -4887,6 +4893,11 @@ export default function App() {
   }, [sharedAccessAuthenticated, sharedAuth]);
 
   useEffect(() => {
+    if (!sharedAccessAuthenticated && !sharedAccessToken) {
+      setSharedAuthChecking(false);
+      setSharedProjectLibraryStatus("locked");
+      return undefined;
+    }
     let canceled = false;
     setSharedAuthChecking(true);
     setSharedProjectLibraryStatus((prev) =>
@@ -4899,7 +4910,11 @@ export default function App() {
         if (canceled) return;
         const username = String(session?.username || sharedAuth?.username || "").trim();
         setSharedAuth((prev) => {
-          const next = buildSharedAuthState(session, "", username);
+          const next = buildSharedAuthState(
+            session,
+            prev?.token || sharedAccessToken,
+            username
+          );
           return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
         });
         setSharedLoginUsername(username);
@@ -4912,7 +4927,7 @@ export default function App() {
             token: "",
             csrfToken: "",
             authenticated: false,
-            username: String(prev?.username || sharedLoginUsername || "").trim(),
+            username: String(prev?.username || "").trim(),
             expiresAt: "",
           }));
           setSharedProjectLibraryStatus("locked");
@@ -4928,7 +4943,12 @@ export default function App() {
     return () => {
       canceled = true;
     };
-  }, [pushToast, sharedAuth?.username, sharedLoginUsername]);
+  }, [
+    pushToast,
+    sharedAccessAuthenticated,
+    sharedAccessToken,
+    sharedAuth?.username,
+  ]);
 
   const refreshSharedProjectLibrary = useCallback(
     async ({ quiet = true } = {}) => {
@@ -5363,6 +5383,7 @@ export default function App() {
             SHARED_AUTH_STORAGE_KEY,
             JSON.stringify(buildPersistedSharedAuthState(nextAuth))
           );
+          writeStoredSharedAuthSession(nextAuth);
           window.sessionStorage.setItem("property-takeoff-membership-prompt", "1");
           for (const key of [
             PROJECT_VERSION_HISTORY_STORAGE_KEY,
@@ -5424,6 +5445,7 @@ export default function App() {
             SHARED_AUTH_STORAGE_KEY,
             JSON.stringify(buildPersistedSharedAuthState(nextAuth))
           );
+          writeStoredSharedAuthSession(nextAuth);
           for (const key of [
             PROJECT_VERSION_HISTORY_STORAGE_KEY,
             HOME_PINNED_PROJECTS_STORAGE_KEY,
@@ -5459,6 +5481,7 @@ export default function App() {
         /* intentionally ignore non-critical auth/logout errors */
       }
     }
+    clearStoredSharedAuthSession();
     setProjectLibrary((prev) =>
       (Array.isArray(prev) ? prev : []).filter(
         (entry) => String(entry?.storageScope || "").trim().toLowerCase() !== "shared"
