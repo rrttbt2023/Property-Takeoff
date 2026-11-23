@@ -8,7 +8,7 @@ python-multipart==0.0.22
 shapely==2.1.2
 torch==2.10.0
 torchvision==0.25.0
-stripe==15.6.1
+stripe==17.1.0
 psycopg[binary]>=3.2.10,<4
 boto3>=1.40.0,<2
 sentry-sdk[fastapi]>=2.40.0,<3
