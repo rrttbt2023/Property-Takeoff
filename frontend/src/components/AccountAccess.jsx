@@ -12,6 +12,8 @@ import PublicTour from "./PublicTour";
 import SiteComparison from "./SiteComparison";
 import { readStartIntent, setStartIntent } from "./startIntent";
 
+const compactAccess = "(max-width: 759px), (max-height: 540px) and (orientation: landscape)";
+
 function AccountAccess({
   checking,
   loginUsername,
@@ -26,6 +28,14 @@ function AccountAccess({
   const [intent, setIntent] = useState(readStartIntent);
   const [mode, setMode] = useState(() => intent ? "register" : "login");
   const [tourOpen, setTourOpen] = useState(false);
+  const [compact, setCompact] = useState(() => window.matchMedia(compactAccess).matches);
+  const [authOpen, setAuthOpen] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia(compactAccess);
+    const refresh = () => setCompact(query.matches);
+    query.addEventListener("change", refresh);
+    return () => query.removeEventListener("change", refresh);
+  }, []);
   const start = (choice) => {
     setTourOpen(false);
     setStartIntent(choice);
@@ -34,6 +44,7 @@ function AccountAccess({
     setMode("register");
   };
   const closeSignup = () => {
+    setAuthOpen(false);
     setStartIntent("");
     setIntent("");
     setAccountMessage("");
@@ -67,6 +78,7 @@ function AccountAccess({
     const params = new URLSearchParams(window.location.search);
     const verificationToken = String(params.get("verify") || "").trim();
     const resetToken = String(params.get("reset") || "").trim();
+    if (resetToken || verificationToken) setAuthOpen(true);
     if (resetToken) setMode("reset");
     if (!verificationToken) return;
     setAccountWorking(true);
@@ -108,7 +120,7 @@ function AccountAccess({
       script.removeEventListener("load", render);
       if (widgetId != null) window.turnstile?.remove(widgetId);
     };
-  }, [mode, intent, checking, turnstileSiteKey]);
+  }, [mode, intent, checking, turnstileSiteKey, compact, authOpen]);
 
   const updateRegistration = (key, value) => {
     setRegistration((previous) => ({ ...previous, [key]: value }));
@@ -125,8 +137,7 @@ function AccountAccess({
 
   const accountPanel = (
       <section className="account-access-panel">
-        {intent && <div className="signup-path"><strong>{intent === "measure" ? "Measure it myself" : "Request a measured takeoff"}</strong>
-          <span>{intent === "measure" ? "1. Account / 2. Secure checkout / 3. Measure" : "1. Free account / 2. Submit your site"}</span></div>}
+        {intent && <div className="signup-path"><span>{intent === "measure" ? "1. Account / 2. Secure checkout / 3. Measure" : "1. Free account / 2. Submit your site"}</span></div>}
         <div className="account-access-tabs" role="tablist">
           <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Sign in</button>
           <button type="button" className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>Create account</button>
@@ -145,8 +156,8 @@ function AccountAccess({
             <small>McKenna staff can continue using the existing shared-login credentials.</small>
           </form>
         ) : mode === "register" ? (
-          <form className="account-access-form" onSubmit={(event) => submitAuth(event, onRegister, registration)}>
-            <div><span>{intent === "quote" ? "Managed takeoff" : "Start measuring"}</span><h2>{intent === "measure" ? "Get started with Basic." : intent === "quote" ? "Start your quote request." : "Create your company workspace."}</h2><p>{intent === "quote" ? "Next, outline your site and request a measurement quote. No subscription is needed." : intent === "measure" ? "Create your account, then review the $9.99 monthly subscription in secure checkout. Measuring unlocks after your membership is confirmed." : "Registration is free. Choose the $9.99 Basic plan when you are ready to use the measuring tools."}</p></div>
+          <form className="account-access-form account-registration" onSubmit={(event) => submitAuth(event, onRegister, registration)}>
+            <div><h2>{intent === "measure" ? "Get started with Basic." : intent === "quote" ? "Start your quote request." : "Create your company workspace."}</h2><p>{intent === "quote" ? "Next, outline your site for a quote. No subscription needed." : intent === "measure" ? "Next: secure checkout for Basic at $9.99/month. Membership unlocks measuring." : "Start free. Add Basic for $9.99/month when you want to measure."}</p></div>
             <label>Your name<input value={registration.displayName} onChange={(event) => updateRegistration("displayName", event.target.value)} autoComplete="name" placeholder="Alex Smith" /></label>
             <label>Company name<input value={registration.organizationName} onChange={(event) => updateRegistration("organizationName", event.target.value)} autoComplete="organization" placeholder="Evergreen Services" /></label>
             <label>Work email<input type="email" value={registration.email} onChange={(event) => updateRegistration("email", event.target.value)} autoComplete="email" placeholder="alex@company.com" /></label>
@@ -204,19 +215,28 @@ function AccountAccess({
         <div className="account-access-brand">
           <img src="/logo.png" alt="McKenna Site Management" />
           <div><strong>Property Takeoff</strong><span>by McKenna Site Management</span></div>
+          {compact && <nav aria-label="Account access">{[["login","Sign in"],["register","Create account"]].map(([tab,label]) =>
+            <button key={tab} type="button" onClick={() => {
+              setAccountMessage(""); setMode(tab); setAuthOpen(true);
+            }}>{label}</button>)}</nav>}
         </div>
         <div className="account-access-copy">
+          <div className="account-access-intro">
           <span className="account-access-kicker">Snow and landscape estimating</span>
-          <h1>Measure confidently.<br />Quote the property.<br /><em>Win the work.</em></h1>
-          <p>Build accurate map and plan takeoffs yourself, or send a site to our measurement team for delivery within 24 hours.</p>
+          <h1>Measure confidently.<br /><em>Win the work.</em></h1>
+          <p>Measure a map or plan yourself, or send a site to our takeoff team.</p>
           <button type="button" className="account-tour-trigger" onClick={() => setTourOpen(true)}>Take a tour <span aria-hidden="true">&rarr;</span></button>
+          </div>
+          <div className="account-access-example">
           <SiteComparison onStart={start} />
-          <small className="field-study-terms">Self-service: $9.99/month. Managed takeoffs: quoted per site, delivered within 24 hours of approval.</small>
+          <small className="field-study-terms">Self-service: $9.99/month. Managed: quoted per site, delivered within 24 hours of approval.</small>
+          </div>
         </div>
       </section>
 
-      {intent ? <PublicDialog label={intent === "measure" ? "Measuring membership signup" : "Takeoff quote signup"}
-        busy={loginSubmitting || registerSubmitting} onClose={closeSignup}>{accountPanel}</PublicDialog> : accountPanel}
+      {intent || (compact && authOpen) ? <PublicDialog title={intent === "measure" ? "Measure it myself" : intent === "quote" ? "Request a measured takeoff" : "Account access"}
+        label={intent === "measure" ? "Measuring membership signup" : intent === "quote" ? "Takeoff quote signup" : "Account access"}
+        busy={loginSubmitting || registerSubmitting} onClose={closeSignup}>{accountPanel}</PublicDialog> : !compact && accountPanel}
       {tourOpen && <PublicTour onClose={() => setTourOpen(false)} onStart={start} />}
     </main>
   );

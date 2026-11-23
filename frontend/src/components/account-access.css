@@ -5,9 +5,11 @@
   color: #f7fbf3;
   display: grid;
   font-family: "Avenir Next", "Trebuchet MS", sans-serif;
-  grid-template-columns: minmax(0, 1.2fr) minmax(380px, .8fr);
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, .85fr);
   min-height: 100vh;
+  min-height: 100svh;
 }
+.account-access, .account-access * { box-sizing: border-box; }
 
 .account-access-story {
   background:
@@ -17,8 +19,8 @@
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  min-height: 100vh;
-  padding: clamp(28px, 5vw, 72px);
+  min-width: 0;
+  padding: clamp(16px, 3vh, 36px) clamp(18px, 3.2vw, 58px);
 }
 
 .account-access-brand { align-items: center; display: flex; gap: 14px; }
@@ -30,23 +32,29 @@
 .account-access-kicker { color: #9fdc67; font-size: 13px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
 .account-access-copy h1 { font-family: Georgia, serif; font-size: clamp(48px, 5.4vw, 82px); letter-spacing: -.045em; line-height: .94; margin: 18px 0 24px; }
 .account-access-copy h1 em { color: var(--aa-green); font-style: normal; }
-.account-access-copy > p { color: #d5e0da; font-size: clamp(17px, 1.35vw, 21px); line-height: 1.6; max-width: 590px; }
+.account-access-intro > p { color: #d5e0da; font-size: clamp(15px, 1.12vw, 18px); line-height: 1.4; margin: 0; max-width: 42ch; }
+.account-access-intro { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 5px 14px; }
+.account-access-intro > :not(button) { grid-column: 1; }
+.account-access-intro .account-tour-trigger { grid-column: 2; grid-row: 2; }
+.account-access-brand nav { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.account-access-brand nav button { min-height: 44px; border: 0; border-radius: 8px; background: transparent; color: #fff; cursor: pointer; padding: 0 8px; font-family: inherit; font-size: 13px; line-height: 1.2; font-weight: 700; }
+.account-access-brand nav button:last-child { background: #1f3c30; border: 1px solid #71947a; }
 .account-access-offers { display: flex; gap: 12px; margin-top: 34px; }
 .account-access-offers span { backdrop-filter: blur(10px); background: rgba(4, 16, 19, .7); border: 1px solid rgba(137, 190, 99, .3); border-radius: 14px; display: grid; gap: 3px; padding: 16px 20px; }
 .account-access-offers strong { color: #a5e46d; font-size: 25px; }
 .account-access-offers small { color: #c5d2ca; max-width: 220px; }
 
-.account-access-panel { align-self: center; background: #f7faf5; border-radius: 24px; box-shadow: 0 30px 90px rgba(0, 0, 0, .42); color: var(--aa-ink); margin: 28px clamp(24px, 5vw, 72px) 28px clamp(12px, 3vw, 46px); overflow: hidden; }
-.account-access-tabs { background: #e8eee7; display: grid; grid-template-columns: 1fr 1fr; padding: 6px; }
+.account-access-panel { align-self: center; background: #f7faf5; border-radius: 24px; box-shadow: 0 30px 90px rgba(0, 0, 0, .42); color: var(--aa-ink); margin: 16px clamp(14px, 3vw, 60px) 16px clamp(8px, 1.5vw, 24px); min-width: 0; }
+.account-access-tabs { background: #e8eee7; border-radius: inherit; border-bottom-left-radius: 0; border-bottom-right-radius: 0; display: grid; grid-template-columns: 1fr 1fr; padding: 4px; }
 .account-access-tabs button { background: transparent; border: 0; border-radius: 12px; color: #52615a; cursor: pointer; font: inherit; font-weight: 800; padding: 13px; }
 .account-access-tabs button.active { background: #fff; box-shadow: 0 4px 18px rgba(16, 42, 28, .1); color: #173c27; }
-.account-access-form { display: grid; gap: 17px; padding: clamp(28px, 4vw, 54px); }
+.account-access-form { display: grid; gap: clamp(8px, 1.5vh, 16px); padding: clamp(16px, 2.2vw, 34px); }
 .account-access-form > div span { color: #3a8f31; font-size: 12px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
 .account-access-form h2 { font-family: Georgia, serif; font-size: 34px; letter-spacing: -.025em; line-height: 1.05; margin: 9px 0; }
 .account-access-form p { color: #637069; line-height: 1.5; margin: 0 0 7px; }
 .account-access-form label { color: #334039; display: grid; font-size: 13px; font-weight: 800; gap: 7px; }
 .account-access-form label > small { color: #78857d; font-size: 10px; font-weight: 700; }
-.account-access-form input { background: #fff; border: 1px solid #ccd7ce; border-radius: 10px; color: #102119; font: inherit; min-height: 46px; padding: 0 13px; }
+.account-access-form input { background: #fff; border: 1px solid #ccd7ce; border-radius: 10px; color: #102119; font: inherit; font-size: 16px; min-width: 0; width: 100%; min-height: 44px; padding: 0 10px; }
 .account-access-form input:focus { border-color: #4b9d3d; box-shadow: 0 0 0 3px rgba(75, 157, 61, .14); outline: 0; }
 .account-access-form > button { background: linear-gradient(135deg, #1f6b2f, #54a934); border: 0; border-radius: 10px; color: #fff; cursor: pointer; font: inherit; font-weight: 900; min-height: 50px; padding: 0 18px; }
 .account-access-form > button:disabled { cursor: wait; opacity: .6; }
@@ -64,9 +72,11 @@
 .account-access-mark span { animation: account-pulse 1.4s ease-in-out infinite; border: 2px solid #6cbd42; border-radius: 50%; height: 92px; position: absolute; width: 92px; }
 @keyframes account-pulse { 50% { opacity: .2; transform: scale(.86); } }
 
-.account-access-story:has(.field-study) { justify-content: center; gap: clamp(24px, 4vh, 56px); }
-.account-access-copy:has(.field-study) { padding: 0; width: 100%; }
-.account-access-copy:has(.field-study) h1 { font-size: clamp(38px, 4.2vw, 62px); }
+.account-access-story:has(.field-study) { justify-content: center; gap: clamp(12px, 2.5vh, 32px); }
+.account-access-copy:has(.field-study) { padding: 0; width: 100%; max-width: 840px; display: grid; gap: clamp(10px, 2vh, 24px); }
+.account-access-copy:has(.field-study) h1 { font-size: clamp(32px, min(4vw, 6.4vh), 64px); margin: 0; }
+.account-access-example { min-width: 0; }
+.account-access-example .field-study { margin: 0 0 6px; }
 .field-study { margin: 24px 0 10px; overflow: hidden; background: #0b2020; border: 1px solid #51645b; border-radius: 12px; }
 .field-study header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 9px 14px; }
 .field-study header { justify-content: space-between; color: #dbebd9; font-size: 11px; letter-spacing: .09em; text-transform: uppercase; }
@@ -110,8 +120,11 @@
 .public-dialog-bar button { color: #fff; background: transparent; border: 0; }
 .public-dialog .account-access-panel { margin: 0; border-radius: 0; box-shadow: none; }
 .public-dialog .account-access-form { padding: 20px clamp(16px, 5vw, 34px); gap: 12px; }
+.account-registration { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.account-registration > * { grid-column: 1 / -1; }
+.account-registration > label:nth-of-type(-n+2) { grid-column: auto; }
+.account-access-form label { min-width: 0; }
 .signup-path { padding: 16px 20px; color: #16392e; display: grid; gap: 4px; }
-.signup-path strong { font: 600 23px Georgia, serif; }
 .signup-path span, .tour-sample > small, .tour-guide > small { color: #416352; font-weight: 750; font-size: 12px; letter-spacing: .04em; }
 .tour-content { padding: clamp(14px,3vw,25px); }
 .tour-track, .tour-footer, .tour-choices { display: flex; gap: 8px; }
@@ -138,17 +151,121 @@
 .tour-footer button, .tour-sample button { border: 1px solid #abbdac; background: #fff; color: #1d5138; padding: 7px 14px; }
 .tour-footer button + button { background: #215f42; color: #fff; border-color: #215f42; }
 
-@media (max-width: 900px) {
-  .account-access { display: block; }
-  .account-access-story { min-height: 520px; }
-  .account-access-panel { margin: 18px 16px 24px; position: relative; }
+/* Size the whole aerial frame, not the photo alone: the slider and traced
+   surfaces must keep the same coordinates at every viewport size. */
+.field-study-map { width: min(100%, 58svh); margin-inline: auto; }
+.tour-content .field-study-map { width: min(100%, 46svh); }
+.field-study-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+@media (min-width: 1050px) {
+  .account-access-example .field-study { display: grid; grid-template-columns: minmax(0, 1fr) minmax(128px, 26%); }
+  .account-access-example .field-study header, .account-access-example .field-study-actions { grid-column: 1 / -1; }
+  .account-access-example .field-study-key { align-self: center; }
+  .account-access-example .field-study-layers { grid-template-columns: 1fr; }
+  .account-access-example .field-study-map { align-self: center; }
+  .account-access-example .field-study-actions { padding-top: 9px; }
 }
-
-@media (max-width: 560px) {
-  .account-access-story { min-height: 500px; padding: 24px; }
-  .account-access-copy { padding-top: 50px; }
-  .account-access-copy h1 { font-size: 43px; }
-  .account-access-offers { align-items: stretch; flex-direction: column; }
-  .account-access-panel { border-radius: 18px; }
-  .account-access-form { padding: 28px 22px; }
+@media (max-width: 1049px) {
+  .account-access-intro { grid-template-columns: 1fr; }
+  .account-access-intro .account-tour-trigger { grid-column: 1; grid-row: auto; justify-self: start; }
+  .field-study-layers { grid-template-columns: repeat(4,minmax(0,1fr)); }
+  .field-study-layers button { gap: 4px; padding: 4px; font-size: 11px; }
+}
+@media (max-width: 759px), (max-height: 540px) and (orientation: landscape) {
+  .account-access { grid-template-columns: 1fr; }
+  .account-access-story { align-items: center; padding: 12px clamp(12px, 3vw, 32px); }
+  .account-access-brand, .account-access-copy:has(.field-study) { width: 100%; max-width: 680px; }
+  .account-access-brand { gap: 6px; }
+  .account-access-brand img { width: 37px; height: 37px; }
+  .account-access-brand strong { font-size: 18px; }
+  .account-access-brand span { font-size: 9px; letter-spacing: .03em; }
+  .account-access-intro { grid-template-columns: minmax(0,1fr) auto; gap: 6px; }
+  .account-access-intro .account-tour-trigger { grid-column: 2; grid-row: 2; padding-inline: 12px; }
+  .account-access-intro > p, .account-access-kicker { grid-column: 1 / -1; }
+  .account-access-kicker { font-size: 11px; }
+  .field-study-key { padding: 7px 8px; }
+  .public-dialog .account-access-form { padding: 12px 16px; gap: 8px; }
+  .public-dialog .account-access-form h2 { font-size: 25px; margin: 4px 0; }
+  .signup-path { padding: 8px 16px; }
+  .tour-content { padding: 12px; }
+  .tour-guide { margin: 8px 0; padding: 8px 10px; }
+  .tour-footer { margin-top: 8px; }
+}
+@media (min-width: 620px) and (max-height: 540px) and (orientation: landscape) {
+  .account-access-brand, .account-access-copy:has(.field-study) { max-width: 1060px; }
+  .account-access-copy:has(.field-study) { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); align-items: center; }
+  .account-access-intro { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  .account-access-intro .account-tour-trigger { grid-column: 1; grid-row: auto; }
+  .account-access-example .field-study { display: block; }
+  .account-access-example .field-study-map { width: min(100%, 46svh); }
+  .account-access-example .field-study-layers { grid-template-columns: repeat(4,minmax(0,1fr)); }
+  .public-dialog-wide { width: min(920px, calc(100% - 24px)); }
+  .tour-content { display: grid; grid-template-columns: minmax(0,.8fr) minmax(0,1.2fr); gap: 8px 12px; }
+  .tour-track, .tour-footer { grid-column: 1 / -1; }
+  .tour-guide { align-self: start; margin: 0; }
+  .tour-content .field-study-map { width: min(100%, 32svh); }
+  .tour-boundary img, .tour-plan svg { max-height: 20svh; }
+}
+@media (max-width: 359px) {
+  .account-access-intro { grid-template-columns: 1fr; }
+  .account-access-intro .account-tour-trigger { grid-column: 1; grid-row: auto; }
+  .account-access-brand nav { gap: 0; }
+  .account-access-brand nav button { padding-inline: 4px; }
+  .account-registration { grid-template-columns: 1fr; }
+}
+.account-registration > label:nth-of-type(3), .account-registration > label:nth-of-type(4) { grid-column: 1 / -1; }
+@media (min-width: 450px) {
+  .account-registration > label:nth-of-type(-n+4) { grid-column: auto; }
+}
+.field-study-terms { display: block; line-height: 1.35; }
+.tour-content .tour-boundary img { max-height: min(180px,22svh); }
+.tour-content .field-study-map { width: min(100%, 40svh); }
+@media (max-height: 800px) {
+  .account-access-story { padding-block: 12px; }
+  .account-access-example .field-study-map { width: min(100%, 50svh); }
+  .account-access-form h2 { font-size: 27px; margin: 4px 0; }
+  .account-access-form p { font-size: 15px; margin-bottom: 0; }
+  .public-dialog .account-access-form { padding: 12px 16px; gap: 8px; }
+  .signup-path { padding: 8px 16px; }
+  .tour-content { padding: 12px; }
+  .tour-guide { margin-block: 8px; }
+}
+@media (max-width: 759px) {
+  .account-access-brand img { flex-shrink: 0; }
+  .account-access-brand strong { line-height: 1.1; }
+  .account-access-brand nav { flex-shrink: 0; }
+  .account-access-brand nav button { padding-inline: 6px; }
+  .account-access-intro > h1 { grid-column: 1 / -1; }
+  .account-access-intro > .account-access-kicker { grid-column: 1 / -1; }
+  .account-access-intro .account-tour-trigger { grid-row: 3; }
+  .account-access-intro > p { grid-column: 1; grid-row: 3; }
+  .account-access-intro .account-tour-trigger span { margin-left: 2px; }
+}
+@media (max-width: 759px) and (max-height: 740px) {
+  .account-access-example .field-study-map { width: min(100%, 42svh); }
+  .account-access-copy:has(.field-study), .account-access-story:has(.field-study) { gap: 8px; }
+  .public-dialog { max-height: calc(100dvh - 12px); }
+  .public-dialog .account-access-form label { gap: 3px; }
+  .public-dialog .account-access-form { gap: 6px; }
+  .public-dialog .account-access-form p { line-height: 1.35; }
+  .tour-guide p, .tour-sample p { line-height: 1.35; }
+}
+@media (min-width: 620px) and (max-height: 540px) and (orientation: landscape) {
+  .account-access-example .field-study-map { width: min(100%, 39svh); }
+  .public-dialog { width: min(940px,calc(100% - 16px)); max-height: calc(100dvh - 8px); }
+  .public-dialog-bar, .public-dialog .account-access-form { padding-block: 0; }
+  .public-dialog .account-access-panel { display: grid; grid-template-columns: minmax(130px,24%) 1fr; padding: 8px; gap: 6px 14px; align-content: start; }
+  .public-dialog .account-access-tabs { grid-column: 1; align-self: start; display: flex; flex-direction: column; }
+  .public-dialog .account-access-form { grid-column: 2; grid-row: 1 / span 3; padding: 2px 4px; gap: 4px 12px; }
+  .public-dialog .account-access-form h2 { font-size: 22px; }
+  .public-dialog .account-access-form label { gap: 2px; }
+  .public-dialog .account-access-form > button { min-height: 44px; }
+  .public-dialog .account-access-form:not(.account-registration) { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .public-dialog .account-access-form:not(.account-registration) > :is(div,small) { grid-column: 1 / -1; }
+  .public-dialog .account-access-message { grid-column: 1; }
+  .tour-content .field-study-map { width: min(100%, 25svh); }
+  .tour-content .tour-boundary img, .tour-content .tour-plan svg { max-height: 16svh; }
+  .tour-content .tour-boundary { margin-block: 2px; }
+  .tour-sample { padding: 6px; }
+  .tour-track, .tour-footer { margin: 0; }
+  .tour-guide { margin: 0; }
 }

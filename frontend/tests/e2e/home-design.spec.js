@@ -62,6 +62,9 @@ test("public comparison keeps the aerial fixed and independently toggles all fou
   await demo.getByRole("slider").press("End");
   await expect(overlay.locator("clipPath rect")).toHaveAttribute("width", "0");
   await page.getByRole("button", { name: "Create account", exact: true }).click();
+  const access = page.getByRole("dialog", { name: "Account access" });
+  await expect(access.getByLabel("Work email")).toBeVisible();
+  await access.getByRole("button", { name: "Close Account access" }).click();
   await expect(key.getByRole("button", { name: "Mulch beds" })).toBeVisible();
   expect(await sameFrame()).toBe(true);
 });
