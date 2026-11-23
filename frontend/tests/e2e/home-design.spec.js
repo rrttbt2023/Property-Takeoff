@@ -4,34 +4,77 @@ import { Buffer } from "node:buffer";
 
 test.use({ viewport: { width: 820, height: 1180 }, hasTouch: true });
 
-test("a guest can tour all work areas and choose either signup without submitting anything", async ({ page }) => {
-  const writes = [];
-  page.on("request", request => {
-    if (request.url().includes("/api/") && request.method() === "POST") writes.push(request.url());
-  });
+test("a visitor can try the actual application without sharing data or changing a saved project", async ({ page }) => {
   await page.goto("/");
-  const launch = page.getByRole("button", { name: "Take a tour" });
-  await launch.click();
-  const tour = page.getByRole("dialog", {name: "Guided tour"});
-  await tour.getByRole("button", {name: /Open measured property/}).click();
-  await tour.getByRole("button", {name: "Mulch beds"}).click();
-  await tour.getByRole("button", {name: /^Next step/}).click();
-  await tour.getByRole("button", {name: "Calibrate with 60 ft"}).click();
-  await expect(tour.getByText("2,400 sq ft")).toBeVisible();
-  await tour.getByRole("button", {name: /^Next step/}).click();
-  await tour.getByRole("button", {name: "Show sample boundary"}).click();
-  await expect(tour.locator(".tour-boundary path")).toBeVisible();
-  await tour.getByRole("button", {name: /^Next step/}).click();
-  await tour.getByRole("button", {name: /Sign up for the monthly plan/}).click();
-  await expect(page.getByRole("dialog", {name: "Measuring membership signup"})).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  expect(new URL(page.url()).searchParams.has("start")).toBe(false);
-  await launch.click();
-  await tour.getByRole("button", {name: "Step 5: Next steps"}).click();
-  await tour.getByRole("button", {name: /Request a measured takeoff/}).click();
-  await expect(page.getByRole("dialog", {name:"Takeoff quote signup"})).toBeVisible();
-  expect(writes).toEqual([]);
+  await page.getByRole("button", { name: "Take a tour" }).click();
+  await expect(page).toHaveURL(/tour=1/);
+  const api = [];
+  const errors = [];
+  page.on("request", req => { if (/\/api\//.test(new URL(req.url()).pathname)) api.push(req.method()); });
+  page.on("pageerror", err => errors.push(err.message));
+  const initialStorage = await page.evaluate(() => [JSON.stringify(localStorage),JSON.stringify(sessionStorage)]);
+  await expect(page.locator(".hd-main h1")).toHaveText("Project Dashboard");
+  await page.getByRole("button",{name:"Location Projects",exact:true}).click();
+  await page.getByRole("button",{name:/Evergreen Office.*Location takeoff/}).click();
+  await expect(page.locator(".sidebar")).toContainText("Active Editing Layer");
+  await page.locator(".sidebar").getByRole("button",{name:"Mulch",exact:true}).click();
+  const next = page.getByRole("button",{name:"Next step",exact:true});
+  await next.click();
+  await expect(page.getByRole("img",{name:"Evergreen service plan.pdf",exact:true})).toBeVisible();
+  await page.locator(".sidebar").getByRole("button",{name:"Pen",exact:true}).click();
+  const sheet = await page.getByRole("img",{name:"Evergreen service plan.pdf"}).boundingBox();
+  await page.mouse.move(sheet.x+sheet.width*.45,sheet.y+sheet.height*.55);
+  await page.mouse.down();
+  await page.mouse.move(sheet.x+sheet.width*.65,sheet.y+sheet.height*.65,{steps:6});
+  await page.mouse.up();
+  await expect(page.getByRole("button",{name:"Undo Last Markup"})).toBeEnabled();
+  await next.click();
+  await page.getByLabel("Measured project").selectOption("tour-site");
+  await expect(page.getByText("Measured quantities loaded from the selected project.")).toBeVisible();
+  await next.click();
+  await expect(page.getByRole("heading",{name:"Managed Takeoffs",exact:true})).toBeVisible();
+  await page.locator(".hd-takeoff-services input").first().check();
+  await expect(page.getByRole("region",{name:"Property boundary map"})).toBeVisible();
+  await page.getByRole("button",{name:"Draw boundary",exact:true}).click();
+  const map = page.locator(".takeoff-boundary-map canvas");
+  for (const [x,y] of [[80,70],[180,70],[160,150]]) await map.click({position:{x,y}});
+  await page.getByRole("button",{name:"Finish boundary",exact:true}).click();
+  await expect(page.locator(".takeoff-boundary-area")).toContainText("sq ft");
+  await next.click();
+  const finish = page.getByRole("dialog",{name:"Finish workspace tour"});
+  await expect(finish).toBeVisible();
+  expect(await page.evaluate(() => [JSON.stringify(localStorage),JSON.stringify(sessionStorage)])).toEqual(initialStorage);
+  expect(api).toEqual([]);
+  expect(errors).toEqual([]);
+  await finish.getByRole("button",{name:/Sign up for the monthly plan/}).click();
+  await expect(page.getByRole("dialog",{name:"Measuring membership signup"})).toBeVisible();
+});
+
+test("even on a shared device the guest tour never opens account data or recovery storage", async ({ page }) => {
+  await page.addInitScript(() => {
+    if (!new URLSearchParams(location.search).has("tour")) return;
+    localStorage.setItem("takeoff-project-library-v1", JSON.stringify([{id:"private",projectName:"Private fixture",storageScope:"shared"}]));
+    localStorage.setItem("takeoff-shared-auth-v1", JSON.stringify({authenticated:true,username:"Private fixture"}));
+    const open = IDBFactory.prototype.open;
+    window.recoveryOpens = 0;
+    IDBFactory.prototype.open = function(name,...args) {
+      if (name === "property-takeoff-recovery") window.recoveryOpens++;
+      return open.call(this,name,...args);
+    };
+  });
+  const api = [];
+  await page.route("**/api/**", route => { api.push(route.request().method()); return route.abort(); });
+  await page.goto("/?tour=1");
+  await expect(page.locator(".hd-main")).toContainText("Evergreen Office");
+  await expect(page.locator("body")).not.toContainText("Private fixture");
+  await page.getByRole("button",{name:"Managed Takeoffs",exact:true}).click();
+  await expect(page.getByRole("heading",{name:"Managed Takeoffs",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"Next step"}).click();
+  expect(await page.evaluate(() => window.recoveryOpens)).toBe(0);
+  expect(api).toEqual([]);
+  await page.unroute("**/api/**");
+  await page.getByRole("dialog").getByRole("button",{name:/Request a measured takeoff/}).click();
+  await expect(page.getByRole("dialog",{name:"Takeoff quote signup"})).toBeVisible();
 });
 
 test("public comparison keeps the aerial fixed and independently toggles all four measured surfaces", async ({ page }) => {

@@ -1,3 +1,4 @@
+import { workspaceStorage } from "../tour/guestRuntime.js";
 import { isValidProjectPayload } from "../projectSchema";
 
 const LAYER_KEYS = ["plowable", "sidewalks", "turf", "mulch"];
@@ -23,7 +24,7 @@ export const DEFAULT_PROJECT_FOLDER_NAME = "Unfiled";
 export function readStoredWorkflowMode() {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(WORKFLOW_MODE_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(WORKFLOW_MODE_STORAGE_KEY);
     if (raw === WORKFLOW_MODE_LOCATION || raw === WORKFLOW_MODE_PDF) return raw;
   } catch {
     /* Local storage is optional. */
@@ -55,7 +56,7 @@ export function countProjectPayloadPolygons(payload) {
 export function readStoredProjectLibrary() {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(PROJECT_LIBRARY_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(PROJECT_LIBRARY_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -117,7 +118,7 @@ export function readStoredProjectLibrary() {
 export function readStoredProjectFolders() {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(PROJECT_FOLDER_LIBRARY_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(PROJECT_FOLDER_LIBRARY_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -145,7 +146,7 @@ export function readStoredProjectFolders() {
 export function readStoredProjectFolderCollapseState() {
   if (typeof window === "undefined") return {};
   try {
-    const raw = window.localStorage.getItem(PROJECT_FOLDER_COLLAPSE_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(PROJECT_FOLDER_COLLAPSE_STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
@@ -171,7 +172,7 @@ export function buildProjectPayloadSignature(payload) {
 export function readStoredProjectVersionHistory() {
   if (typeof window === "undefined") return {};
   try {
-    const raw = window.localStorage.getItem(PROJECT_VERSION_HISTORY_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(PROJECT_VERSION_HISTORY_STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return {};
@@ -214,7 +215,7 @@ export function readStoredProjectVersionHistory() {
 export function readStoredPinnedProjectIds() {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(HOME_PINNED_PROJECTS_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(HOME_PINNED_PROJECTS_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed)
@@ -228,7 +229,7 @@ export function readStoredPinnedProjectIds() {
 export function readStoredProjectPreviewImages() {
   if (typeof window === "undefined") return {};
   try {
-    const raw = window.localStorage.getItem(HOME_PROJECT_PREVIEWS_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(HOME_PROJECT_PREVIEWS_STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
@@ -251,7 +252,7 @@ export function readStoredProjectPreviewImages() {
 export function readStoredResumeProject() {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(HOME_RESUME_PROJECT_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(HOME_RESUME_PROJECT_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
@@ -280,7 +281,7 @@ export function readStoredResumeProject() {
 export function readStoredHomeAppearance() {
   if (typeof window === "undefined") return "dark";
   try {
-    const raw = String(window.localStorage.getItem(HOME_APPEARANCE_STORAGE_KEY) || "")
+    const raw = String(workspaceStorage("localStorage").getItem(HOME_APPEARANCE_STORAGE_KEY) || "")
       .trim()
       .toLowerCase();
     return raw === "light" ? "light" : "dark";
@@ -325,7 +326,7 @@ export function normalizeSharedQueueOperation(op) {
 export function readStoredSharedProjectQueue() {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(SHARED_PROJECT_QUEUE_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(SHARED_PROJECT_QUEUE_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -343,13 +344,13 @@ export function readStoredSharedAuth() {
   };
   if (typeof window === "undefined") return empty;
   try {
-    const raw = window.localStorage.getItem(SHARED_AUTH_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(SHARED_AUTH_STORAGE_KEY);
     if (!raw) return empty;
     const parsed = JSON.parse(raw);
     let session = {};
     try {
       session = JSON.parse(
-        window.sessionStorage.getItem(SHARED_AUTH_SESSION_STORAGE_KEY) || "{}"
+        workspaceStorage("sessionStorage").getItem(SHARED_AUTH_SESSION_STORAGE_KEY) || "{}"
       );
     } catch {
       session = {};
@@ -383,10 +384,10 @@ export function writeStoredSharedAuthSession(value) {
   const csrfToken = String(value?.csrfToken || value?.csrf_token || "").trim();
   try {
     if (!token) {
-      window.sessionStorage.removeItem(SHARED_AUTH_SESSION_STORAGE_KEY);
+      workspaceStorage("sessionStorage").removeItem(SHARED_AUTH_SESSION_STORAGE_KEY);
       return;
     }
-    window.sessionStorage.setItem(
+    workspaceStorage("sessionStorage").setItem(
       SHARED_AUTH_SESSION_STORAGE_KEY,
       JSON.stringify({ token, csrfToken })
     );
@@ -398,7 +399,7 @@ export function writeStoredSharedAuthSession(value) {
 export function clearStoredSharedAuthSession() {
   if (typeof window === "undefined") return;
   try {
-    window.sessionStorage.removeItem(SHARED_AUTH_SESSION_STORAGE_KEY);
+    workspaceStorage("sessionStorage").removeItem(SHARED_AUTH_SESSION_STORAGE_KEY);
   } catch {
     /* Session storage is optional. */
   }

@@ -7,6 +7,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import * as Sentry from "@sentry/react";
 import App from "./App.jsx";
+import { isGuestTour } from "./tour/guestRuntime.js";
+import GuestTour from "./tour/GuestTour";
 import "./styles.css";
 
 // The worker cannot infer its sibling URL after Vite bundles the map library.
@@ -28,7 +30,7 @@ window.addEventListener("vite:preloadError", (event) => {
   window.location.reload();
 });
 
-const sentryDsn = String(import.meta.env.VITE_SENTRY_DSN || "").trim();
+const sentryDsn = !isGuestTour && String(import.meta.env.VITE_SENTRY_DSN || "").trim();
 if (sentryDsn) {
   Sentry.init({
     dsn: sentryDsn,
@@ -91,12 +93,12 @@ class AppErrorBoundary extends React.Component {
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <App />
+      {isGuestTour ? <GuestTour /> : <App />}
     </AppErrorBoundary>
   </React.StrictMode>
 );
 
-if ("serviceWorker" in navigator) {
+if (!isGuestTour && "serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker
       .getRegistrations()

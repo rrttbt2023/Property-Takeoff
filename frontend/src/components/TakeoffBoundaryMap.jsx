@@ -2,6 +2,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
 import * as turf from "@turf/turf";
 import * as maplibregl from "maplibre-gl";
+import { sampleBounds, sampleFrame, sampleMapStyle } from "../tour/sampleSite";
 
 const DEFAULT_CENTER = [-75.5244, 39.1582];
 const SQ_METERS_TO_SQ_FEET = 10.76391041671;
@@ -68,6 +69,7 @@ function drawStyles() {
 }
 
 function TakeoffBoundaryMap({
+  sampleSite = false,
   address,
   googleMapsKey,
   mapboxToken,
@@ -94,7 +96,7 @@ function TakeoffBoundaryMap({
   const [isDrafting, setIsDrafting] = useState(false);
   const [draftPointCount, setDraftPointCount] = useState(0);
   const [imageryProvider, setImageryProvider] = useState(
-    googleMapsKey ? "Loading Google satellite" : mapboxToken ? "Mapbox satellite fallback" : "Street map fallback"
+    sampleSite ? "Fictional training site" : googleMapsKey ? "Loading Google satellite" : mapboxToken ? "Mapbox satellite fallback" : "Street map fallback"
   );
 
   useEffect(() => {
@@ -109,13 +111,14 @@ function TakeoffBoundaryMap({
     const satelliteTiles = mapboxToken
       ? [`https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}@2x.jpg90?access_token=${mapboxToken}`]
       : ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"];
-    const map = new maplibregl.Map({
+    const options = {
       container: containerRef.current,
-      center: DEFAULT_CENTER,
-      zoom: 12,
+      center: sampleSite ? [0,0] : DEFAULT_CENTER,
+      zoom: sampleSite ? 17 : 12,
+      ...(sampleSite ? {maxBounds:sampleBounds,bounds:sampleFrame,fitBoundsOptions:{padding:12}} : {}),
       maxZoom: 22,
       cooperativeGestures: false,
-      style: {
+      style: sampleSite ? sampleMapStyle : {
         version: 8,
         sources: {
           takeoffImagery: {
@@ -128,7 +131,15 @@ function TakeoffBoundaryMap({
         },
         layers: [{ id: "takeoff-imagery", type: "raster", source: "takeoffImagery" }],
       },
-    });
+    };
+    let map;
+    try {
+      map = new maplibregl.Map(options);
+    } catch (error) {
+      if (!sampleSite) throw error;
+      setMapStatus("This browser cannot display the interactive boundary map. You can still explore the form.");
+      return;
+    }
     const draw = new MapboxDraw({
       displayControlsDefault: false,
       userProperties: true,
@@ -140,7 +151,7 @@ function TakeoffBoundaryMap({
     drawRef.current = draw;
 
     const installGoogleSatellite = async () => {
-      if (!googleMapsKey) return false;
+      if (!googleMapsKey || sampleSite) return false;
       const response = await fetch(
         `https://tile.googleapis.com/v1/createSession?key=${encodeURIComponent(googleMapsKey)}`,
         {
@@ -450,7 +461,7 @@ function TakeoffBoundaryMap({
       mapRef.current = null;
       map.remove();
     };
-  }, [googleMapsKey, mapboxToken]);
+  }, [googleMapsKey, mapboxToken, sampleSite]);
 
   useEffect(() => {
     const draw = drawRef.current;
@@ -465,6 +476,7 @@ function TakeoffBoundaryMap({
   }, [value]);
 
   const findAddress = async () => {
+    if (sampleSite) return;
     const query = String(address || "").trim();
     if (!query) {
       setMapStatus("Enter the property address first.");
@@ -601,7 +613,7 @@ function TakeoffBoundaryMap({
           <span>{imageryProvider}</span>
         </div>
         <div className="takeoff-boundary-actions">
-          <button type="button" onClick={() => void findAddress()} disabled={locating}>
+          <button type="button" onClick={() => void findAddress()} disabled={locating || sampleSite}>
             {locating ? "Finding..." : "Find address"}
           </button>
           <button type="button" className="primary" onClick={startDrawing} disabled={locating}>Draw boundary</button>

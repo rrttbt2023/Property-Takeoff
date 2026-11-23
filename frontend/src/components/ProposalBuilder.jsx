@@ -1,3 +1,4 @@
+import { isGuestTour, workspaceStorage } from "../tour/guestRuntime.js";
 import { useEffect, useMemo, useState } from "react";
 
 const DRAFT_KEY = "property-takeoff-proposal-draft-v1";
@@ -22,7 +23,7 @@ function escapeHtml(value) {
 
 function initialDraft() {
   try {
-    const stored = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+    const stored = JSON.parse(workspaceStorage("localStorage").getItem(DRAFT_KEY) || "null");
     if (stored && typeof stored === "object") return stored;
   } catch {
     // Ignore malformed local proposal drafts.
@@ -78,7 +79,7 @@ export default function ProposalBuilder({ projects = [] }) {
   const selectedProject = selectableProjects.find((project) => String(project.id) === String(draft.projectId)) || null;
 
   useEffect(() => {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    workspaceStorage("localStorage").setItem(DRAFT_KEY, JSON.stringify(draft));
   }, [draft]);
 
   const totals = useMemo(() => {
@@ -131,7 +132,7 @@ export default function ProposalBuilder({ projects = [] }) {
         <div className="hd-proposal-items"><div className="hd-proposal-item header"><span>Service</span><span>Quantity</span><span>Unit</span><span>Unit price</span><span>Amount</span></div>{draft.lineItems.map((item) => <div className="hd-proposal-item" key={item.key}><strong>{item.label}</strong><input aria-label={`${item.label} quantity`} type="number" min="0" step={item.unit === "ac" ? ".001" : "1"} value={item.quantity} onChange={(event) => updateItem(item.key, "quantity", event.target.value)} /><span>{item.unit}</span><input aria-label={`${item.label} unit price`} type="number" min="0" step=".01" value={item.unitPrice} onChange={(event) => updateItem(item.key, "unitPrice", event.target.value)} /><b>{money(safeNumber(item.quantity) * safeNumber(item.unitPrice))}</b></div>)}</div>
         <div className="hd-proposal-costs"><label>Labor<input type="number" min="0" step=".01" value={draft.labor} onChange={(event) => setDraft((previous) => ({ ...previous, labor: event.target.value }))} /></label><label>Materials<input type="number" min="0" step=".01" value={draft.materials} onChange={(event) => setDraft((previous) => ({ ...previous, materials: event.target.value }))} /></label><label>Equipment<input type="number" min="0" step=".01" value={draft.equipment} onChange={(event) => setDraft((previous) => ({ ...previous, equipment: event.target.value }))} /></label><label>Markup<input type="number" min="0" max="500" step=".5" value={draft.markupPercent} onChange={(event) => setDraft((previous) => ({ ...previous, markupPercent: event.target.value }))} /><small>%</small></label></div>
         <label className="hd-proposal-notes">Scope and notes<textarea value={draft.notes} onChange={(event) => setDraft((previous) => ({ ...previous, notes: event.target.value }))} /></label>
-        <div className="hd-proposal-actions"><span>{loadingProject ? "Calculating project quantities..." : message || "Draft automatically saved on this device."}</span><button className="hd-button hd-button-primary" type="submit">Print / Save PDF</button></div>
+        <div className="hd-proposal-actions"><span>{loadingProject ? "Calculating project quantities..." : message || (isGuestTour ? "Tour draft only. Changes disappear when you leave." : "Draft automatically saved on this device.")}</span><button className="hd-button hd-button-primary" type="submit">Print / Save PDF</button></div>
       </form>
       <aside className="hd-card hd-proposal-total"><small>Proposal total</small><strong>{money(totals.total)}</strong><span>Services {money(totals.services)}</span><span>Labor, materials & equipment {money(safeNumber(draft.labor) + safeNumber(draft.materials) + safeNumber(draft.equipment))}</span><span>Markup {money(totals.markup)}</span><p>Review contract language, taxes, exclusions, and service frequency before sending.</p></aside>
     </div>

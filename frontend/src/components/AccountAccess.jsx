@@ -8,7 +8,6 @@ import {
 
 import "./account-access.css";
 import PublicDialog from "./PublicDialog";
-import PublicTour from "./PublicTour";
 import SiteComparison from "./SiteComparison";
 import { readStartIntent, setStartIntent } from "./startIntent";
 
@@ -27,7 +26,6 @@ function AccountAccess({
 }) {
   const [intent, setIntent] = useState(readStartIntent);
   const [mode, setMode] = useState(() => intent ? "register" : "login");
-  const [tourOpen, setTourOpen] = useState(false);
   const [compact, setCompact] = useState(() => window.matchMedia(compactAccess).matches);
   const [authOpen, setAuthOpen] = useState(false);
   useEffect(() => {
@@ -37,7 +35,6 @@ function AccountAccess({
     return () => query.removeEventListener("change", refresh);
   }, []);
   const start = (choice) => {
-    setTourOpen(false);
     setStartIntent(choice);
     setIntent(choice);
     setAccountMessage("");
@@ -225,7 +222,7 @@ function AccountAccess({
           <span className="account-access-kicker">Snow and landscape estimating</span>
           <h1>Measure confidently.<br /><em>Win the work.</em></h1>
           <p>Measure a map or plan yourself, or send a site to our takeoff team.</p>
-          <button type="button" className="account-tour-trigger" onClick={() => setTourOpen(true)}>Take a tour <span aria-hidden="true">&rarr;</span></button>
+          <button type="button" className="account-tour-trigger" onClick={() => window.location.assign("?tour=1")}>Take a tour <span aria-hidden="true">&rarr;</span></button>
           </div>
           <div className="account-access-example">
           <SiteComparison onStart={start} />
@@ -237,7 +234,6 @@ function AccountAccess({
       {intent || (compact && authOpen) ? <PublicDialog title={intent === "measure" ? "Measure it myself" : intent === "quote" ? "Request a measured takeoff" : "Account access"}
         label={intent === "measure" ? "Measuring membership signup" : intent === "quote" ? "Takeoff quote signup" : "Account access"}
         busy={loginSubmitting || registerSubmitting} onClose={closeSignup}>{accountPanel}</PublicDialog> : !compact && accountPanel}
-      {tourOpen && <PublicTour onClose={() => setTourOpen(false)} onStart={start} />}
     </main>
   );
 }

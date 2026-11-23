@@ -26,11 +26,13 @@ for (const [width,height] of viewports) {
       await signup.getByRole("button", {name:/^Close /}).click();
     }
     await page.getByRole("button", {name:"Take a tour"}).click();
-    const tour = page.getByRole("dialog", {name:"Guided tour"});
-    for (let step = 1; step <= 5; step++) {
-      await expect(tour.getByText(new RegExp(`^Step ${step} of 5`))).toBeVisible();
-      await expectFit(tour);
-      if (step < 5) await tour.getByRole("button", {name:/^Next step/}).click();
-    }
+    const guide = page.getByRole("banner",{name:"Workspace tour"});
+    await expect(guide).toBeInViewport({ratio:1});
+    await expect(page.locator(".hd-main h1")).toHaveText("Project Dashboard");
+    await guide.getByRole("button",{name:"Next step"}).click();
+    await expect(page.locator(".map")).toBeVisible();
+    await expect(guide.getByRole("button",{name:"Exit tour"})).toBeInViewport({ratio:1});
+    await guide.getByRole("button",{name:"Exit tour"}).click();
+    await expect(example).toBeVisible();
   });
 }

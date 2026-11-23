@@ -1,3 +1,5 @@
+import { isGuestTour, workspaceStorage } from "./tour/guestRuntime.js";
+import { tourProjects, samplePhoto, sampleMapStyle, sampleBounds, sampleFrame, samplePlan, sitePayload } from "./tour/sampleSite";
 // src/App.jsx
 import React, { lazy, Suspense, useCallback, useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
@@ -2707,7 +2709,7 @@ function updatePdfPageSaveMeta(
 function loadPdfCustomColors() {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(PDF_ANNOT_CUSTOM_COLORS_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(PDF_ANNOT_CUSTOM_COLORS_STORAGE_KEY);
     const parsed = JSON.parse(raw || "[]");
     if (!Array.isArray(parsed)) return [];
     return parsed
@@ -2722,7 +2724,7 @@ function loadPdfCustomColors() {
 function loadPdfToolOpacities() {
   if (typeof window === "undefined") return { ...PDF_ANNOT_TOOL_OPACITY_DEFAULTS };
   try {
-    const raw = window.localStorage.getItem(PDF_ANNOT_TOOL_OPACITY_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(PDF_ANNOT_TOOL_OPACITY_STORAGE_KEY);
     const parsed = JSON.parse(raw || "{}");
     const candidate = parsed && typeof parsed === "object" ? { ...parsed } : {};
     if (!Object.prototype.hasOwnProperty.call(candidate, "highlighter")) {
@@ -3566,7 +3568,7 @@ function createEmptyEstimateTemplates() {
 function readStoredEstimateTemplates() {
   if (typeof window === "undefined") return createEmptyEstimateTemplates();
   try {
-    const raw = window.localStorage.getItem(ESTIMATE_TEMPLATES_STORAGE_KEY);
+    const raw = workspaceStorage("localStorage").getItem(ESTIMATE_TEMPLATES_STORAGE_KEY);
     if (!raw) return createEmptyEstimateTemplates();
     const parsed = JSON.parse(raw);
     const next = createEmptyEstimateTemplates();
@@ -4343,16 +4345,17 @@ function getTrue3DQualityProfile(preset, compactTouchUi) {
   };
 }
 
-export default function App() {
+export default function App({ tourStep, onTourStep } = {}) {
   const mapRef = useRef(null);
   const drawRef = useRef(null);
   const mapDivRef = useRef(null);
+  const [tourMapUnavailable, setTourMapUnavailable] = useState(false);
 
   // Keys (.env)
   const maptilerKey = import.meta.env.VITE_MAPTILER_KEY;
-  const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
-  const azureMapsKey = import.meta.env.VITE_AZURE_MAPS_KEY;
-  const googleMapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+  const mapboxToken = !isGuestTour && import.meta.env.VITE_MAPBOX_TOKEN;
+  const azureMapsKey = !isGuestTour && import.meta.env.VITE_AZURE_MAPS_KEY;
+  const googleMapsKey = !isGuestTour && import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
   const aiFeatureConfigured =
     String(import.meta.env.VITE_ENABLE_AI ?? "true").toLowerCase() !== "false";
 
@@ -4462,7 +4465,7 @@ export default function App() {
 
   // Project name
   const [projectName, setProjectName] = useState("");
-  const [projectLibrary, setProjectLibrary] = useState(() => readStoredProjectLibrary());
+  const [projectLibrary, setProjectLibrary] = useState(() => isGuestTour ? tourProjects : readStoredProjectLibrary());
   const [projectFolders, setProjectFolders] = useState(() => readStoredProjectFolders());
   const [homeProjectSearch, setHomeProjectSearch] = useState("");
   const [polygonSearchQuery, setPolygonSearchQuery] = useState("");
@@ -4503,8 +4506,8 @@ export default function App() {
   const [billingStatus, setBillingStatus] = useState(null);
   const [billingWorking, setBillingWorking] = useState(false);
   const [showMembershipPrompt, setShowMembershipPrompt] = useState(() => {
-    const shouldShow = window.sessionStorage.getItem("property-takeoff-membership-prompt") === "1";
-    if (shouldShow) window.sessionStorage.removeItem("property-takeoff-membership-prompt");
+    const shouldShow = workspaceStorage("sessionStorage").getItem("property-takeoff-membership-prompt") === "1";
+    if (shouldShow) workspaceStorage("sessionStorage").removeItem("property-takeoff-membership-prompt");
     return shouldShow;
   });
   const [takeoffRequests, setTakeoffRequests] = useState([]);
@@ -4719,7 +4722,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(WORKFLOW_MODE_STORAGE_KEY, workflowMode);
+      workspaceStorage("localStorage").setItem(WORKFLOW_MODE_STORAGE_KEY, workflowMode);
     } catch {
       /* intentionally ignore localStorage errors */
     }
@@ -4728,7 +4731,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         ESTIMATE_TEMPLATES_STORAGE_KEY,
         JSON.stringify(estimateTemplates)
       );
@@ -4740,7 +4743,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         PDF_ANNOT_CUSTOM_COLORS_STORAGE_KEY,
         JSON.stringify((Array.isArray(pdfCustomColors) ? pdfCustomColors : []).slice(0, 18))
       );
@@ -4752,7 +4755,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         PDF_ANNOT_TOOL_OPACITY_STORAGE_KEY,
         JSON.stringify(normalizePdfToolOpacityMap(pdfToolOpacities))
       );
@@ -4764,7 +4767,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         PROJECT_LIBRARY_STORAGE_KEY,
         JSON.stringify(Array.isArray(projectLibrary) ? projectLibrary : [])
       );
@@ -4794,7 +4797,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         PROJECT_FOLDER_LIBRARY_STORAGE_KEY,
         JSON.stringify(Array.isArray(projectFolders) ? projectFolders : [])
       );
@@ -4806,7 +4809,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         PROJECT_FOLDER_COLLAPSE_STORAGE_KEY,
         JSON.stringify(
           homeCollapsedFolders && typeof homeCollapsedFolders === "object"
@@ -4822,7 +4825,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         PROJECT_VERSION_HISTORY_STORAGE_KEY,
         JSON.stringify(projectVersionHistory || {})
       );
@@ -4834,7 +4837,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         HOME_PINNED_PROJECTS_STORAGE_KEY,
         JSON.stringify((Array.isArray(pinnedProjectIds) ? pinnedProjectIds : []).slice(0, 24))
       );
@@ -4851,7 +4854,7 @@ export default function App() {
           ? projectPreviewImages
           : {}
       ).slice(0, 24);
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         HOME_PROJECT_PREVIEWS_STORAGE_KEY,
         JSON.stringify(Object.fromEntries(entries))
       );
@@ -4867,7 +4870,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(HOME_APPEARANCE_STORAGE_KEY, homeAppearance);
+      workspaceStorage("localStorage").setItem(HOME_APPEARANCE_STORAGE_KEY, homeAppearance);
     } catch {
       /* intentionally ignore local storage errors */
     }
@@ -4877,12 +4880,12 @@ export default function App() {
     if (typeof window === "undefined") return;
     try {
       if (resumeProject) {
-        window.localStorage.setItem(
+        workspaceStorage("localStorage").setItem(
           HOME_RESUME_PROJECT_STORAGE_KEY,
           JSON.stringify(resumeProject)
         );
       } else {
-        window.localStorage.removeItem(HOME_RESUME_PROJECT_STORAGE_KEY);
+        workspaceStorage("localStorage").removeItem(HOME_RESUME_PROJECT_STORAGE_KEY);
       }
     } catch {
       /* intentionally ignore localStorage errors */
@@ -4892,7 +4895,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         SHARED_PROJECT_QUEUE_STORAGE_KEY,
         JSON.stringify(sharedProjectQueue || [])
       );
@@ -4912,7 +4915,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
+      workspaceStorage("localStorage").setItem(
         SHARED_AUTH_STORAGE_KEY,
         JSON.stringify({
           token: "",
@@ -5222,6 +5225,7 @@ export default function App() {
   useEffect(() => {
     let canceled = false;
     const checkBackend = async () => {
+      if (isGuestTour) return;
       setBackendHealth((prev) =>
         prev.state === "ready"
           ? prev
@@ -5423,12 +5427,12 @@ export default function App() {
           nextAuth.organizationId &&
           previousOrganizationId !== nextAuth.organizationId
         ) {
-          window.localStorage.setItem(
+          workspaceStorage("localStorage").setItem(
             SHARED_AUTH_STORAGE_KEY,
             JSON.stringify(buildPersistedSharedAuthState(nextAuth))
           );
           writeStoredSharedAuthSession(nextAuth);
-          window.sessionStorage.setItem("property-takeoff-membership-prompt", "1");
+          workspaceStorage("sessionStorage").setItem("property-takeoff-membership-prompt", "1");
           for (const key of [
             PROJECT_VERSION_HISTORY_STORAGE_KEY,
             HOME_PINNED_PROJECTS_STORAGE_KEY,
@@ -5436,7 +5440,7 @@ export default function App() {
             HOME_RESUME_PROJECT_STORAGE_KEY,
             SHARED_PROJECT_QUEUE_STORAGE_KEY,
           ]) {
-            window.localStorage.removeItem(key);
+            workspaceStorage("localStorage").removeItem(key);
           }
           window.location.reload();
           return;
@@ -5486,7 +5490,7 @@ export default function App() {
           nextAuth.organizationId &&
           previousOrganizationId !== nextAuth.organizationId
         ) {
-          window.localStorage.setItem(
+          workspaceStorage("localStorage").setItem(
             SHARED_AUTH_STORAGE_KEY,
             JSON.stringify(buildPersistedSharedAuthState(nextAuth))
           );
@@ -5498,7 +5502,7 @@ export default function App() {
             HOME_RESUME_PROJECT_STORAGE_KEY,
             SHARED_PROJECT_QUEUE_STORAGE_KEY,
           ]) {
-            window.localStorage.removeItem(key);
+            workspaceStorage("localStorage").removeItem(key);
           }
           window.location.reload();
           return;
@@ -5649,7 +5653,7 @@ export default function App() {
     const password = window.prompt("Enter your password to confirm permanent deletion.");
     if (!password) return;
     await deleteAccount(password);
-    window.localStorage.removeItem(SHARED_AUTH_STORAGE_KEY);
+    workspaceStorage("localStorage").removeItem(SHARED_AUTH_STORAGE_KEY);
     window.location.reload();
   }, []);
 
@@ -12382,7 +12386,7 @@ export default function App() {
           }
         );
         payload.pdfPageSaveMeta = nextPdfPageSaveMeta;
-        localStorage.setItem(autosaveStorageKey, JSON.stringify(payload));
+        workspaceStorage("localStorage").setItem(autosaveStorageKey, JSON.stringify(payload));
         void queueProjectRecoverySnapshot(payload, {
           projectId: buildProjectLibraryId(payload.projectName || "Untitled Project"),
           ownerOrganizationId: sharedAuth?.organizationId,
@@ -13267,6 +13271,32 @@ export default function App() {
     ]
   );
 
+  const tourDrafts = useRef({});
+  const previousTourStep = useRef(null);
+  const keepTourDraft = useEffectEvent((step) => {
+    const id = step === 1 ? "tour-site" : "tour-plan";
+    const payload = buildProjectPayload();
+    if (payload.projectName !== tourProjects[step-1].projectName || (step === 2 && !payload.pdfSourceAsset)) return;
+    tourDrafts.current[step] = payload;
+    setProjectLibrary(entries => entries.map(entry => entry.id === id ? {...entry, payload} : entry));
+  });
+  const showTourProject = useEffectEvent((payload) => {
+    applyProjectPayload(payload, { storeInLibrary:false, successToast:"" });
+  });
+  useEffect(() => {
+    if (!isGuestTour) return;
+    let active = true;
+    const previous = previousTourStep.current;
+    if (previous !== tourStep && (previous === 1 || previous === 2)) keepTourDraft(previous);
+    previousTourStep.current = tourStep;
+    if (tourStep === 1) showTourProject(tourDrafts.current[1] || sitePayload);
+    else if (tourStep === 2) {
+      Promise.resolve(tourDrafts.current[2] || samplePlan()).then(payload => { if (active) showTourProject(payload); })
+        .catch(() => { if (active) pushToast("Could not open the example plan.", "error"); });
+    } else setAppScreen(APP_SCREEN_HOME);
+    return () => { active = false; };
+  }, [tourStep, pushToast]);
+
   const startNewProject = useCallback(
     (mode = WORKFLOW_MODE_LOCATION, announce = true) => {
       const normalizedMode =
@@ -13370,8 +13400,8 @@ export default function App() {
   const restoreAutosave = useCallback(async () => {
     try {
       const raw =
-        localStorage.getItem(autosaveStorageKey) ||
-        (sharedAuth?.isStaff ? localStorage.getItem(AUTOSAVE_KEY) : null);
+        workspaceStorage("localStorage").getItem(autosaveStorageKey) ||
+        (sharedAuth?.isStaff ? workspaceStorage("localStorage").getItem(AUTOSAVE_KEY) : null);
       let data = raw ? JSON.parse(raw) : null;
       if (!isValidProjectPayload(data)) {
         const recovery = await getLatestProjectRecovery("", {
@@ -13408,8 +13438,8 @@ export default function App() {
 
   const clearAutosave = useCallback(async () => {
     try {
-      localStorage.removeItem(autosaveStorageKey);
-      if (sharedAuth?.isStaff) localStorage.removeItem(AUTOSAVE_KEY);
+      workspaceStorage("localStorage").removeItem(autosaveStorageKey);
+      if (sharedAuth?.isStaff) workspaceStorage("localStorage").removeItem(AUTOSAVE_KEY);
       await clearProjectRecovery("", {
         organizationId: sharedAuth?.organizationId,
         includeLegacy: Boolean(sharedAuth?.isStaff),
@@ -13449,8 +13479,8 @@ export default function App() {
 
     try {
       const raw =
-        localStorage.getItem(autosaveStorageKey) ||
-        (sharedAuth?.isStaff ? localStorage.getItem(AUTOSAVE_KEY) : null);
+        workspaceStorage("localStorage").getItem(autosaveStorageKey) ||
+        (sharedAuth?.isStaff ? workspaceStorage("localStorage").getItem(AUTOSAVE_KEY) : null);
       const payload = raw ? JSON.parse(raw) : null;
       if (isValidProjectPayload(payload)) {
         const projectName = String(payload.projectName || "Recovered Project").trim();
@@ -17039,7 +17069,7 @@ export default function App() {
     if (!isWorkspaceScreen) return;
     if (!mapDivRef.current) return;
 
-    if (!maptilerKey) {
+    if (!maptilerKey && !isGuestTour) {
       console.error(
         "Missing VITE_MAPTILER_KEY in .env. Restart npm run dev after adding it."
       );
@@ -17050,7 +17080,7 @@ export default function App() {
     const AZURE_API_VERSION = "2024-04-01";
     const AZURE_MAX_ZOOM = 19;
 
-    const map = new maplibregl.Map({
+    const mapOptions = {
       container: mapDivRef.current,
       antialias: true,
       // iPad/Safari: keep one-finger map pan enabled.
@@ -17060,7 +17090,7 @@ export default function App() {
       preserveDrawingBuffer: true,
       maxTileCacheZoomLevels: 4,
       refreshExpiredTiles: true,
-      style: {
+      style: isGuestTour ? sampleMapStyle : {
         version: 8,
         sources: {
           // MapTiler Satellite
@@ -17314,11 +17344,21 @@ export default function App() {
             : []),
         ],
       },
-      center: [-75.0, 40.0],
+      ...(isGuestTour ? {maxBounds:sampleBounds} : {}),
+      center: isGuestTour ? [0,0] : [-75.0, 40.0],
       zoom: 16,
       pitch: 0,
       bearing: 0,
-    });
+    };
+    let map;
+    try {
+      map = new maplibregl.Map(mapOptions);
+      if (isGuestTour) setTourMapUnavailable(false);
+    } catch (error) {
+      if (!isGuestTour) throw error;
+      setTourMapUnavailable(true);
+      return;
+    }
 
     // Extra guard for iPad Safari so touch drag pans map instead of page.
     const canvasContainer = map.getCanvasContainer?.();
@@ -18390,8 +18430,8 @@ export default function App() {
     let cancelled = false;
     try {
       const hasLocalStorageDraft = Boolean(
-        localStorage.getItem(autosaveStorageKey) ||
-          (sharedAuth?.isStaff && localStorage.getItem(AUTOSAVE_KEY))
+        workspaceStorage("localStorage").getItem(autosaveStorageKey) ||
+          (sharedAuth?.isStaff && workspaceStorage("localStorage").getItem(AUTOSAVE_KEY))
       );
       setAutosaveDraftAvailable(hasLocalStorageDraft);
       if (!hasLocalStorageDraft) {
@@ -18449,7 +18489,7 @@ export default function App() {
           }
         );
         payload.pdfPageSaveMeta = nextPdfPageSaveMeta;
-        localStorage.setItem(autosaveStorageKey, JSON.stringify(payload));
+        workspaceStorage("localStorage").setItem(autosaveStorageKey, JSON.stringify(payload));
         void queueProjectRecoverySnapshot(payload, {
           projectId: buildProjectLibraryId(payload.projectName || "Untitled Project"),
           ownerOrganizationId: sharedAuth?.organizationId,
@@ -18474,6 +18514,7 @@ export default function App() {
 
   // Write an autosave snapshot when tab/window closes.
   useEffect(() => {
+    if (isGuestTour) return;
     const onBeforeUnload = (event) => {
       try {
         const autosavedAt = new Date().toISOString();
@@ -18489,7 +18530,7 @@ export default function App() {
             savedMeasurements: payload.pdfSavedMeasurements,
           }
         );
-        localStorage.setItem(autosaveStorageKey, JSON.stringify(payload));
+        workspaceStorage("localStorage").setItem(autosaveStorageKey, JSON.stringify(payload));
       } catch {
         /* intentionally ignore non-critical map/draw errors */
       }
@@ -18514,6 +18555,7 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (e) => {
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
+      if (isGuestTour && cmdOrCtrl) return;
       const shiftedQuestion = e.key === "?" || (e.key === "/" && e.shiftKey);
       if (
         isWorkspaceScreen &&
@@ -18814,7 +18856,7 @@ export default function App() {
   useEffect(() => {
     if (appScreen !== APP_SCREEN_LOCATION || workflowMode !== WORKFLOW_MODE_LOCATION ||
         !workspaceMap || workspaceMap !== mapRef.current) return;
-    return frameOpenedProject(workspaceMap, readProjectOpenBounds());
+    return frameOpenedProject(workspaceMap, isGuestTour ? sampleFrame : readProjectOpenBounds());
   }, [appScreen, workflowMode, workspaceMap, projectOpenSequence]);
 
   useEffect(() => {
@@ -20828,7 +20870,7 @@ export default function App() {
 
   // ---------- Render ----------
   if (appScreen === APP_SCREEN_HOME) {
-    if (!sharedAccessAuthenticated) {
+    if (!sharedAccessAuthenticated && !isGuestTour) {
       return (
         <>
           <Toasts toasts={toasts} onClose={closeToast} />
@@ -20851,20 +20893,23 @@ export default function App() {
         <Toasts toasts={toasts} onClose={closeToast} />
         <Suspense fallback={<div className="app-lazy-loading">Loading project dashboard...</div>}>
         <HomeDashboard
+          key={isGuestTour ? tourStep : "dashboard"}
+          tourPage={isGuestTour ? (tourStep === 3 ? "proposals" : tourStep === 4 ? "takeoffs" : "dashboard") : null}
+          onTourStep={onTourStep}
           theme={homeAppearance}
           onToggleTheme={() =>
             setHomeAppearance((previous) => (previous === "light" ? "dark" : "light"))
           }
-          resumeCard={homeResumeCard}
+          resumeCard={isGuestTour ? null : homeResumeCard}
           renderPlanPreview={renderDashboardPlan}
           ensureGoogleSession={ensureGoogleTileSession}
-          onResume={resumeLastProjectFromHome}
+          onResume={isGuestTour ? () => onTourStep(1) : resumeLastProjectFromHome}
           stats={homeProjectStats}
           projects={visibleProjectLibrary}
           groupedProjects={groupedHomeProjectLibrary}
           pinnedProjects={pinnedHomeProjects}
           pinnedProjectIds={pinnedProjectIdSet}
-          projectPreviewImages={projectPreviewImages}
+          projectPreviewImages={isGuestTour ? {"tour-site":samplePhoto} : projectPreviewImages}
           onSetProjectPreviewImage={updateProjectPreviewImage}
           projectTab={homeProjectTab}
           onProjectTabChange={setHomeProjectTab}
@@ -20881,18 +20926,18 @@ export default function App() {
           onRenameFolder={renameHomeFolder}
           onDeleteFolder={deleteHomeFolder}
           onAssignFolder={assignProjectLibraryFolder}
-          onOpenProject={loadProjectFromLibrary}
+          onOpenProject={isGuestTour ? id => onTourStep(id === "tour-plan" ? 2 : 1) : loadProjectFromLibrary}
           onTogglePinned={togglePinnedProject}
           onRemoveProject={removeProjectFromLibrary}
-          onNewLocation={() => startNewProject(WORKFLOW_MODE_LOCATION)}
-          onNewPdf={() => startNewProject(WORKFLOW_MODE_PDF)}
+          onNewLocation={() => isGuestTour ? onTourStep(1) : startNewProject(WORKFLOW_MODE_LOCATION)}
+          onNewPdf={() => isGuestTour ? onTourStep(2) : startNewProject(WORKFLOW_MODE_PDF)}
           onImportProject={loadProjectFile}
           sharedAuthenticated={sharedAccessAuthenticated}
           sharedAuthChecking={sharedAuthChecking}
           sharedUsername={sharedAuth?.username || ""}
           sharedOrganizationName={sharedAuth?.organizationName || "Workspace"}
           sharedExpiresAt={sharedAuth?.expiresAt || ""}
-          workspaceAccess={sharedWorkspaceAccess}
+          workspaceAccess={isGuestTour || sharedWorkspaceAccess}
           isStaff={Boolean(sharedAuth?.isStaff)}
           billingStatus={billingStatus}
           billingWorking={billingWorking}
@@ -20911,7 +20956,7 @@ export default function App() {
           onDeleteAccount={handleDeleteAccount}
           takeoffRequests={takeoffRequests}
           takeoffRequestsLoading={takeoffRequestsLoading}
-          onEstimateTakeoffRequest={estimateTakeoffRequest}
+          onEstimateTakeoffRequest={isGuestTour ? undefined : estimateTakeoffRequest}
           onCreateTakeoffRequest={handleCreateTakeoffRequest}
           onAcceptTakeoffQuote={handleAcceptTakeoffQuote}
           onUpdateTakeoffRequest={handleUpdateTakeoffRequest}
@@ -20957,7 +21002,7 @@ export default function App() {
   const showCompactPdfQuickBar =
     workflowMode === WORKFLOW_MODE_PDF && pdfFocusMode;
   const pdfCanvasViewportMaxWidth =
-    workflowMode !== WORKFLOW_MODE_PDF
+    isGuestTour ? "var(--tour-sheet-width, calc(100vw - 376px))" : workflowMode !== WORKFLOW_MODE_PDF
       ? "100vw"
       : hideSidebarForPdfFocus
       ? "calc(100vw - 36px)"
@@ -20982,7 +21027,7 @@ export default function App() {
   return (
     <div
       className={`app${isCompactTouchUi ? " compact-ui" : ""}`}
-      style={{ display: "flex", height: "100vh", width: "100vw" }}
+      style={{ display: "flex", height: isGuestTour ? "100%" : "100vh", width: "100vw" }}
     >
       <Toasts toasts={toasts} onClose={closeToast} />
 
@@ -21626,6 +21671,7 @@ export default function App() {
           overflow: "auto",
         }}
       >
+        {isGuestTour ? <h2>{projectName}</h2> : <>
         <div style={{ marginBottom: 12 }}>
           <img
             src="/logo.png"
@@ -22771,6 +22817,7 @@ export default function App() {
           </div>
         )}
 
+        </>}
         {/* Active layer */}
         {workflowMode !== WORKFLOW_MODE_PDF && (
         <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
@@ -24081,6 +24128,7 @@ export default function App() {
           </div>
         )}
 
+        {!isGuestTour && <>
         {SHOW_TWO_POINT_MEASURE_TOOL && workflowMode !== WORKFLOW_MODE_PDF && (
           <div style={{ padding: 10, border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, marginBottom: 12 }}>
             <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
@@ -25458,6 +25506,7 @@ export default function App() {
           </button>
         </div>
         )}
+        </>}
       </div>
       )}
 
@@ -25477,6 +25526,8 @@ export default function App() {
                 : "none",
           }}
         />
+        {isGuestTour && tourMapUnavailable && workflowMode === WORKFLOW_MODE_LOCATION &&
+          <div className="guest-no-webgl"><img src={samplePhoto} alt="Evergreen Office example aerial" /><p>Your browser cannot display the interactive map. You can still try the PDF tools in the next step.</p></div>}
 
         {workflowMode !== WORKFLOW_MODE_PDF &&
           !showTrue3DViewer &&

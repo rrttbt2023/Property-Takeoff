@@ -1,3 +1,4 @@
+import { isGuestTour } from "./tour/guestRuntime.js";
 const DEFAULT_PRODUCTION_API_BASE = "https://property-takeoff.onrender.com";
 const RAW_API_BASE = String(
   import.meta.env.VITE_API_BASE_URL ||
@@ -77,6 +78,7 @@ async function readErrorPayload(response) {
 }
 
 async function request(path, options = {}, candidateOptions = undefined) {
+  if (isGuestTour) throw new Error("Shared services are not available in the sample workspace.");
   const candidates = buildApiCandidates(path, candidateOptions);
   const requestHeaders = new Headers(options.headers || {});
   if (sharedAuthToken && !requestHeaders.has("Authorization")) {

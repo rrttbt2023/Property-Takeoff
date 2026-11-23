@@ -1,3 +1,4 @@
+import { isGuestTour } from "../tour/guestRuntime.js";
 const DB_NAME = "property-takeoff-recovery";
 const DB_VERSION = 1;
 const LATEST_STORE = "latest";
@@ -11,7 +12,7 @@ let writePromise = null;
 const lastCheckpointAt = new Map();
 
 function canUseIndexedDb() {
-  return typeof window !== "undefined" && "indexedDB" in window;
+  return !isGuestTour && typeof window !== "undefined" && "indexedDB" in window;
 }
 
 function openRecoveryDb() {

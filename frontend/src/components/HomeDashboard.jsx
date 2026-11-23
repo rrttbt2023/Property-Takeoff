@@ -201,7 +201,7 @@ async function imageFileToPreviewDataUrl(file) {
   }
 }
 
-function DeskPreview({ entry, payload, pdf, imageUrl, renderPlanPreview, ensureGoogleSession }) {
+function DeskPreview({ entry, payload, pdf, imageUrl, renderPlanPreview, ensureGoogleSession, tourPage }) {
   const [remote, setRemote] = useState(null);
   const [plan, setPlan] = useState(null);
   const remoteId = !payload && !entry?.payload && entry?.storageScope === "shared" ? entry.id : "";
@@ -229,7 +229,7 @@ function DeskPreview({ entry, payload, pdf, imageUrl, renderPlanPreview, ensureG
     return () => { active = false; if (url) URL.revokeObjectURL(url); };
   }, [pdf, data, renderPlanPreview]);
   const page = pdf && plan?.data === data ? plan : null;
-  if (frame) return <figure className="desk-preview desk-property-aerial">
+  if (frame && !tourPage) return <figure className="desk-preview desk-property-aerial">
     <PropertyAerialPreview frame={frame} provider={data?.baseMap || "maptiler"} ensureGoogleSession={ensureGoogleSession} />
   </figure>;
   return <figure className="desk-preview">
@@ -256,6 +256,8 @@ function SectionTitle({ title, action, onAction }) {
 }
 
 function HomeDashboard({
+  tourPage,
+  onTourStep,
   theme,
   onToggleTheme,
   resumeCard,
@@ -354,13 +356,13 @@ function HomeDashboard({
   const recentProjects = useMemo(() => sortedProjects(projects), [projects]);
   const recentProject = recentProjects[0] || null;
   const browserProjectCount = recentProjects.filter((entry) => entry?.payload).length;
-  const [startIntent] = useState(readStartIntent);
+  const [startIntent] = useState(() => tourPage ? "" : readStartIntent());
   const [billingReturn] = useState(() => {
     const value = new URL(window.location.href).searchParams.get("billing");
     return ["success", "canceled"].includes(value) ? value : "";
   });
-  const [activeNavigation, setActiveNavigation] = useState(() => startIntent === "quote" ? "takeoffs"
-    : billingReturn ? "billing" : startIntent === "measure" ? (workspaceAccess ? "location-projects" : "billing") : "dashboard");
+  const [activeNavigation, setActiveNavigation] = useState(() => tourPage || (startIntent === "quote" ? "takeoffs"
+    : billingReturn ? "billing" : startIntent === "measure" ? (workspaceAccess ? "location-projects" : "billing") : "dashboard"));
   const launchedCheckout = useRef(false);
   const checkoutPending = useRef(false);
   const [checkoutError, setCheckoutError] = useState("");
@@ -401,8 +403,8 @@ function HomeDashboard({
   const [previewImageError, setPreviewImageError] = useState("");
   const [restoringRecoveryId, setRestoringRecoveryId] = useState("");
   const [takeoffForm, setTakeoffForm] = useState({
-    title: "",
-    address: "",
+    title: tourPage ? "Evergreen Office" : "",
+    address: tourPage ? "Evergreen Office · fictional training site" : "",
     serviceTypes: [],
     propertyType: "commercial_retail",
     measurementScope: "full_property",
@@ -530,6 +532,13 @@ function HomeDashboard({
   const currentPage = pageDetails[activeNavigation] || pageDetails.dashboard;
 
   const showPage = (page) => {
+    if (tourPage && page === "proposals") { onTourStep(3); return; }
+    if (tourPage && page === "takeoffs") { onTourStep(4); return; }
+    if (tourPage && !["dashboard","location-projects","pdf-projects","all-projects","pinned-sites","folders","activity"].includes(page)) {
+      onTourStep(5);
+      return;
+    }
+    if (tourPage && tourPage !== "dashboard" && page === "dashboard") { onTourStep(0); return; }
     setActiveNavigation(page);
     window.requestAnimationFrame(() => {
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -557,6 +566,7 @@ function HomeDashboard({
   };
   const submitTakeoffRequest = async (event) => {
     event.preventDefault();
+    if (tourPage) return;
     setTakeoffMessage("");
     const estimatedSquareFeet = Number(takeoffForm.estimatedSquareFeet);
     if (!takeoffForm.serviceTypes.length) {
@@ -788,7 +798,7 @@ function HomeDashboard({
         </nav>
 
         <div className="hd-account">
-          {sharedAuthenticated ? (
+          {tourPage ? <strong>Guest workspace · Sample data</strong> : sharedAuthenticated ? (
             <>
               <div className="hd-avatar">{getInitials(sharedUsername)}</div>
               <div className="hd-account-copy"><strong>{sharedUsername || "Shared user"}</strong><span>{sharedOrganizationName || sharedStatusLabel}</span></div>
@@ -839,7 +849,7 @@ function HomeDashboard({
                 <button type="button" className="hd-button hd-button-outline" onClick={startPdfProject}><Icon name="file" />Measure from PDF/Image</button>
               </div>
             </div>
-            {hasResume ? <DeskPreview key={resumeCard?.projectId || previewProject?.id} entry={previewProject} payload={resumeCard?.payload} pdf={previewPdf} renderPlanPreview={renderPlanPreview} ensureGoogleSession={ensureGoogleSession} imageUrl={projectPreviewImages?.[previewProject?.id]} /> : null}
+            {hasResume ? <DeskPreview key={resumeCard?.projectId || previewProject?.id} tourPage={tourPage} entry={previewProject} payload={resumeCard?.payload} pdf={previewPdf} renderPlanPreview={renderPlanPreview} ensureGoogleSession={ensureGoogleSession} imageUrl={projectPreviewImages?.[previewProject?.id]} /> : null}
           </div>
         </section>
 
@@ -886,7 +896,7 @@ function HomeDashboard({
           <span><b>{stats.folderCount}</b> folders</span>
         </div>
         </> : null}
-        {!sharedAuthenticated ? (
+        {!sharedAuthenticated && !tourPage ? (
           <section className="hd-auth-notice">
             <Icon name="shield" size={22} />
             <div><strong>Your shared library is locked.</strong><span>Local projects and recovery snapshots remain available. Sign in to load and sync team projects.</span></div>
@@ -1035,7 +1045,7 @@ function HomeDashboard({
                 <div className="hd-takeoff-field-grid">
                   <label>Site or project name<input required value={takeoffForm.title} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, title: event.target.value }))} placeholder="Dover Commons snow takeoff" /></label>
                   <label>Property type<select required value={takeoffForm.propertyType} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, propertyType: event.target.value }))}>{TAKEOFF_PROPERTY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-                  <label className="hd-takeoff-address">Property address<input required value={takeoffForm.address} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, address: event.target.value }))} onBlur={() => { if (takeoffForm.address.trim().length >= 3) setAddressSearchNonce((value) => value + 1); }} placeholder="1200 N Dupont Hwy, Dover, DE 19901" /><small>The map will locate this address when you finish entering it.</small></label>
+                  <label className="hd-takeoff-address">Property address<input required readOnly={!!tourPage} value={takeoffForm.address} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, address: event.target.value }))} onBlur={() => { if (!tourPage && takeoffForm.address.trim().length >= 3) setAddressSearchNonce((value) => value + 1); }} placeholder="1200 N Dupont Hwy, Dover, DE 19901" /><small>{tourPage ? "The tour uses a fixed sample site." : "The map will locate this address when you finish entering it."}</small></label>
                 </div>
               </section>
 
@@ -1067,6 +1077,7 @@ function HomeDashboard({
               <section className="hd-takeoff-step hd-takeoff-wide">
                 <header><span>3</span><div><h4>Draw the measurement boundary</h4><p>Outline the full property or only the section you want measured. This boundary determines the quote area.</p></div></header>
                 <TakeoffBoundaryMap
+                  sampleSite={!!tourPage}
                   address={takeoffForm.address}
                   addressSearchNonce={addressSearchNonce}
                   mapboxToken={mapboxToken}
@@ -1080,6 +1091,7 @@ function HomeDashboard({
                 />
               </section>
 
+              {tourPage ? <p className="hd-takeoff-wide">Tour only: real estimates and submissions start after you create an account.</p> : <>
               <section className="hd-takeoff-step hd-takeoff-wide">
                 <header><span>4</span><div><h4>Review the planning estimate</h4><p>The range uses the drawn boundary, property type, and selected measurement areas.</p></div></header>
                 <aside className={`hd-takeoff-estimate${takeoffEstimateError ? " error" : ""}`} aria-live="polite">
@@ -1098,6 +1110,7 @@ function HomeDashboard({
                 </div>
               </section>
               <div className="hd-takeoff-submit"><small>{takeoffBoundaryReady ? "Your boundary and estimate details will be saved with this request." : "Complete the property, checklist, and boundary steps to submit."}</small><button type="submit" className="hd-button hd-button-primary" disabled={takeoffSubmitting || !takeoffPropertyReady || !takeoffServicesReady || !takeoffBoundaryReady}>{takeoffSubmitting ? "Submitting..." : takeoffQuoteReady ? "Submit Quote Request" : "Complete Steps Above"}</button></div>
+              </>}
             </form> : null}
 
             {takeoffMessage ? <div className="hd-takeoff-message" role="status">{takeoffMessage}</div> : null}
