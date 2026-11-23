@@ -6,6 +6,8 @@ import {
   WORKFLOW_MODE_PDF,
 } from "../projects/projectLibrary";
 import TakeoffBoundaryMap from "./TakeoffBoundaryMap";
+import PropertyAerialPreview from "./PropertyAerialPreview";
+import { buildPropertyFrame } from "../projects/propertyPreview";
 import "./home-dashboard.css";
 import "./field-desk.css";
 import { getSharedProject } from "../api";
@@ -14,13 +16,6 @@ import { readStartIntent, setStartIntent } from "./startIntent";
 const PricingAdminPanel = lazy(() => import("./PricingAdminPanel"));
 const ProposalBuilder = lazy(() => import("./ProposalBuilder"));
 const TakeoffOperationsBoard = lazy(() => import("./TakeoffOperationsBoard"));
-
-const PREVIEW_LAYER_COLORS = {
-  plowable: "#2586e8",
-  sidewalks: "#f5a524",
-  turf: "#57b44a",
-  mulch: "#b66bd8",
-};
 
 const TAKEOFF_SERVICE_OPTIONS = [
   { value: "Plowable pavement", label: "Parking lots & plowable pavement", detail: "Parking fields, drive lanes, loading areas, and other paved snow-service surfaces." },
@@ -158,40 +153,6 @@ function getInitials(name) {
   return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "MS";
 }
 
-function previewShapes(payload) {
-  const polygons = [];
-  const add = (feature, layer) => {
-    const geometry = feature?.geometry || feature;
-    const parts = geometry?.type === "Polygon" ? [geometry.coordinates]
-      : geometry?.type === "MultiPolygon" ? geometry.coordinates : [];
-    for (const rings of parts || []) {
-      const valid = (rings || []).map((ring) => (ring || []).filter((p) =>
-        Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]))).filter((ring) => ring.length >= 3);
-      if (valid.length) polygons.push({ layer, rings: valid });
-    }
-  };
-  add(payload?.boundary, "boundary");
-  const layers = payload?.layerFeatures || payload?.layers || {};
-  for (const layer of Object.keys(PREVIEW_LAYER_COLORS)) {
-    for (const feature of Array.isArray(layers[layer]) ? layers[layer] : []) add(feature, layer);
-  }
-  if (!polygons.length) return [];
-  const measured = polygons.filter(({ layer }) => layer !== "boundary");
-  let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
-  for (const { rings } of measured.length ? measured : polygons) {
-    for (const [x, y] of rings[0]) {
-      west = Math.min(west, x); east = Math.max(east, x);
-      south = Math.min(south, y); north = Math.max(north, y);
-    }
-  }
-  const longitudeScale = Math.max(0.01, Math.cos((north + south) * Math.PI / 360));
-  const scale = Math.min(690 / Math.max(1e-9, (east - west) * longitudeScale), 320 / Math.max(1e-9, north - south));
-  return polygons.map(({ layer, rings }, key) => ({
-    layer, key, path: rings.map((ring) => ring.map(([x,y], index) =>
-      `${index ? "L" : "M"}${(380 + (x - (west + east) / 2) * longitudeScale * scale).toFixed(1)} ${(195 - (y - (north + south) / 2) * scale).toFixed(1)}`
-    ).join("") + "Z").join(""),
-  }));
-}
 
 async function imageFileToPreviewDataUrl(file) {
   if (!file || !String(file.type || "").startsWith("image/")) {
@@ -240,7 +201,7 @@ async function imageFileToPreviewDataUrl(file) {
   }
 }
 
-function DeskPreview({ entry, payload, pdf, imageUrl, renderPlanPreview }) {
+function DeskPreview({ entry, payload, pdf, imageUrl, renderPlanPreview, ensureGoogleSession }) {
   const [remote, setRemote] = useState(null);
   const [plan, setPlan] = useState(null);
   const remoteId = !payload && !entry?.payload && entry?.storageScope === "shared" ? entry.id : "";
@@ -253,7 +214,9 @@ function DeskPreview({ entry, payload, pdf, imageUrl, renderPlanPreview }) {
     return () => { active = false; };
   }, [remoteId]);
   const data = payload || entry?.payload || (remote?.id === remoteId ? remote?.payload : null);
-  const shapes = useMemo(() => pdf ? [] : previewShapes(data), [pdf, data]);
+  const layers = data?.layerFeatures || data?.layers;
+  const boundary = data?.boundary;
+  const frame = useMemo(() => pdf ? null : buildPropertyFrame(layers, boundary), [pdf, layers, boundary]);
   useEffect(() => {
     if (!pdf || !data?.pdfSourceAsset) return;
     let active = true;
@@ -266,16 +229,15 @@ function DeskPreview({ entry, payload, pdf, imageUrl, renderPlanPreview }) {
     return () => { active = false; if (url) URL.revokeObjectURL(url); };
   }, [pdf, data, renderPlanPreview]);
   const page = pdf && plan?.data === data ? plan : null;
+  if (frame) return <figure className="desk-preview desk-property-aerial">
+    <PropertyAerialPreview frame={frame} provider={data?.baseMap || "maptiler"} ensureGoogleSession={ensureGoogleSession} />
+  </figure>;
   return <figure className="desk-preview">
     {page ? <img src={page.url} alt={`Saved plan with markups, page ${page.page}`} />
-      : shapes.length ? <svg viewBox="0 0 760 390" role="img" aria-label="Measured project outline">
-        {shapes.map(({ key, layer, path }) => <path key={key} d={path} fillRule="evenodd"
-          fill={layer === "boundary" ? "none" : PREVIEW_LAYER_COLORS[layer] + "55"}
-          stroke={PREVIEW_LAYER_COLORS[layer] || "#ffffff"} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}
-      </svg> : imageUrl ? <img src={imageUrl} alt="Selected site preview" />
+      : imageUrl ? <img src={imageUrl} alt="Selected site preview" />
       : <div className="desk-no-preview"><Icon name={pdf ? "file" : "map"} size={34} />
         <span>{pdf ? "Plan preview unavailable" : data ? "No measured polygons yet" : "No saved outline on this device"}</span></div>}
-    <figcaption>{page ? `Plan sheet / Page ${page.page}` : shapes.length ? "Survey view / Measured geometry" : imageUrl ? "Site photograph" : "Project preview"}</figcaption>
+    <figcaption>{page ? `Plan sheet / Page ${page.page}` : imageUrl ? "Site photograph" : "Project preview"}</figcaption>
   </figure>;
 }
 
@@ -298,6 +260,7 @@ function HomeDashboard({
   onToggleTheme,
   resumeCard,
   renderPlanPreview,
+  ensureGoogleSession,
   onResume,
   stats,
   projects,
@@ -841,7 +804,7 @@ function HomeDashboard({
                 <button type="button" className="hd-button hd-button-outline" onClick={startPdfProject}><Icon name="file" />Measure from PDF/Image</button>
               </div>
             </div>
-            {hasResume ? <DeskPreview key={resumeCard?.projectId || previewProject?.id} entry={previewProject} payload={resumeCard?.payload} pdf={previewPdf} renderPlanPreview={renderPlanPreview} imageUrl={projectPreviewImages?.[previewProject?.id]} /> : null}
+            {hasResume ? <DeskPreview key={resumeCard?.projectId || previewProject?.id} entry={previewProject} payload={resumeCard?.payload} pdf={previewPdf} renderPlanPreview={renderPlanPreview} ensureGoogleSession={ensureGoogleSession} imageUrl={projectPreviewImages?.[previewProject?.id]} /> : null}
           </div>
         </section>
 

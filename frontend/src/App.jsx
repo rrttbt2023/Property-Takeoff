@@ -7,6 +7,7 @@ import { strToU8, zipSync } from "fflate";
 
 import { loadKmlOrKmz } from "./kml";
 import { frameOpenedProject, getProjectMapBounds } from "./projects/projectMapView";
+import { LAYER_COLORS } from "./projects/propertyPreview";
 import {
   PROJECT_SCHEMA_VERSION,
   isValidProjectPayload,
@@ -135,13 +136,6 @@ const MEASUREMENT_TYPE_LAYER_MAP = {
   parking_lot_area: "plowable",
   sidewalk_length: "sidewalks",
   plow_route_length: "plowable",
-};
-
-const LAYER_COLORS = {
-  plowable: { fill: "#00ffff", line: "#0088ff" },
-  sidewalks: { fill: "#ffff00", line: "#ffaa00" },
-  turf: { fill: "#00ff00", line: "#00cc00" },
-  mulch: { fill: "#ff6600", line: "#ff5500" },
 };
 
 const BOUNDARY_COLORS = {
@@ -14557,7 +14551,7 @@ export default function App() {
     if (hasCurrentProjectData) {
       return {
         projectId: currentProjectLibraryId,
-        payload: { layerFeatures, boundary, pdfSourceAsset, pdfPageNumber, pdfAnnotations, pdfSavedMeasurements, pdfPageSaveMeta },
+        payload: { layerFeatures, boundary, baseMap, pdfSourceAsset, pdfPageNumber, pdfAnnotations, pdfSavedMeasurements, pdfPageSaveMeta },
         title: String(projectName || "").trim() || "Untitled Project",
         workflowMode,
         pageLabel:
@@ -14599,7 +14593,7 @@ export default function App() {
   }, [
     activeSharedProjectMeta?.lastEditedAt,
     activeSharedProjectMeta?.savedBy,
-    currentProjectLibraryId, layerFeatures, boundary, pdfSourceAsset, pdfAnnotations, pdfSavedMeasurements, pdfPageSaveMeta,
+    currentProjectLibraryId, layerFeatures, boundary, baseMap, pdfSourceAsset, pdfAnnotations, pdfSavedMeasurements, pdfPageSaveMeta,
     hasCurrentProjectData,
     lastManualSaveAt,
     pdfPageNumber,
@@ -20840,6 +20834,7 @@ export default function App() {
           }
           resumeCard={homeResumeCard}
           renderPlanPreview={renderDashboardPlan}
+          ensureGoogleSession={ensureGoogleTileSession}
           onResume={resumeLastProjectFromHome}
           stats={homeProjectStats}
           projects={visibleProjectLibrary}

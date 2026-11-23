@@ -1,5 +1,24 @@
 import { expect, test } from "@playwright/test";
 import { getProjectMapBounds } from "../../src/projects/projectMapView.js";
+import { buildPropertyFrame, PREVIEW_WIDTH, PREVIEW_HEIGHT, tilesForFrame } from "../../src/projects/propertyPreview.js";
+
+test("preview tiles and polygons use the same coordinates and fit the measured site, not a distant boundary", () => {
+  const frame = buildPropertyFrame({ turf: [turf], mulch: [mulch] }, boundary);
+  expect(frame.paths.length).toBe(3);
+  const tiles = tilesForFrame(frame, { maxzoom: 19, template: "{z}/{x}/{y}" });
+  expect(tiles.length).toBeLessThanOrEqual(24);
+  const lat = 35.01 * Math.PI / 180;
+  const x = (-83.01 + 180) / 360, y = (1 - Math.log(Math.tan(Math.PI / 4 + lat / 2)) / Math.PI) / 2;
+  const n = 2 ** Math.min(19, frame.zoom);
+  const tile = tiles.find(t => t.url.endsWith(`/${Math.floor(x * n)}/${Math.floor(y * n)}`));
+  const [px, py] = frame.paths[0].d.match(/^M([\d.]+),([\d.]+)/).slice(1).map(Number);
+  expect(px).toBeCloseTo(tile.left + (x * n % 1) * tile.size, 1);
+  expect(py).toBeCloseTo(tile.top + (y * n % 1) * tile.size, 1);
+  expect(px).toBeLessThan(PREVIEW_WIDTH);
+  expect(py).toBeLessThan(PREVIEW_HEIGHT);
+  expect(buildPropertyFrame({}, boundary).zoom).toBeLessThan(frame.zoom);
+  expect(buildPropertyFrame({}, null)).toBeNull();
+});
 
 function polygon(w, s, e, n) {
   return { type: "Feature", properties: {}, geometry: { type: "Polygon",
@@ -90,9 +109,20 @@ test("opening and resuming a saved project frame the measurements on the real ma
   await page.evaluate(() => window.testLocationMap.jumpTo({ center: [-90, 38] }));
   await page.getByRole("checkbox", { name: "Dim outside boundary" }).click();
   await expect.poll(() => page.evaluate(() => window.testLocationMap.getCenter().lng)).toBeCloseTo(-90);
+  await page.route("https://example.invalid/**", route => route.fulfill({
+    contentType: "image/svg+xml",
+    body: '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#385332"/></svg>',
+  }));
   await page.getByRole("button", { name: "Back to Home" }).click();
   await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
-  await expect(page.getByRole("img", { name: "Measured project outline" })).toBeVisible();
+  const preview = page.getByRole("img", { name: "Property satellite image with measured polygon outlines" });
+  await expect(preview).toBeVisible();
+  await expect(preview.locator("path")).toHaveCount(3);
+  await expect(page.locator(".desk-aerial-caption a")).toContainText("MapTiler");
   await page.getByRole("button", { name: "Continue measuring" }).click();
   await expect.poll(checkCamera).toBe(true);
+  await page.route("https://api.maptiler.com/tiles/satellite-v2/tiles.json*", route => route.abort());
+  await page.getByRole("button", { name: "Back to Home" }).click();
+  await expect(page.getByText("Imagery unavailable / Measured outline")).toBeVisible();
+  await expect(page.getByRole("img", { name: "Measured project outline" }).locator("path")).toHaveCount(3);
 });
