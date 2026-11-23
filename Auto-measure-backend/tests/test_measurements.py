@@ -15,7 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.main import app
 from app.repositories.measurement_repository import init_db
-from app.repositories.account_repository import update_organization_billing
+from app.repositories.account_repository import (
+    create_account_token,
+    create_customer_account,
+    get_user_by_identifier,
+    update_organization_billing,
+)
 from app.services import shared_auth as shared_auth_service
 from app.services.segmentation_service import SegmentationService
 
@@ -99,6 +104,59 @@ def test_shared_login_session_and_logout() -> None:
         assert expired_session_response.status_code == 401
     finally:
         _restore_shared_auth_env(previous)
+
+
+def test_cookie_session_requires_csrf_for_writes() -> None:
+    previous = _set_shared_auth_env(
+        AUTO_MEASURE_SHARED_AUTH_USER="cookie-user",
+        AUTO_MEASURE_SHARED_AUTH_PASS="cookie-secret",
+    )
+    client.cookies.clear()
+    try:
+        login = client.post(
+            "/api/auth/login",
+            json={"username": "cookie-user", "password": "cookie-secret"},
+        )
+        assert login.status_code == 200
+        assert "HttpOnly" in login.headers.get("set-cookie", "")
+        assert client.get("/api/auth/session").status_code == 200
+        assert client.post("/api/auth/logout").status_code == 403
+        csrf = login.json()["csrf_token"]
+        assert client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf}).status_code == 200
+    finally:
+        client.cookies.clear()
+        _restore_shared_auth_env(previous)
+
+
+def test_password_reset_token_is_single_use() -> None:
+    account = create_customer_account(
+        email="password-reset@example.com",
+        password="old-password-123",
+        display_name="Password Reset",
+        organization_name="Recovery Test",
+    )
+    token = create_account_token(
+        str(account["user_id"]),
+        "password_reset",
+        "2999-01-01T00:00:00Z",
+    )
+    reset = client.post(
+        "/api/auth/password/reset",
+        json={"token": token, "password": "new-password-456"},
+    )
+    assert reset.status_code == 200
+    assert client.post(
+        "/api/auth/password/reset",
+        json={"token": token, "password": "other-password-789"},
+    ).status_code == 400
+    refreshed = get_user_by_identifier("password-reset@example.com")
+    assert refreshed is not None
+
+
+def test_development_readiness_is_healthy() -> None:
+    response = client.get("/api/ready")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
 
 
 def test_shared_project_revisions_and_polygon_drop_guard() -> None:
@@ -242,6 +300,16 @@ def test_shared_project_revisions_and_polygon_drop_guard() -> None:
 
 
 def test_customer_registration_persistent_session_and_tenant_isolation() -> None:
+    missing_consent = client.post(
+        "/api/auth/register",
+        json={
+            "email": "missing-consent@example.com",
+            "password": "safe-password-000",
+            "display_name": "Missing Consent",
+            "organization_name": "Missing Consent Company",
+        },
+    )
+    assert missing_consent.status_code == 422
     first = client.post(
         "/api/auth/register",
         json={
@@ -249,6 +317,7 @@ def test_customer_registration_persistent_session_and_tenant_isolation() -> None
             "password": "safe-password-123",
             "display_name": "First Owner",
             "organization_name": "First Company",
+            "accepted_terms": True,
         },
     )
     second = client.post(
@@ -258,6 +327,7 @@ def test_customer_registration_persistent_session_and_tenant_isolation() -> None
             "password": "safe-password-456",
             "display_name": "Second Owner",
             "organization_name": "Second Company",
+            "accepted_terms": True,
         },
     )
     assert first.status_code == 201
@@ -265,6 +335,10 @@ def test_customer_registration_persistent_session_and_tenant_isolation() -> None
     first_body = first.json()
     second_body = second.json()
     assert first_body["workspace_access"] is False
+    first_account = get_user_by_identifier("first-company@example.com")
+    assert first_account is not None
+    assert first_account["terms_accepted_at"]
+    assert first_account["terms_version"] == "2026-11-19"
 
     shared_auth_service._TOKEN_STORE.clear()
     first_headers = {"Authorization": f"Bearer {first_body['token']}"}
@@ -290,7 +364,9 @@ def test_customer_registration_persistent_session_and_tenant_isolation() -> None
     assert client.get("/api/projects/tenant-private-project", headers=second_headers).status_code == 404
 
 
-def test_managed_takeoff_quote_and_acceptance_workflow() -> None:
+def test_managed_takeoff_quote_and_acceptance_workflow(monkeypatch) -> None:
+    from app.routes import billing as billing_routes
+    from app.routes import takeoffs as takeoff_routes
     customer = client.post(
         "/api/auth/register",
         json={
@@ -298,21 +374,69 @@ def test_managed_takeoff_quote_and_acceptance_workflow() -> None:
             "password": "managed-password-123",
             "display_name": "Managed Customer",
             "organization_name": "Managed Customer Company",
+            "accepted_terms": True,
         },
     )
     assert customer.status_code == 201
     customer_headers = {"Authorization": f"Bearer {customer.json()['token']}"}
+    boundary = {
+        "type": "Feature",
+        "properties": {},
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[
+                [-75.53, 39.15],
+                [-75.52, 39.15],
+                [-75.52, 39.16],
+                [-75.53, 39.16],
+                [-75.53, 39.15],
+            ]],
+        },
+    }
+    estimate = client.post(
+        "/api/takeoff-requests/estimate",
+        headers=customer_headers,
+        json={
+            "property_type": "commercial_retail",
+            "service_types": ["Plowable pavement", "Sidewalks"],
+            "boundary": boundary,
+        },
+    )
+    assert estimate.status_code == 200
+    estimate_body = estimate.json()
+    assert estimate_body["low_cents"] >= 7_500
+    assert estimate_body["high_cents"] > estimate_body["low_cents"]
+    assert estimate_body["area_source"] == "boundary"
+    assert estimate_body["estimated_square_feet"] > 1_000
     created = client.post(
         "/api/takeoff-requests",
         headers=customer_headers,
         json={
             "title": "Dover Shopping Center",
             "address": "1200 N Dupont Hwy, Dover, DE",
-            "service_types": ["Plowable", "Sidewalks"],
+            "service_types": ["Plowable pavement", "Sidewalks"],
+            "property_type": "commercial_retail",
+            "estimated_square_feet": 240_000,
+            "boundary": boundary,
             "notes": "Exclude the loading dock.",
         },
     )
     assert created.status_code == 201
+    assert created.json()["property_type"] == "commercial_retail"
+    assert created.json()["estimated_square_feet"] == estimate_body["estimated_square_feet"]
+    assert created.json()["estimate_low_cents"] == estimate_body["low_cents"]
+    assert created.json()["estimate_high_cents"] == estimate_body["high_cents"]
+    assert created.json()["boundary"] == boundary
+
+    missing_boundary = client.post(
+        "/api/takeoff-requests/estimate",
+        headers=customer_headers,
+        json={
+            "property_type": "commercial_retail",
+            "service_types": ["Turf"],
+        },
+    )
+    assert missing_boundary.status_code == 422
     request_id = created.json()["id"]
     empty_upload = client.post(
         f"/api/takeoff-requests/{request_id}/files",
@@ -345,13 +469,68 @@ def test_managed_takeoff_quote_and_acceptance_workflow() -> None:
         )
         assert quote.status_code == 200
         assert quote.json()["quote_cents"] == 8500
-        accepted = client.post(
+
+        checkout_calls = []
+
+        class FakeTakeoffCheckout:
+            @staticmethod
+            def create(**kwargs):
+                checkout_calls.append(kwargs)
+                return {"id": "cs_takeoff_test", "url": "https://checkout.stripe.test/takeoff"}
+
+        class FakeTakeoffWebhook:
+            @staticmethod
+            def construct_event(payload, signature, secret):
+                assert signature == "takeoff-signature"
+                assert secret == "whsec_takeoff_test"
+                return {
+                    "id": "evt_takeoff_checkout_complete",
+                    "type": "checkout.session.completed",
+                    "data": {"object": {
+                        "id": "cs_takeoff_test",
+                        "client_reference_id": customer.json()["organization_id"],
+                        "payment_status": "paid",
+                        "payment_intent": "pi_takeoff_test",
+                        "metadata": {"takeoff_request_id": request_id},
+                    }},
+                }
+
+        fake_stripe = SimpleNamespace(
+            checkout=SimpleNamespace(Session=FakeTakeoffCheckout),
+            Webhook=FakeTakeoffWebhook,
+        )
+        monkeypatch.setattr(takeoff_routes, "_stripe_module", lambda: fake_stripe)
+        monkeypatch.setattr(billing_routes, "_stripe_module", lambda: fake_stripe)
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_takeoff")
+        monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_takeoff_test")
+
+        checkout = client.post(
+            f"/api/takeoff-requests/{request_id}/checkout",
+            headers=customer_headers,
+        )
+        assert checkout.status_code == 200
+        assert checkout.json()["url"] == "https://checkout.stripe.test/takeoff"
+        assert checkout_calls[0]["mode"] == "payment"
+        assert checkout_calls[0]["line_items"][0]["price_data"]["unit_amount"] == 8500
+
+        unpaid_accept = client.post(
             f"/api/takeoff-requests/{request_id}/accept",
             headers=customer_headers,
         )
-        assert accepted.status_code == 200
-        assert accepted.json()["status"] == "accepted"
-        assert accepted.json()["due_at"]
+        assert unpaid_accept.status_code == 402
+
+        paid = client.post(
+            "/api/billing/webhook",
+            content=b"{}",
+            headers={"stripe-signature": "takeoff-signature"},
+        )
+        assert paid.status_code == 200
+        refreshed = client.get(
+            f"/api/takeoff-requests/{request_id}", headers=customer_headers
+        ).json()
+        assert refreshed["status"] == "accepted"
+        assert refreshed["payment_status"] == "paid"
+        assert refreshed["due_at"]
     finally:
         _restore_shared_auth_env(previous)
 
@@ -366,6 +545,7 @@ def test_stripe_checkout_and_webhook_unlock_workspace(monkeypatch) -> None:
             "password": "billing-password-123",
             "display_name": "Billing Customer",
             "organization_name": "Billing Customer Company",
+            "accepted_terms": True,
         },
     )
     assert customer.status_code == 201

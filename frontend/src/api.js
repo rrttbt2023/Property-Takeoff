@@ -2,13 +2,15 @@ const RAW_API_BASE = String(import.meta.env.VITE_API_BASE_URL || "").trim();
 const API_BASE_URL = RAW_API_BASE.replace(/\/+$/, "");
 const RAW_SHARED_API_BASE = String(
   import.meta.env.VITE_SHARED_API_BASE_URL ||
-    (import.meta.env.DEV ? "/shared-api" : "https://property-takeoff.onrender.com")
+    (import.meta.env.DEV ? "/shared-api" : "")
 ).trim();
 const SHARED_API_BASE_URL = RAW_SHARED_API_BASE.replace(/\/+$/, "");
 let sharedAuthToken = "";
+let sharedCsrfToken = "";
 
-export function setSharedAuthToken(token) {
+export function setSharedAuthToken(token, csrfToken = "") {
   sharedAuthToken = String(token || "").trim();
+  sharedCsrfToken = String(csrfToken || "").trim();
 }
 
 function buildApiCandidates(
@@ -124,9 +126,13 @@ function sharedRequest(path, options = {}) {
   if (sharedAuthToken && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${sharedAuthToken}`);
   }
-  return request(path, { ...options, headers }, {
+  const method = String(options.method || "GET").toUpperCase();
+  if (sharedCsrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers.set("X-CSRF-Token", sharedCsrfToken);
+  }
+  return request(path, { ...options, headers, credentials: "include" }, {
     baseUrl: SHARED_API_BASE_URL,
-    includeRelative: false,
+    includeRelative: !SHARED_API_BASE_URL,
     includeLocalFallbacks: false,
   });
 }
@@ -330,18 +336,26 @@ export function deleteSharedProject(projectId) {
   });
 }
 
-export function loginSharedAccess({ username, password }) {
+export function loginSharedAccess({ username, password, mfaCode = "" }) {
   return sharedRequest("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       username: String(username || "").trim(),
       password: String(password || ""),
+      mfa_code: String(mfaCode || "").trim() || null,
     }),
   });
 }
 
-export function registerSharedAccess({ email, password, displayName, organizationName }) {
+export function registerSharedAccess({
+  email,
+  password,
+  displayName,
+  organizationName,
+  botToken = "",
+  acceptedTerms = false,
+}) {
   return sharedRequest("/api/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -350,7 +364,65 @@ export function registerSharedAccess({ email, password, displayName, organizatio
       password: String(password || ""),
       display_name: String(displayName || "").trim(),
       organization_name: String(organizationName || "").trim(),
+      bot_token: String(botToken || "").trim() || null,
+      accepted_terms: Boolean(acceptedTerms),
     }),
+  });
+}
+
+export function requestPasswordReset(email) {
+  return sharedRequest("/api/auth/password/forgot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: String(email || "").trim() }),
+  });
+}
+
+export function resetPassword(token, password) {
+  return sharedRequest("/api/auth/password/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: String(token || "").trim(), password: String(password || "") }),
+  });
+}
+
+export function verifyEmail(token) {
+  return sharedRequest("/api/auth/email/verify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: String(token || "").trim() }),
+  });
+}
+
+export function resendVerificationEmail(email) {
+  return sharedRequest("/api/auth/email/resend", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: String(email || "").trim() }),
+  });
+}
+
+export function exportAccountData() {
+  return sharedRequest("/api/auth/account/export");
+}
+
+export function deleteAccount(password) {
+  return sharedRequest("/api/auth/account", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: String(password || "") }),
+  });
+}
+
+export function setupAccountMfa() {
+  return sharedRequest("/api/auth/mfa/setup", { method: "POST" });
+}
+
+export function confirmAccountMfa(code) {
+  return sharedRequest("/api/auth/mfa/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: String(code || "").trim() }),
   });
 }
 
@@ -395,7 +467,27 @@ export function listTakeoffRequests(limit = 100) {
   return sharedRequest(`/api/takeoff-requests?limit=${encodeURIComponent(limit)}`);
 }
 
-export function createTakeoffRequest({ title, address, serviceTypes, boundary, notes }) {
+export function estimateTakeoffRequest({ propertyType, serviceTypes, boundary }) {
+  return sharedRequest("/api/takeoff-requests/estimate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      property_type: String(propertyType || "commercial_retail").trim(),
+      service_types: Array.isArray(serviceTypes) ? serviceTypes : [],
+      boundary: boundary && typeof boundary === "object" ? boundary : null,
+    }),
+  });
+}
+
+export function createTakeoffRequest({
+  title,
+  address,
+  serviceTypes,
+  propertyType,
+  estimatedSquareFeet,
+  boundary,
+  notes,
+}) {
   return sharedRequest("/api/takeoff-requests", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -403,6 +495,8 @@ export function createTakeoffRequest({ title, address, serviceTypes, boundary, n
       title: String(title || "").trim(),
       address: String(address || "").trim(),
       service_types: Array.isArray(serviceTypes) ? serviceTypes : [],
+      property_type: String(propertyType || "commercial_retail").trim(),
+      estimated_square_feet: Number(estimatedSquareFeet),
       boundary: boundary && typeof boundary === "object" ? boundary : null,
       notes: String(notes || "").trim(),
     }),
@@ -420,6 +514,12 @@ export function uploadTakeoffRequestFile(requestId, file) {
 
 export function acceptTakeoffQuote(requestId) {
   return sharedRequest(`/api/takeoff-requests/${encodeURIComponent(requestId)}/accept`, {
+    method: "POST",
+  });
+}
+
+export function createTakeoffPaymentCheckout(requestId) {
+  return sharedRequest(`/api/takeoff-requests/${encodeURIComponent(requestId)}/checkout`, {
     method: "POST",
   });
 }

@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -6,17 +7,28 @@ from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import Any
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 
 from app.repositories.account_repository import (
     create_customer_account,
+    create_account_token,
     create_session,
+    consume_account_token,
+    delete_customer_account,
     delete_session,
+    delete_user_sessions,
     get_session,
     get_user_by_identifier,
+    mark_email_verified,
+    record_login_failure,
+    record_login_success,
+    set_user_mfa,
     upsert_internal_user,
+    update_user_password,
     verify_password,
 )
+from app.services.email_service import send_action_email
+from app.services.totp import generate_secret, provisioning_url, verify_totp
 
 
 def _now_utc() -> datetime:
@@ -136,6 +148,8 @@ def _token_hash(token: str) -> str:
 def _public_session(token: str, account: dict[str, Any], expires_at: str) -> dict[str, Any]:
     return {
         "token": token,
+        "csrf_token": csrf_token_for_session(token),
+        "authenticated": True,
         "username": str(account.get("username") or ""),
         "email": str(account.get("email") or ""),
         "display_name": str(account.get("display_name") or account.get("username") or ""),
@@ -147,8 +161,25 @@ def _public_session(token: str, account: dict[str, Any], expires_at: str) -> dic
         "workspace_access": bool(account.get("workspace_access")),
         "ai_access": bool(account.get("ai_access")),
         "is_staff": bool(account.get("is_internal")),
+        "email_verified": bool(account.get("email_verified_at")) or bool(account.get("is_internal")),
+        "mfa_enabled": bool(account.get("mfa_enabled")),
         "expires_at": str(expires_at),
     }
+
+
+def csrf_token_for_session(token: str) -> str:
+    secret = str(
+        os.getenv("AUTO_MEASURE_CSRF_SECRET")
+        or os.getenv("AUTO_MEASURE_PASSWORD_PEPPER")
+        or "local-development-csrf-secret"
+    ).encode("utf-8")
+    return hmac.new(secret, str(token).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def validate_csrf_token(token: str, candidate: str) -> bool:
+    return bool(token and candidate) and hmac.compare_digest(
+        csrf_token_for_session(token), str(candidate)
+    )
 
 
 _TOKEN_STORE: dict[str, dict[str, Any]] = {}
@@ -165,23 +196,54 @@ def _issue_session(account: dict[str, Any]) -> dict[str, Any]:
     return session
 
 
-def login_shared_user(username: str, password: str) -> dict[str, Any]:
+def login_shared_user(username: str, password: str, mfa_code: str | None = None) -> dict[str, Any]:
     user = str(username or "").strip()
     pwd = str(password or "")
     account = get_user_by_identifier(user)
+    if account and account.get("locked_until"):
+        try:
+            locked_until = datetime.fromisoformat(str(account["locked_until"]).replace("Z", "+00:00"))
+            if locked_until > _now_utc():
+                raise HTTPException(status_code=423, detail="Account temporarily locked. Try again later.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     if account and account.get("is_active") and verify_password(pwd, str(account.get("password_hash"))):
+        requires_verification = _parse_bool_env("AUTO_MEASURE_REQUIRE_EMAIL_VERIFICATION", False)
+        if requires_verification and not account.get("is_internal") and not account.get("email_verified_at"):
+            raise HTTPException(status_code=403, detail="Verify your email before signing in.")
+        requires_mfa = bool(account.get("mfa_enabled")) or (
+            bool(account.get("is_internal"))
+            and _parse_bool_env("AUTO_MEASURE_REQUIRE_STAFF_MFA", False)
+        )
+        if requires_mfa:
+            secret = str(account.get("mfa_secret") or "")
+            if not secret:
+                raise HTTPException(status_code=428, detail="Staff MFA enrollment is required.")
+            if not verify_totp(secret, str(mfa_code or "")):
+                raise HTTPException(status_code=428, detail="Enter the 6-digit authenticator code.")
+        record_login_success(str(account["user_id"]))
         return _issue_session(account)
 
     configured_credentials = _configured_credentials()
     expected_password = configured_credentials.get(user)
     if expected_password and secrets.compare_digest(pwd, expected_password):
-        return _issue_session(upsert_internal_user(user, pwd))
+        internal_account = upsert_internal_user(user, pwd)
+        if _parse_bool_env("AUTO_MEASURE_REQUIRE_STAFF_MFA", False):
+            secret = str(internal_account.get("mfa_secret") or "")
+            if not secret:
+                raise HTTPException(status_code=428, detail="Staff MFA enrollment is required.")
+            if not verify_totp(secret, str(mfa_code or "")):
+                raise HTTPException(status_code=428, detail="Enter the 6-digit authenticator code.")
+        return _issue_session(internal_account)
 
     if not account and not configured_credentials:
         config_error = _shared_auth_config_error()
         if config_error:
             raise HTTPException(status_code=503, detail=config_error)
     secrets.compare_digest(pwd, "shared-auth-placeholder")
+    record_login_failure(user)
     raise HTTPException(status_code=401, detail="Invalid username or password.")
 
 
@@ -191,6 +253,7 @@ def register_shared_user(
     password: str,
     display_name: str,
     organization_name: str,
+    terms_version: str,
 ) -> dict[str, Any]:
     if not _parse_bool_env("AUTO_MEASURE_ALLOW_PUBLIC_SIGNUP", True):
         raise HTTPException(status_code=403, detail="New account registration is currently closed.")
@@ -200,10 +263,100 @@ def register_shared_user(
             password=password,
             display_name=display_name,
             organization_name=organization_name,
+            terms_version=terms_version,
         )
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    verification_expiry = (_now_utc() + timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+    verification_token = create_account_token(
+        str(account["user_id"]), "verify_email", verification_expiry
+    )
+    try:
+        send_action_email(
+            recipient=str(account.get("email") or email),
+            display_name=str(account.get("display_name") or display_name),
+            action="verify",
+            token=verification_token,
+        )
+    except Exception:
+        if _parse_bool_env("AUTO_MEASURE_REQUIRE_EMAIL_VERIFICATION", False):
+            raise HTTPException(
+                status_code=503,
+                detail="The account was created, but the verification email could not be sent.",
+            )
     return _issue_session(account)
+
+
+def request_password_reset(email: str) -> None:
+    account = get_user_by_identifier(email)
+    if not account or account.get("is_internal"):
+        return
+    expiry = (_now_utc() + timedelta(minutes=45)).isoformat().replace("+00:00", "Z")
+    token = create_account_token(str(account["user_id"]), "password_reset", expiry)
+    send_action_email(
+        recipient=str(account.get("email") or email),
+        display_name=str(account.get("display_name") or ""),
+        action="reset",
+        token=token,
+    )
+
+
+def confirm_password_reset(token: str, password: str) -> bool:
+    account = consume_account_token(token, "password_reset")
+    if not account:
+        return False
+    update_user_password(str(account["user_id"]), password)
+    return True
+
+
+def confirm_email_verification(token: str) -> bool:
+    account = consume_account_token(token, "verify_email")
+    if not account:
+        return False
+    mark_email_verified(str(account["user_id"]))
+    return True
+
+
+def resend_email_verification(email: str) -> None:
+    account = get_user_by_identifier(email)
+    if not account or account.get("email_verified_at") or account.get("is_internal"):
+        return
+    expiry = (_now_utc() + timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+    token = create_account_token(str(account["user_id"]), "verify_email", expiry)
+    send_action_email(
+        recipient=str(account.get("email") or email),
+        display_name=str(account.get("display_name") or ""),
+        action="verify",
+        token=token,
+    )
+
+
+def begin_mfa_setup(session: dict[str, Any]) -> dict[str, str]:
+    secret = generate_secret()
+    set_user_mfa(str(session["user_id"]), secret, False)
+    return {
+        "secret": secret,
+        "otpauth_url": provisioning_url(secret, str(session.get("email") or session.get("username") or "user")),
+    }
+
+
+def confirm_mfa_setup(session: dict[str, Any], code: str) -> bool:
+    account = get_user_by_identifier(str(session.get("username") or ""))
+    secret = str((account or {}).get("mfa_secret") or "")
+    if not secret or not verify_totp(secret, code):
+        return False
+    set_user_mfa(str(session["user_id"]), secret, True)
+    delete_user_sessions(str(session["user_id"]))
+    return True
+
+
+def remove_mfa(session: dict[str, Any], code: str) -> bool:
+    account = get_user_by_identifier(str(session.get("username") or ""))
+    secret = str((account or {}).get("mfa_secret") or "")
+    if not secret or not verify_totp(secret, code):
+        return False
+    set_user_mfa(str(session["user_id"]), None, False)
+    return True
 
 
 def logout_shared_user(token: str) -> None:
@@ -228,24 +381,47 @@ def _read_session(token: str) -> dict[str, Any] | None:
     return session
 
 
-def require_shared_access(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-    token = _parse_bearer_token(authorization)
+def require_shared_access(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    bearer = _parse_bearer_token(authorization)
+    token = bearer or str(request.cookies.get("pt_session") or "").strip()
     if not token:
         raise HTTPException(status_code=401, detail="Login required.")
     session = _read_session(token)
     if not session:
         raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+    session["auth_via"] = "bearer" if bearer else "cookie"
     return session
 
 
 def require_workspace_access(
     session: dict[str, Any] = Depends(require_shared_access),
 ) -> dict[str, Any]:
+    if (
+        _parse_bool_env("AUTO_MEASURE_REQUIRE_EMAIL_VERIFICATION", False)
+        and not session.get("is_staff")
+        and not session.get("email_verified")
+    ):
+        raise HTTPException(status_code=403, detail="Verify your email before using the workspace.")
     if not session.get("workspace_access"):
         raise HTTPException(
             status_code=402,
             detail="An active Property Takeoff subscription is required.",
         )
+    return session
+
+
+def require_verified_access(
+    session: dict[str, Any] = Depends(require_shared_access),
+) -> dict[str, Any]:
+    if (
+        _parse_bool_env("AUTO_MEASURE_REQUIRE_EMAIL_VERIFICATION", False)
+        and not session.get("is_staff")
+        and not session.get("email_verified")
+    ):
+        raise HTTPException(status_code=403, detail="Verify your email before continuing.")
     return session
 
 
@@ -257,15 +433,19 @@ def require_staff_access(
     return session
 
 
-def require_ai_access(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+def require_ai_access(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
     production = str(os.getenv("AUTO_MEASURE_ENV", "")).strip().lower() in {
         "prod",
         "production",
     } or _parse_bool_env("RENDER", False)
     enforce = _parse_bool_env("AUTO_MEASURE_REQUIRE_AI_AUTH", production)
-    token = _parse_bearer_token(authorization)
-    if not token and not enforce:
+    bearer = _parse_bearer_token(authorization)
+    if not bearer and not enforce:
         return {"username": "local-development", "ai_access": True, "is_staff": True}
+    token = bearer or str(request.cookies.get("pt_session") or "").strip()
     session = _read_session(token)
     if not session:
         raise HTTPException(status_code=401, detail="Login required for AI/CV tools.")

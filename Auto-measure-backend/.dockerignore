@@ -1,0 +1,11 @@
+venv
+.venv-train
+__pycache__
+.pytest_cache
+data
+backups
+training/data
+training/checkpoints*
+tests
+*.pyc
+.env*

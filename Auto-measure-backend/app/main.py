@@ -1,22 +1,52 @@
 import os
+import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.repositories.account_repository import init_db as init_account_db
 from app.repositories.audit_repository import init_db as init_audit_db
 from app.repositories.measurement_repository import init_db
 from app.repositories.project_repository import init_db as init_project_db
 from app.repositories.takeoff_repository import init_db as init_takeoff_db
+from app.repositories.database import connect_database, database_backend
 from app.routes.audit import router as audit_router
 from app.routes.auth import router as auth_router
 from app.routes.billing import router as billing_router
 from app.routes.measurements import router as measurements_router
 from app.routes.projects import router as projects_router
 from app.routes.takeoffs import router as takeoffs_router
+from app.services.email_service import email_configured
+from app.services.private_storage import malware_scanner_available, storage_backend, storage_ready
+from app.services.shared_auth import validate_csrf_token
+
+
+logger = logging.getLogger("property_takeoff")
+
+
+def _configure_monitoring() -> None:
+    dsn = str(os.getenv("SENTRY_DSN", "")).strip()
+    if not dsn:
+        return
+    try:
+        import sentry_sdk
+
+        sentry_sdk.init(
+            dsn=dsn,
+            environment=str(os.getenv("AUTO_MEASURE_ENV", "development")),
+            traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
+            send_default_pii=False,
+        )
+    except Exception:
+        logger.exception("Monitoring initialization failed")
+
+
+_configure_monitoring()
 
 
 @asynccontextmanager
@@ -90,6 +120,67 @@ app.add_middleware(
 )
 
 
+CSRF_EXEMPT_PATHS = {
+    "/auth/login",
+    "/api/auth/login",
+    "/auth/register",
+    "/api/auth/register",
+    "/auth/password/forgot",
+    "/api/auth/password/forgot",
+    "/auth/password/reset",
+    "/api/auth/password/reset",
+    "/auth/email/verify",
+    "/api/auth/email/verify",
+    "/auth/email/resend",
+    "/api/auth/email/resend",
+    "/billing/webhook",
+    "/api/billing/webhook",
+}
+
+
+@app.middleware("http")
+async def protect_cookie_sessions(request: Request, call_next):
+    local_ai_route = (
+        not _is_production
+        and request.url.path.startswith(("/measurements", "/api/measurements"))
+        and not _parse_bool_env("AUTO_MEASURE_REQUIRE_AI_AUTH", False)
+    )
+    if (
+        request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        and request.url.path not in CSRF_EXEMPT_PATHS
+        and request.cookies.get("pt_session")
+        and not str(request.headers.get("authorization", "")).lower().startswith("bearer ")
+        and not local_ai_route
+    ):
+        session_token = str(request.cookies.get("pt_session") or "")
+        candidate = str(request.headers.get("x-csrf-token") or "")
+        if not validate_csrf_token(session_token, candidate):
+            return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token."})
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    request_id = str(request.headers.get("x-request-id") or uuid.uuid4().hex)[:80]
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("request_failed method=%s path=%s request_id=%s", request.method, request.url.path, request_id)
+        raise
+    duration_ms = (time.perf_counter() - started) * 1000
+    response.headers.setdefault("X-Request-ID", request_id)
+    logger.info(
+        "request_complete method=%s path=%s status=%s duration_ms=%.1f request_id=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        request_id,
+    )
+    return response
+
+
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
@@ -113,6 +204,64 @@ async def add_security_headers(request: Request, call_next):
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def _readiness_checks() -> dict[str, bool]:
+    production = _is_production
+    database_healthy = True
+    if production:
+        try:
+            with connect_database() as connection:
+                database_healthy = connection.execute("SELECT 1 AS ready").fetchone() is not None
+        except Exception:
+            database_healthy = False
+    backup_bucket = str(os.getenv("AUTO_MEASURE_BACKUP_S3_BUCKET", "")).strip()
+    backup_access_key = str(os.getenv("AUTO_MEASURE_BACKUP_S3_ACCESS_KEY_ID", "")).strip()
+    backup_secret_key = str(os.getenv("AUTO_MEASURE_BACKUP_S3_SECRET_ACCESS_KEY", "")).strip()
+    backup_object_storage = bool(backup_bucket) and bool(backup_access_key) == bool(backup_secret_key) and (
+        bool(backup_access_key and backup_secret_key)
+        or _parse_bool_env("AUTO_MEASURE_BACKUP_S3_USE_IAM_ROLE", False)
+    )
+    backups_configured = _parse_bool_env("AUTO_MEASURE_BACKUPS_CONFIGURED", False) and (
+        backup_object_storage or _parse_bool_env("AUTO_MEASURE_MANAGED_DATABASE_BACKUPS", False)
+    )
+    return {
+        "database_managed": not production
+        or (database_backend() == "postgresql" and database_healthy),
+        "private_object_storage": not production
+        or (storage_backend() == "s3" and storage_ready(probe=True)),
+        "malware_scan_required": not production
+        or (
+            str(os.getenv("AUTO_MEASURE_UPLOAD_SCAN_MODE", "")).lower() == "required"
+            and malware_scanner_available()
+        ),
+        "transactional_email": not production or email_configured(),
+        "stripe_configured": not production
+        or all(
+            str(os.getenv(name, "")).strip()
+            for name in ("STRIPE_BASIC_PRICE_ID", "STRIPE_WEBHOOK_SECRET")
+        )
+        and bool(str(os.getenv("STRIPE_RESTRICTED_KEY") or os.getenv("STRIPE_SECRET_KEY") or "").strip()),
+        "password_pepper": not production
+        or len(str(os.getenv("AUTO_MEASURE_PASSWORD_PEPPER", ""))) >= 48,
+        "csrf_secret": not production or len(str(os.getenv("AUTO_MEASURE_CSRF_SECRET", ""))) >= 48,
+        "email_verification_required": not production
+        or _parse_bool_env("AUTO_MEASURE_REQUIRE_EMAIL_VERIFICATION", False),
+        "staff_mfa_required": not production
+        or _parse_bool_env("AUTO_MEASURE_REQUIRE_STAFF_MFA", False),
+        "monitoring": not production or bool(str(os.getenv("SENTRY_DSN", "")).strip()),
+        "backups_configured": not production or backups_configured,
+    }
+
+
+@app.get("/api/ready")
+def readiness():
+    checks = _readiness_checks()
+    ready = all(checks.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "checks": checks},
+    )
 
 
 @app.get("/")

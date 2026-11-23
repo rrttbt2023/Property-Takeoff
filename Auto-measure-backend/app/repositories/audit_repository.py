@@ -1,10 +1,9 @@
 import json
 import os
-import sqlite3
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
+from app.repositories.database import connect_database
 from app.schemas import SecurityAuditEvent
 
 
@@ -12,21 +11,8 @@ DEFAULT_DB_PATH = "./data/measurements.db"
 _DB_READY = False
 
 
-def _db_path() -> str:
-    configured = os.getenv("AUTO_MEASURE_DB_PATH", DEFAULT_DB_PATH)
-    path = Path(configured).expanduser()
-    if not path.is_absolute():
-        backend_root = Path(__file__).resolve().parents[2]
-        path = backend_root / path
-    return str(path)
-
-
-def _connect() -> sqlite3.Connection:
-    db_file = _db_path()
-    Path(db_file).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_file)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _connect():
+    return connect_database(DEFAULT_DB_PATH)
 
 
 def _now_iso() -> str:
@@ -71,7 +57,7 @@ def init_db() -> None:
     prune_old_events()
 
 
-def _migrate_schema(conn: sqlite3.Connection) -> None:
+def _migrate_schema(conn) -> None:
     existing = {
         str(row["name"])
         for row in conn.execute("PRAGMA table_info(security_audit_events)").fetchall()

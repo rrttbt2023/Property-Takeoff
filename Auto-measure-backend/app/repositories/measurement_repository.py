@@ -1,10 +1,9 @@
 import json
 import os
-import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
+from app.repositories.database import connect_database
 from app.schemas import MeasurementRecord, MeasurementRequest, MeasurementResponse
 
 
@@ -19,21 +18,8 @@ _ALLOWED_MEASUREMENT_TYPES = {
 }
 
 
-def _db_path() -> str:
-    configured = os.getenv("AUTO_MEASURE_DB_PATH", DEFAULT_DB_PATH)
-    path = Path(configured).expanduser()
-    if not path.is_absolute():
-        backend_root = Path(__file__).resolve().parents[2]
-        path = backend_root / path
-    return str(path)
-
-
-def _connect() -> sqlite3.Connection:
-    db_file = _db_path()
-    Path(db_file).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_file)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _connect():
+    return connect_database(DEFAULT_DB_PATH)
 
 
 def init_db() -> None:
@@ -62,7 +48,7 @@ def init_db() -> None:
     _DB_READY = True
 
 
-def _migrate_schema(conn: sqlite3.Connection) -> None:
+def _migrate_schema(conn) -> None:
     """Backfill columns for older DB files so reads don't fail with 500s."""
     existing = {
         str(row["name"])
@@ -193,7 +179,7 @@ def _to_point_pairs(raw: Any) -> list[list[tuple[float, float]]]:
     return out
 
 
-def _row_to_record(row: sqlite3.Row) -> MeasurementRecord:
+def _row_to_record(row) -> MeasurementRecord:
     from app.schemas import Point
 
     polygons_raw = _json_load(row["polygons_json"], [])

@@ -3,8 +3,19 @@ import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
 
 import React from "react";
 import ReactDOM from "react-dom/client";
+import * as Sentry from "@sentry/react";
 import App from "./App.jsx";
 import "./styles.css";
+
+const sentryDsn = String(import.meta.env.VITE_SENTRY_DSN || "").trim();
+if (sentryDsn) {
+  Sentry.init({
+    dsn: sentryDsn,
+    environment: String(import.meta.env.MODE || "production"),
+    tracesSampleRate: Number(import.meta.env.VITE_SENTRY_TRACES_SAMPLE_RATE || 0.05),
+    sendDefaultPii: false,
+  });
+}
 
 class AppErrorBoundary extends React.Component {
   constructor(props) {
@@ -19,6 +30,9 @@ class AppErrorBoundary extends React.Component {
   componentDidCatch(error, info) {
     // Keep stack in console for debugging while also showing a visible fallback UI.
     console.error("App crashed:", error, info);
+    if (sentryDsn) {
+      Sentry.captureException(error, { extra: { componentStack: info?.componentStack } });
+    }
   }
 
   render() {

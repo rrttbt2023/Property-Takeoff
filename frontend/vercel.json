@@ -5,6 +5,31 @@
   "outputDirectory": "dist",
   "headers": [
     {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self' https://unpkg.com https://maps.googleapis.com https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://property-takeoff.onrender.com https://api.mapbox.com https://*.mapbox.com https://api.maptiler.com https://*.maptiler.com https://maps.googleapis.com https://places.googleapis.com https://tile.googleapis.com https://atlas.microsoft.com https://*.ingest.sentry.io; worker-src 'self' blob:; frame-src https://www.google.com https://challenges.cloudflare.com https://checkout.stripe.com; form-action 'self' https://checkout.stripe.com; upgrade-insecure-requests"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(), microphone=(), geolocation=(self)"
+        }
+      ]
+    },
+    {
       "source": "/assets/(.*)",
       "headers": [
         {
@@ -24,6 +49,10 @@
     }
   ],
   "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "https://property-takeoff.onrender.com/api/$1"
+    },
     {
       "source": "/(.*)",
       "destination": "/index.html"

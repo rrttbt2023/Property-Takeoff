@@ -45,10 +45,17 @@
 .account-access-form h2 { font-family: Georgia, serif; font-size: 34px; letter-spacing: -.025em; line-height: 1.05; margin: 9px 0; }
 .account-access-form p { color: #637069; line-height: 1.5; margin: 0 0 7px; }
 .account-access-form label { color: #334039; display: grid; font-size: 13px; font-weight: 800; gap: 7px; }
+.account-access-form label > small { color: #78857d; font-size: 10px; font-weight: 700; }
 .account-access-form input { background: #fff; border: 1px solid #ccd7ce; border-radius: 10px; color: #102119; font: inherit; min-height: 46px; padding: 0 13px; }
 .account-access-form input:focus { border-color: #4b9d3d; box-shadow: 0 0 0 3px rgba(75, 157, 61, .14); outline: 0; }
 .account-access-form > button { background: linear-gradient(135deg, #1f6b2f, #54a934); border: 0; border-radius: 10px; color: #fff; cursor: pointer; font: inherit; font-weight: 900; min-height: 50px; padding: 0 18px; }
 .account-access-form > button:disabled { cursor: wait; opacity: .6; }
+.account-access-form > .account-access-link { background: transparent; color: #347b35; min-height: 30px; padding: 0; }
+.account-access-message { background: #e7f4e2; border-bottom: 1px solid #c9ddc5; color: #245c2b; font-size: 13px; font-weight: 800; line-height: 1.45; padding: 13px 28px; }
+.account-access-form .account-access-consent { align-items: flex-start; display: flex; font-weight: 600; gap: 10px; line-height: 1.45; }
+.account-access-form .account-access-consent input { flex: 0 0 auto; min-height: 18px; padding: 0; width: 18px; }
+.account-access-consent a { color: #267333; }
+.account-access-turnstile { min-height: 65px; }
 .account-access-form > small { color: #758078; line-height: 1.45; text-align: center; }
 .account-access-loading { align-content: center; justify-items: center; }
 .account-access-loading strong { color: #cfddd4; }

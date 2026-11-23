@@ -336,7 +336,7 @@ export function readStoredSharedProjectQueue() {
 
 export function readStoredSharedAuth() {
   const empty = {
-    token: "", username: "", email: "", displayName: "", role: "member",
+    token: "", csrfToken: "", authenticated: false, username: "", email: "", displayName: "", role: "member",
     organizationId: "", organizationName: "Workspace", subscriptionStatus: "inactive",
     workspaceAccess: false, aiAccess: false, isStaff: false, expiresAt: "",
   };
@@ -346,7 +346,9 @@ export function readStoredSharedAuth() {
     if (!raw) return empty;
     const parsed = JSON.parse(raw);
     return {
-      token: String(parsed?.token || "").trim(),
+      token: "",
+      csrfToken: "",
+      authenticated: Boolean(parsed?.authenticated && parsed?.organizationId),
       username: String(parsed?.username || "").trim(),
       email: String(parsed?.email || "").trim(),
       displayName: String(parsed?.displayName || "").trim(),

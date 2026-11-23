@@ -4,7 +4,7 @@ import secrets
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from app.repositories.takeoff_repository import (
     accept_quote,
@@ -13,23 +13,49 @@ from app.repositories.takeoff_repository import (
     get_file,
     get_request,
     list_requests,
+    record_takeoff_checkout,
     update_request,
 )
 from app.repositories.project_repository import get_record as get_project_record
 from app.repositories.project_repository import save_record as save_project_record
 from app.schemas import (
     SharedProjectRecord,
+    BillingSessionResponse,
     TakeoffFileRecord,
+    TakeoffQuoteEstimateRequest,
+    TakeoffQuoteEstimateResponse,
     TakeoffRequestCreate,
     TakeoffRequestRecord,
     TakeoffRequestUpdate,
 )
-from app.services.shared_auth import require_shared_access, require_staff_access
+from app.services.shared_auth import require_shared_access, require_staff_access, require_verified_access
+from app.services.private_storage import (
+    local_private_file,
+    private_download_url,
+    scan_file,
+    store_private_file,
+    temporary_upload_file,
+    validate_file_content,
+)
+from app.services.takeoff_pricing import boundary_square_feet, estimate_takeoff_quote
+from app.services.notifications import notify_organization
+from app.routes.billing import _app_url, _object_value, _stripe_module
 
 
 router = APIRouter(prefix="/takeoff-requests", tags=["takeoff requests"])
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".kml", ".kmz", ".json"}
+UPLOAD_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".kml": "application/vnd.google-earth.kml+xml",
+    ".kmz": "application/vnd.google-earth.kmz",
+    ".json": "application/json",
+}
 SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 STAFF_STATUS_TRANSITIONS = {
     "submitted": {"reviewing", "quoted", "canceled"},
@@ -40,15 +66,6 @@ STAFF_STATUS_TRANSITIONS = {
     "delivered": set(),
     "canceled": {"reviewing"},
 }
-
-
-def _upload_root() -> Path:
-    configured = os.getenv("AUTO_MEASURE_PRIVATE_UPLOAD_DIR", "./data/private_uploads")
-    path = Path(configured).expanduser()
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parents[2] / path
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def _request_for_session(request_id: str, session: dict) -> dict:
@@ -74,21 +91,51 @@ def list_takeoff_requests(
     ]
 
 
+@router.post("/estimate", response_model=TakeoffQuoteEstimateResponse)
+def estimate_takeoff_request(
+    payload: TakeoffQuoteEstimateRequest,
+    _: dict = Depends(require_shared_access),
+) -> TakeoffQuoteEstimateResponse:
+    try:
+        estimated_square_feet = boundary_square_feet(payload.boundary)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return TakeoffQuoteEstimateResponse(
+        **estimate_takeoff_quote(
+            property_type=payload.property_type,
+            estimated_square_feet=estimated_square_feet,
+            service_types=payload.service_types,
+        )
+    )
+
+
 @router.post("", response_model=TakeoffRequestRecord, status_code=201)
 def create_takeoff_request(
     payload: TakeoffRequestCreate,
-    session: dict = Depends(require_shared_access),
+    session: dict = Depends(require_verified_access),
 ) -> TakeoffRequestRecord:
-    if payload.boundary:
-        geometry_type = str(payload.boundary.get("type") or "")
-        if geometry_type not in {"Feature", "Polygon", "MultiPolygon"}:
-            raise HTTPException(status_code=400, detail="Boundary must be valid GeoJSON.")
+    try:
+        estimated_square_feet = boundary_square_feet(payload.boundary)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    service_types = [
+        str(value).strip()[:80] for value in payload.service_types if str(value).strip()
+    ]
+    estimate = estimate_takeoff_quote(
+        property_type=payload.property_type,
+        estimated_square_feet=estimated_square_feet,
+        service_types=service_types,
+    )
     item = create_request(
         organization_id=str(session.get("organization_id") or ""),
         user_id=str(session.get("user_id") or ""),
         title=payload.title.strip(),
         address=payload.address.strip(),
-        service_types=[str(value).strip()[:80] for value in payload.service_types if str(value).strip()],
+        service_types=service_types,
+        property_type=payload.property_type,
+        estimated_square_feet=estimated_square_feet,
+        estimate_low_cents=int(estimate["low_cents"]),
+        estimate_high_cents=int(estimate["high_cents"]),
         boundary=payload.boundary,
         notes=payload.notes.strip(),
     )
@@ -139,8 +186,19 @@ def get_takeoff_delivery(
 @router.post("/{request_id}/accept", response_model=TakeoffRequestRecord)
 def accept_takeoff_quote(
     request_id: str,
-    session: dict = Depends(require_shared_access),
+    session: dict = Depends(require_verified_access),
 ) -> TakeoffRequestRecord:
+    existing = _request_for_session(request_id, session)
+    if (
+        existing
+        and int(existing.get("quote_cents") or 0) > 0
+        and str(existing.get("payment_status") or "pending") != "paid"
+        and bool(str(os.getenv("STRIPE_RESTRICTED_KEY") or os.getenv("STRIPE_SECRET_KEY") or "").strip())
+    ):
+        raise HTTPException(
+            status_code=402,
+            detail="Complete the quoted payment before work begins.",
+        )
     item = accept_quote(
         request_id,
         str(session.get("organization_id") or ""),
@@ -149,6 +207,57 @@ def accept_takeoff_quote(
     if not item:
         raise HTTPException(status_code=409, detail="This quote is not ready to accept.")
     return TakeoffRequestRecord(**item)
+
+
+@router.post("/{request_id}/checkout", response_model=BillingSessionResponse)
+def create_takeoff_payment_checkout(
+    request_id: str,
+    session: dict = Depends(require_verified_access),
+) -> BillingSessionResponse:
+    item = _request_for_session(request_id, session)
+    if not item or str(item.get("status")) != "quoted":
+        raise HTTPException(status_code=409, detail="This takeoff is not ready for payment.")
+    quote_cents = int(item.get("quote_cents") or 0)
+    if quote_cents <= 0:
+        raise HTTPException(status_code=409, detail="This quote does not require online payment.")
+    if str(item.get("payment_status") or "") == "paid":
+        raise HTTPException(status_code=409, detail="This quote has already been paid.")
+    stripe = _stripe_module()
+    organization_id = str(session.get("organization_id") or "")
+    checkout = stripe.checkout.Session.create(
+        mode="payment",
+        line_items=[{
+            "price_data": {
+                "currency": "usd",
+                "unit_amount": quote_cents,
+                "product_data": {"name": f"Managed Takeoff - {str(item.get('title') or 'Property')}"},
+            },
+            "quantity": 1,
+        }],
+        customer_email=str(session.get("email") or "") or None,
+        client_reference_id=organization_id,
+        metadata={
+            "organization_id": organization_id,
+            "takeoff_request_id": str(request_id),
+        },
+        payment_intent_data={
+            "metadata": {
+                "organization_id": organization_id,
+                "takeoff_request_id": str(request_id),
+            }
+        },
+        automatic_tax={"enabled": str(os.getenv("STRIPE_AUTOMATIC_TAX", "false")).lower() in {"1", "true", "yes"}},
+        billing_address_collection="auto",
+        consent_collection={"terms_of_service": "required"},
+        success_url=f"{_app_url()}/?takeoff_payment=success",
+        cancel_url=f"{_app_url()}/?takeoff_payment=canceled",
+    )
+    checkout_id = str(_object_value(checkout, "id") or "")
+    url = str(_object_value(checkout, "url") or "")
+    if not checkout_id or not url:
+        raise HTTPException(status_code=502, detail="Stripe did not return a checkout session.")
+    record_takeoff_checkout(request_id, checkout_id)
+    return BillingSessionResponse(url=url)
 
 
 @router.patch("/{request_id}", response_model=TakeoffRequestRecord)
@@ -208,6 +317,20 @@ def update_takeoff_request(
     )
     if not item:
         raise HTTPException(status_code=404, detail="Takeoff request not found.")
+    if payload.status == "quoted":
+        notify_organization(
+            str(item.get("organization_id") or ""),
+            subject="Your managed takeoff quote is ready",
+            heading="Your quote is ready",
+            message=f"McKenna reviewed {item.get('title') or 'your property'} and posted a final quote in your workspace.",
+        )
+    elif payload.status == "delivered":
+        notify_organization(
+            str(item.get("organization_id") or ""),
+            subject="Your Property Takeoff measurements are ready",
+            heading="Measurements delivered",
+            message=f"The completed measurements for {item.get('title') or 'your property'} are ready to download.",
+        )
     return TakeoffRequestRecord(**item)
 
 
@@ -215,7 +338,7 @@ def update_takeoff_request(
 async def upload_takeoff_file(
     request_id: str,
     upload: UploadFile = File(...),
-    session: dict = Depends(require_shared_access),
+    session: dict = Depends(require_verified_access),
 ) -> TakeoffFileRecord:
     item = _request_for_session(request_id, session)
     if not item:
@@ -229,32 +352,40 @@ async def upload_takeoff_file(
         )
     safe_stem = SAFE_FILENAME_RE.sub("-", Path(original_name).stem).strip("-_.")[:80] or "upload"
     storage_key = f"{request_id}/{secrets.token_hex(12)}-{safe_stem}{suffix}"
-    destination = (_upload_root() / storage_key).resolve()
-    root = _upload_root().resolve()
-    if root not in destination.parents:
-        raise HTTPException(status_code=400, detail="Invalid upload name.")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary_path = temporary_upload_file()
     size = 0
     try:
-        with destination.open("wb") as output:
+        with handle as output:
             while chunk := await upload.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail="Files must be 25 MB or smaller.")
                 output.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        validate_file_content(temporary_path, suffix)
+        scan_file(temporary_path)
+        verified_content_type = UPLOAD_CONTENT_TYPES[suffix]
+        store_private_file(
+            temporary_path,
+            storage_key,
+            verified_content_type,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception:
-        destination.unlink(missing_ok=True)
         raise
-    if size == 0:
-        destination.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    finally:
+        temporary_path.unlink(missing_ok=True)
     record = add_file(
         request_id=request_id,
         organization_id=str(item.get("organization_id") or ""),
         user_id=str(session.get("user_id") or ""),
         storage_key=storage_key,
         original_name=original_name,
-        content_type=str(upload.content_type or "application/octet-stream")[:160],
+        content_type=UPLOAD_CONTENT_TYPES[suffix],
         size_bytes=size,
     )
     return TakeoffFileRecord(**record)
@@ -279,8 +410,14 @@ def download_takeoff_file(
         )
     ):
         raise HTTPException(status_code=404, detail="File not found.")
-    path = (_upload_root() / str(file_record["storage_key"])).resolve()
-    if not path.is_file() or _upload_root().resolve() not in path.parents:
+    download_url = private_download_url(
+        str(file_record["storage_key"]),
+        str(file_record.get("original_name") or "download"),
+    )
+    if download_url:
+        return RedirectResponse(download_url, status_code=307)
+    path = local_private_file(str(file_record["storage_key"]))
+    if path is None or not path.is_file():
         raise HTTPException(status_code=404, detail="File is unavailable.")
     return FileResponse(
         path,

@@ -28,10 +28,12 @@ export AUTO_MEASURE_SHARED_AUTH_USERS="estimator:secret123,reviewer:secret456"
 
 ### Production project durability
 
-Shared projects and their revision history are stored in SQLite. In production,
-`AUTO_MEASURE_DB_PATH` must point to a persistent disk/volume supplied by the
-backend host, not the container's temporary filesystem. For example, if a
-persistent disk is mounted at `/var/data`:
+SQLite is the local-development default. Public production requires managed
+PostgreSQL through `AUTO_MEASURE_DATABASE_URL`, private S3/R2 storage, and
+verified off-site backups. Follow `PUBLIC_LAUNCH_RUNBOOK.md`; production
+readiness intentionally fails if these services are missing.
+
+For local development only:
 
 ```bash
 export AUTO_MEASURE_DB_PATH="/var/data/property-takeoff.db"
@@ -64,6 +66,14 @@ This runs:
 - frontend lint
 - frontend production build
 - backend tests
+
+The public signup browser test is separate because it starts local servers:
+
+```bash
+cd frontend
+npx playwright install chromium
+npm run test:e2e
+```
 
 ## 2) Serve built frontend from backend (single backend process)
 

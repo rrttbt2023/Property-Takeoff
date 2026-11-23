@@ -12,6 +12,8 @@ Auto-measure-backend/.venv-train/
 frontend/node_modules/
 frontend/dist/
 frontend/dist-ssr/
+frontend/playwright-report/
+frontend/test-results/
 frontend/.vercel/
 frontend/*.local
 
@@ -20,6 +22,7 @@ frontend/*.local
 .env.*
 frontend/.env
 frontend/.env.*
+!frontend/.env.example
 Auto-measure-backend/.env
 Auto-measure-backend/.env.*
 !Auto-measure-backend/.env.example
@@ -39,3 +42,6 @@ Auto-measure-backend/training/checkpoints_smoke/
 Auto-measure-backend/training/checkpoints_smoke_r50/
 Auto-measure-backend/training/data*/
 .vercel
+
+# Generated reports and private review packets
+output/

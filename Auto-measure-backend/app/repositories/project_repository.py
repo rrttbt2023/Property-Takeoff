@@ -1,10 +1,10 @@
 import json
 import os
-import sqlite3
 from pathlib import Path
 from typing import Any
 
 from app.repositories.account_repository import INTERNAL_ORGANIZATION_ID, init_db as init_account_db
+from app.repositories.database import connect_database
 
 
 DEFAULT_DB_PATH = "./data/measurements.db"
@@ -19,25 +19,8 @@ class ProjectRevisionConflictError(RuntimeError):
         self.current_revision = max(1, int(current_revision))
 
 
-def _db_path() -> str:
-    configured = os.getenv(
-        "AUTO_MEASURE_PROJECT_DB_PATH",
-        os.getenv("AUTO_MEASURE_DB_PATH", DEFAULT_DB_PATH),
-    )
-    path = Path(configured).expanduser()
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parents[2] / path
-    return str(path)
-
-
-def _connect() -> sqlite3.Connection:
-    db_file = _db_path()
-    Path(db_file).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_file, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+def _connect():
+    return connect_database(DEFAULT_DB_PATH)
 
 
 def _max_revisions() -> int:
@@ -48,11 +31,11 @@ def _max_revisions() -> int:
     return max(10, min(1000, value))
 
 
-def _table_columns(conn: sqlite3.Connection, table: str) -> list[sqlite3.Row]:
+def _table_columns(conn: Any, table: str) -> list[Any]:
     return conn.execute(f"PRAGMA table_info({table})").fetchall()
 
 
-def _create_project_tables(conn: sqlite3.Connection) -> None:
+def _create_project_tables(conn: Any) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS shared_projects (
@@ -90,7 +73,7 @@ def _create_project_tables(conn: sqlite3.Connection) -> None:
     )
 
 
-def _migrate_legacy_tables(conn: sqlite3.Connection) -> None:
+def _migrate_legacy_tables(conn: Any) -> None:
     project_columns = _table_columns(conn, "shared_projects")
     if project_columns:
         project_names = {str(row["name"]) for row in project_columns}
@@ -142,7 +125,7 @@ def _migrate_legacy_tables(conn: sqlite3.Connection) -> None:
             conn.execute("DROP TABLE shared_project_versions_legacy")
 
 
-def _decode_record(row: sqlite3.Row | None) -> dict[str, Any] | None:
+def _decode_record(row: Any | None) -> dict[str, Any] | None:
     if row is None:
         return None
     try:
@@ -276,7 +259,7 @@ def list_records(
     limit: int = 100, organization_id: str = INTERNAL_ORGANIZATION_ID
 ) -> list[dict[str, Any]]:
     ensure_db_ready()
-    safe_limit = max(1, min(500, int(limit)))
+    safe_limit = max(1, min(10_000, int(limit)))
     with _connect() as conn:
         rows = conn.execute(
             """
@@ -418,6 +401,20 @@ def delete_record(project_id: str, organization_id: str = INTERNAL_ORGANIZATION_
         )
         conn.commit()
     return bool(cursor.rowcount)
+
+
+def delete_organization_records(organization_id: str) -> None:
+    ensure_db_ready()
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM shared_project_versions WHERE organization_id = ?",
+            (str(organization_id),),
+        )
+        conn.execute(
+            "DELETE FROM shared_projects WHERE organization_id = ?",
+            (str(organization_id),),
+        )
+        conn.commit()
 
 
 def list_versions(

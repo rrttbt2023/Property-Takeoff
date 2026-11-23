@@ -14,10 +14,19 @@ from app.repositories.account_repository import (
     update_organization_billing,
 )
 from app.schemas import BillingSessionResponse, BillingStatusResponse
-from app.services.shared_auth import require_shared_access
+from app.repositories.takeoff_repository import mark_takeoff_paid
+from app.services.shared_auth import require_shared_access, require_verified_access
+from app.services.notifications import notify_organization
 
 
 router = APIRouter(prefix="/billing", tags=["billing"])
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _stripe_module():
@@ -71,7 +80,7 @@ def billing_status(session: dict = Depends(require_shared_access)) -> BillingSta
 
 @router.post("/checkout", response_model=BillingSessionResponse)
 def create_subscription_checkout(
-    session: dict = Depends(require_shared_access),
+    session: dict = Depends(require_verified_access),
 ) -> BillingSessionResponse:
     if session.get("is_staff"):
         raise HTTPException(status_code=409, detail="Staff workspaces already include full access.")
@@ -99,7 +108,11 @@ def create_subscription_checkout(
         "allow_promotion_codes": True,
         "metadata": metadata,
         "subscription_data": {"metadata": metadata},
+        "automatic_tax": {"enabled": _env_flag("STRIPE_AUTOMATIC_TAX", False)},
+        "billing_address_collection": "auto",
     }
+    if _env_flag("STRIPE_REQUIRE_TERMS_ACCEPTANCE", True):
+        params["consent_collection"] = {"terms_of_service": "required"}
     customer_id = str(organization.get("stripe_customer_id") or "")
     if customer_id:
         params["customer"] = customer_id
@@ -161,8 +174,16 @@ async def stripe_webhook(request: Request) -> dict[str, bool]:
     item = _object_value(data, "object", {}) or {}
 
     if event_type == "checkout.session.completed":
+        metadata = _object_value(item, "metadata", {}) or {}
+        takeoff_request_id = str(_object_value(metadata, "takeoff_request_id", "") or "")
         organization_id = str(_object_value(item, "client_reference_id", "") or "")
-        if organization_id:
+        if takeoff_request_id and str(_object_value(item, "payment_status", "")) == "paid":
+            mark_takeoff_paid(
+                takeoff_request_id,
+                checkout_session_id=str(_object_value(item, "id", "") or ""),
+                payment_intent_id=str(_object_value(item, "payment_intent", "") or ""),
+            )
+        elif organization_id:
             update_organization_billing(
                 organization_id,
                 customer_id=str(_object_value(item, "customer", "") or "") or None,
@@ -196,5 +217,12 @@ async def stripe_webhook(request: Request) -> dict[str, bool]:
                 subscription_id=str(_object_value(item, "subscription", "") or "") or None,
                 status="active" if event_type == "invoice.paid" else "past_due",
             )
+            if event_type == "invoice.payment_failed":
+                notify_organization(
+                    organization_id,
+                    subject="Property Takeoff payment needs attention",
+                    heading="Payment failed",
+                    message="Stripe could not complete your subscription payment. Update your payment method in Billing Settings to keep workspace access.",
+                )
     mark_webhook_processed(event_id, event_type)
     return {"received": True}

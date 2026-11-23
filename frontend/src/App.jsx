@@ -1,6 +1,6 @@
 // src/App.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import * as maplibregl from "maplibre-gl";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
 import * as turf from "@turf/turf";
 import { strToU8, zipSync } from "fflate";
@@ -17,10 +17,14 @@ import {
   calculatePixelDistance,
   createBillingPortal,
   createSubscriptionCheckout,
+  createTakeoffPaymentCheckout,
   createTakeoffRequest,
   deleteSharedProject,
+  deleteAccount,
+  exportAccountData,
   getApiHealth,
   getBillingStatus,
+  estimateTakeoffRequest,
   getSharedProject,
   getSharedProjectVersion,
   getSharedAccessSession,
@@ -38,6 +42,9 @@ import {
   saveSegmentationCorrection,
   saveSharedProject,
   registerSharedAccess,
+  resendVerificationEmail,
+  setupAccountMfa,
+  confirmAccountMfa,
   setSharedAuthToken,
   segmentMeasurementUpload,
   uploadMeasurement,
@@ -246,6 +253,8 @@ const APP_SCREEN_PDF = "pdf";
 function buildSharedAuthState(value, tokenFallback = "", usernameFallback = "") {
   return {
     token: String(value?.token || tokenFallback || "").trim(),
+    csrfToken: String(value?.csrf_token || value?.csrfToken || "").trim(),
+    authenticated: Boolean(value?.authenticated ?? value?.organization_id ?? value?.organizationId),
     username: String(value?.username || usernameFallback || "").trim(),
     email: String(value?.email || "").trim(),
     displayName: String(value?.display_name || value?.displayName || "").trim(),
@@ -256,7 +265,17 @@ function buildSharedAuthState(value, tokenFallback = "", usernameFallback = "") 
     workspaceAccess: Boolean(value?.workspace_access ?? value?.workspaceAccess),
     aiAccess: Boolean(value?.ai_access ?? value?.aiAccess),
     isStaff: Boolean(value?.is_staff ?? value?.isStaff),
+    emailVerified: Boolean(value?.email_verified ?? value?.emailVerified),
+    mfaEnabled: Boolean(value?.mfa_enabled ?? value?.mfaEnabled),
     expiresAt: String(value?.expires_at || value?.expiresAt || "").trim(),
+  };
+}
+
+function buildPersistedSharedAuthState(value) {
+  return {
+    ...value,
+    token: "",
+    csrfToken: "",
   };
 }
 
@@ -4432,9 +4451,7 @@ export default function App() {
     readStoredSharedProjectQueue()
   );
   const [sharedAuth, setSharedAuth] = useState(() => readStoredSharedAuth());
-  const [sharedAuthChecking, setSharedAuthChecking] = useState(() =>
-    !!readStoredSharedAuth().token
-  );
+  const [sharedAuthChecking, setSharedAuthChecking] = useState(true);
   const [sharedLoginUsername, setSharedLoginUsername] = useState(
     () => readStoredSharedAuth().username || ""
   );
@@ -4443,10 +4460,15 @@ export default function App() {
   const [sharedRegisterSubmitting, setSharedRegisterSubmitting] = useState(false);
   const [billingStatus, setBillingStatus] = useState(null);
   const [billingWorking, setBillingWorking] = useState(false);
+  const [showMembershipPrompt, setShowMembershipPrompt] = useState(() => {
+    const shouldShow = window.sessionStorage.getItem("property-takeoff-membership-prompt") === "1";
+    if (shouldShow) window.sessionStorage.removeItem("property-takeoff-membership-prompt");
+    return shouldShow;
+  });
   const [takeoffRequests, setTakeoffRequests] = useState([]);
   const [takeoffRequestsLoading, setTakeoffRequestsLoading] = useState(false);
   const [sharedProjectLibraryStatus, setSharedProjectLibraryStatus] = useState(() =>
-    readStoredSharedAuth().token ? "connecting" : "locked"
+    readStoredSharedAuth().authenticated ? "connecting" : "locked"
   );
   const [backendHealth, setBackendHealth] = useState({
     state: "checking",
@@ -4462,7 +4484,8 @@ export default function App() {
   const [securityAuditEvents, setSecurityAuditEvents] = useState([]);
   const [securityAuditSyncing, setSecurityAuditSyncing] = useState(false);
   const sharedAccessToken = String(sharedAuth?.token || "").trim();
-  const sharedAccessAuthenticated = !!sharedAccessToken;
+  const sharedCsrfToken = String(sharedAuth?.csrfToken || "").trim();
+  const sharedAccessAuthenticated = Boolean(sharedAuth?.authenticated);
   const autosaveStorageKey = buildAutosaveStorageKey(sharedAuth?.organizationId);
   const sharedWorkspaceAccess = Boolean(
     sharedAuth?.workspaceAccess || billingStatus?.workspace_access
@@ -4833,8 +4856,8 @@ export default function App() {
   }, [sharedProjectQueue]);
 
   useEffect(() => {
-    setSharedAuthToken(sharedAccessToken);
-  }, [sharedAccessToken]);
+    setSharedAuthToken(sharedAccessToken, sharedCsrfToken);
+  }, [sharedAccessToken, sharedCsrfToken]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -4842,7 +4865,9 @@ export default function App() {
       window.localStorage.setItem(
         SHARED_AUTH_STORAGE_KEY,
         JSON.stringify({
-          token: sharedAccessToken,
+          token: "",
+          csrfToken: "",
+          authenticated: sharedAccessAuthenticated,
           username: String(sharedAuth?.username || "").trim(),
           email: String(sharedAuth?.email || "").trim(),
           displayName: String(sharedAuth?.displayName || "").trim(),
@@ -4853,24 +4878,16 @@ export default function App() {
           workspaceAccess: Boolean(sharedAuth?.workspaceAccess),
           aiAccess: Boolean(sharedAuth?.aiAccess),
           isStaff: Boolean(sharedAuth?.isStaff),
-          expiresAt: sharedAccessToken ? String(sharedAuth?.expiresAt || "").trim() : "",
+          expiresAt: sharedAccessAuthenticated ? String(sharedAuth?.expiresAt || "").trim() : "",
         })
       );
     } catch {
       /* intentionally ignore localStorage errors */
     }
-  }, [sharedAccessToken, sharedAuth]);
+  }, [sharedAccessAuthenticated, sharedAuth]);
 
   useEffect(() => {
     let canceled = false;
-    if (!sharedAccessToken) {
-      setSharedAuthChecking(false);
-      setSharedProjectLibraryStatus("locked");
-      return () => {
-        canceled = true;
-      };
-    }
-
     setSharedAuthChecking(true);
     setSharedProjectLibraryStatus((prev) =>
       prev === "connected" ? "connected" : "connecting"
@@ -4882,7 +4899,7 @@ export default function App() {
         if (canceled) return;
         const username = String(session?.username || sharedAuth?.username || "").trim();
         setSharedAuth((prev) => {
-          const next = buildSharedAuthState(session, sharedAccessToken, username);
+          const next = buildSharedAuthState(session, "", username);
           return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
         });
         setSharedLoginUsername(username);
@@ -4893,6 +4910,8 @@ export default function App() {
           setSharedAuth((prev) => ({
             ...prev,
             token: "",
+            csrfToken: "",
+            authenticated: false,
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
           }));
@@ -4909,7 +4928,7 @@ export default function App() {
     return () => {
       canceled = true;
     };
-  }, [pushToast, sharedAccessToken, sharedAuth?.username, sharedLoginUsername]);
+  }, [pushToast, sharedAuth?.username, sharedLoginUsername]);
 
   const refreshSharedProjectLibrary = useCallback(
     async ({ quiet = true } = {}) => {
@@ -4938,6 +4957,8 @@ export default function App() {
           setSharedAuth((prev) => ({
             ...prev,
             token: "",
+            csrfToken: "",
+            authenticated: false,
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
           }));
@@ -4990,6 +5011,8 @@ export default function App() {
           setSharedAuth((prev) => ({
             ...prev,
             token: "",
+            csrfToken: "",
+            authenticated: false,
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
           }));
@@ -5094,6 +5117,8 @@ export default function App() {
             setSharedAuth((prev) => ({
               ...prev,
               token: "",
+              csrfToken: "",
+              authenticated: false,
               username: String(prev?.username || sharedLoginUsername || "").trim(),
               expiresAt: "",
             }));
@@ -5313,7 +5338,7 @@ export default function App() {
   }, [refreshSharedProjectLibrary, syncSharedProjectQueue, sharedAccessAuthenticated, sharedAuthChecking]);
 
   const handleSharedLogin = useCallback(
-    async (event) => {
+    async (event, options = {}) => {
       if (event?.preventDefault) event.preventDefault();
       const username = String(sharedLoginUsername || "").trim();
       const password = String(sharedLoginPassword || "");
@@ -5324,11 +5349,8 @@ export default function App() {
       setSharedLoginSubmitting(true);
       setSharedProjectLibraryStatus("connecting");
       try {
-        const response = await loginSharedAccess({ username, password });
+        const response = await loginSharedAccess({ username, password, mfaCode: options?.mfaCode });
         const token = String(response?.token || "").trim();
-        if (!token) {
-          throw new Error("Login response did not include a session token.");
-        }
         const normalizedUsername = String(response?.username || username).trim();
         const nextAuth = buildSharedAuthState(response, token, normalizedUsername);
         const previousOrganizationId = String(sharedAuth?.organizationId || "").trim();
@@ -5337,7 +5359,11 @@ export default function App() {
           nextAuth.organizationId &&
           previousOrganizationId !== nextAuth.organizationId
         ) {
-          window.localStorage.setItem(SHARED_AUTH_STORAGE_KEY, JSON.stringify(nextAuth));
+          window.localStorage.setItem(
+            SHARED_AUTH_STORAGE_KEY,
+            JSON.stringify(buildPersistedSharedAuthState(nextAuth))
+          );
+          window.sessionStorage.setItem("property-takeoff-membership-prompt", "1");
           for (const key of [
             PROJECT_VERSION_HISTORY_STORAGE_KEY,
             HOME_PINNED_PROJECTS_STORAGE_KEY,
@@ -5383,9 +5409,10 @@ export default function App() {
           password,
           displayName,
           organizationName,
+          botToken: registration?.botToken,
+          acceptedTerms: registration?.acceptedTerms,
         });
         const token = String(response?.token || "").trim();
-        if (!token) throw new Error("Account response did not include a session token.");
         const nextAuth = buildSharedAuthState(response, token, email);
         const previousOrganizationId = String(sharedAuth?.organizationId || "").trim();
         if (
@@ -5393,7 +5420,10 @@ export default function App() {
           nextAuth.organizationId &&
           previousOrganizationId !== nextAuth.organizationId
         ) {
-          window.localStorage.setItem(SHARED_AUTH_STORAGE_KEY, JSON.stringify(nextAuth));
+          window.localStorage.setItem(
+            SHARED_AUTH_STORAGE_KEY,
+            JSON.stringify(buildPersistedSharedAuthState(nextAuth))
+          );
           for (const key of [
             PROJECT_VERSION_HISTORY_STORAGE_KEY,
             HOME_PINNED_PROJECTS_STORAGE_KEY,
@@ -5410,6 +5440,7 @@ export default function App() {
         setSharedLoginUsername(email);
         setSharedLoginPassword("");
         setSharedProjectLibraryStatus("connected");
+        setShowMembershipPrompt(true);
         pushToast("Your company workspace is ready.", "info", 4200);
       } catch (error) {
         pushToast(`Account creation failed: ${error?.message || "please try again"}.`, "error", 6200);
@@ -5436,12 +5467,15 @@ export default function App() {
     setSharedAuth((prev) => ({
       ...prev,
       token: "",
+      csrfToken: "",
+      authenticated: false,
       username: String(prev?.username || sharedLoginUsername || "").trim(),
       expiresAt: "",
     }));
     setSharedProjectLibraryStatus("locked");
     setSecurityAuditEvents([]);
     setBillingStatus(null);
+    setShowMembershipPrompt(false);
     setTakeoffRequests([]);
     setSharedProjectQueue([]);
     setResumeProject(null);
@@ -5495,6 +5529,41 @@ export default function App() {
     }
   }, [pushToast]);
 
+  const handleExportAccount = useCallback(async () => {
+    const payload = await exportAccountData();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `property-takeoff-account-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    pushToast("Account export downloaded.", "info", 3600);
+  }, [pushToast]);
+
+  const handleEnableMfa = useCallback(async () => {
+    const setup = await setupAccountMfa();
+    const code = window.prompt(`Add this secret to your authenticator app, then enter its 6-digit code:\n\n${setup?.secret || ""}`);
+    if (!code) return;
+    await confirmAccountMfa(code);
+    pushToast("Authenticator protection enabled. Please sign in again.", "info", 5200);
+    window.setTimeout(() => window.location.reload(), 500);
+  }, [pushToast]);
+
+  const handleResendVerification = useCallback(async () => {
+    await resendVerificationEmail(sharedAuth?.email || sharedAuth?.username || "");
+    pushToast("If verification is still pending, a new email is on its way.", "info", 5200);
+  }, [pushToast, sharedAuth?.email, sharedAuth?.username]);
+
+  const handleDeleteAccount = useCallback(async () => {
+    if (!window.confirm("Permanently delete this company workspace, projects, requests, and uploads? This cannot be undone.")) return;
+    const password = window.prompt("Enter your password to confirm permanent deletion.");
+    if (!password) return;
+    await deleteAccount(password);
+    window.localStorage.removeItem(SHARED_AUTH_STORAGE_KEY);
+    window.location.reload();
+  }, []);
+
   const handleCreateTakeoffRequest = useCallback(async ({ details, file }) => {
     const created = await createTakeoffRequest(details);
     if (file) await uploadTakeoffRequestFile(created.id, file);
@@ -5504,10 +5573,17 @@ export default function App() {
   }, [pushToast, refreshCustomerWorkspace]);
 
   const handleAcceptTakeoffQuote = useCallback(async (requestId) => {
+    const request = takeoffRequests.find((item) => String(item?.id) === String(requestId));
+    if (Number(request?.quote_cents || 0) > 0 && request?.payment_status !== "paid") {
+      const checkout = await createTakeoffPaymentCheckout(requestId);
+      if (!checkout?.url) throw new Error("Payment checkout did not return a secure page.");
+      window.location.assign(checkout.url);
+      return;
+    }
     await acceptTakeoffQuote(requestId);
     await refreshCustomerWorkspace();
     pushToast("Quote accepted. Your 24-hour delivery window has started.", "info", 5200);
-  }, [pushToast, refreshCustomerWorkspace]);
+  }, [pushToast, refreshCustomerWorkspace, takeoffRequests]);
 
   const handleUpdateTakeoffRequest = useCallback(async (requestId, changes) => {
     await updateTakeoffRequest(requestId, changes);
@@ -12539,6 +12615,8 @@ export default function App() {
         setSharedAuth((prev) => ({
           ...prev,
           token: "",
+          csrfToken: "",
+          authenticated: false,
           username: String(prev?.username || sharedLoginUsername || "").trim(),
           expiresAt: "",
         }));
@@ -13543,6 +13621,8 @@ export default function App() {
           setSharedAuth((prev) => ({
             ...prev,
             token: "",
+            csrfToken: "",
+            authenticated: false,
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
           }));
@@ -13663,6 +13743,8 @@ export default function App() {
           setSharedAuth((prev) => ({
             ...prev,
             token: "",
+            csrfToken: "",
+            authenticated: false,
             username: String(prev?.username || sharedLoginUsername || "").trim(),
             expiresAt: "",
           }));
@@ -13909,6 +13991,8 @@ export default function App() {
             setSharedAuth((previous) => ({
               ...previous,
               token: "",
+              csrfToken: "",
+              authenticated: false,
               username: String(previous?.username || sharedLoginUsername || "").trim(),
               expiresAt: "",
             }));
@@ -13966,6 +14050,8 @@ export default function App() {
         setSharedAuth((previous) => ({
           ...previous,
           token: "",
+          csrfToken: "",
+          authenticated: false,
           username: String(previous?.username || sharedLoginUsername || "").trim(),
           expiresAt: "",
         }));
@@ -20684,11 +20770,21 @@ export default function App() {
           isStaff={Boolean(sharedAuth?.isStaff)}
           billingStatus={billingStatus}
           billingWorking={billingWorking}
+          mapboxToken={mapboxToken}
+          showMembershipPrompt={showMembershipPrompt}
+          onDismissMembershipPrompt={() => setShowMembershipPrompt(false)}
           onStartSubscription={handleStartSubscription}
           onOpenBillingPortal={handleOpenBillingPortal}
           onRefreshAccount={() => refreshCustomerWorkspace({ quiet: false })}
+          emailVerified={Boolean(sharedAuth?.emailVerified)}
+          mfaEnabled={Boolean(sharedAuth?.mfaEnabled)}
+          onEnableMfa={handleEnableMfa}
+          onResendVerification={handleResendVerification}
+          onExportAccount={handleExportAccount}
+          onDeleteAccount={handleDeleteAccount}
           takeoffRequests={takeoffRequests}
           takeoffRequestsLoading={takeoffRequestsLoading}
+          onEstimateTakeoffRequest={estimateTakeoffRequest}
           onCreateTakeoffRequest={handleCreateTakeoffRequest}
           onAcceptTakeoffQuote={handleAcceptTakeoffQuote}
           onUpdateTakeoffRequest={handleUpdateTakeoffRequest}

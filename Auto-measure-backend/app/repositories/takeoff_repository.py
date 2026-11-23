@@ -1,10 +1,10 @@
 import json
 import os
 import secrets
-import sqlite3
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
+
+from app.repositories.database import connect_database
 
 
 DEFAULT_DB_PATH = "./data/measurements.db"
@@ -19,23 +19,8 @@ def _iso(value: datetime | None = None) -> str:
     return (value or _now()).isoformat().replace("+00:00", "Z")
 
 
-def _db_path() -> str:
-    configured = os.getenv("AUTO_MEASURE_DB_PATH", DEFAULT_DB_PATH)
-    path = Path(configured).expanduser()
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parents[2] / path
-    return str(path)
-
-
-def _connect() -> sqlite3.Connection:
-    db_file = _db_path()
-    Path(db_file).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_file, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def _connect():
+    return connect_database(DEFAULT_DB_PATH)
 
 
 def init_db() -> None:
@@ -50,11 +35,18 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 address TEXT NOT NULL,
                 service_types_json TEXT NOT NULL,
+                property_type TEXT NOT NULL DEFAULT 'commercial_retail',
+                estimated_square_feet INTEGER,
+                estimate_low_cents INTEGER,
+                estimate_high_cents INTEGER,
                 boundary_json TEXT,
                 notes TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'submitted',
                 quote_cents INTEGER,
                 quote_notes TEXT NOT NULL DEFAULT '',
+                payment_status TEXT NOT NULL DEFAULT 'not_required',
+                stripe_checkout_session_id TEXT,
+                stripe_payment_intent_id TEXT,
                 quoted_at TEXT,
                 accepted_at TEXT,
                 due_at TEXT,
@@ -99,6 +91,24 @@ def init_db() -> None:
             ON takeoff_files(request_id, created_at);
             """
         )
+        existing_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(takeoff_requests)").fetchall()
+        }
+        migrations = {
+            "property_type": "TEXT NOT NULL DEFAULT 'commercial_retail'",
+            "estimated_square_feet": "INTEGER",
+            "estimate_low_cents": "INTEGER",
+            "estimate_high_cents": "INTEGER",
+            "payment_status": "TEXT NOT NULL DEFAULT 'not_required'",
+            "stripe_checkout_session_id": "TEXT",
+            "stripe_payment_intent_id": "TEXT",
+        }
+        for column, definition in migrations.items():
+            if column not in existing_columns:
+                conn.execute(
+                    f"ALTER TABLE takeoff_requests ADD COLUMN {column} {definition}"
+                )
         conn.commit()
     _DB_READY = True
 
@@ -116,7 +126,7 @@ def _json_load(value: Any, fallback: Any) -> Any:
         return fallback
 
 
-def _decode_file(row: sqlite3.Row) -> dict[str, Any]:
+def _decode_file(row: Any) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
         "original_name": str(row["original_name"]),
@@ -126,7 +136,7 @@ def _decode_file(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _files(conn: sqlite3.Connection, request_id: str) -> list[dict[str, Any]]:
+def _files(conn: Any, request_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT * FROM takeoff_files WHERE request_id = ? ORDER BY created_at",
         (str(request_id),),
@@ -134,7 +144,7 @@ def _files(conn: sqlite3.Connection, request_id: str) -> list[dict[str, Any]]:
     return [_decode_file(row) for row in rows]
 
 
-def _decode_request(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+def _decode_request(conn: Any, row: Any) -> dict[str, Any]:
     boundary = _json_load(row["boundary_json"], None) if row["boundary_json"] else None
     return {
         "id": str(row["id"]),
@@ -144,11 +154,28 @@ def _decode_request(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "title": str(row["title"]),
         "address": str(row["address"]),
         "service_types": _json_load(row["service_types_json"], []),
+        "property_type": str(row["property_type"] or "commercial_retail"),
+        "estimated_square_feet": (
+            int(row["estimated_square_feet"])
+            if row["estimated_square_feet"] is not None
+            else None
+        ),
+        "estimate_low_cents": (
+            int(row["estimate_low_cents"])
+            if row["estimate_low_cents"] is not None
+            else None
+        ),
+        "estimate_high_cents": (
+            int(row["estimate_high_cents"])
+            if row["estimate_high_cents"] is not None
+            else None
+        ),
         "boundary": boundary if isinstance(boundary, dict) else None,
         "notes": str(row["notes"] or ""),
         "status": str(row["status"] or "submitted"),
         "quote_cents": int(row["quote_cents"]) if row["quote_cents"] is not None else None,
         "quote_notes": str(row["quote_notes"] or ""),
+        "payment_status": str(row["payment_status"] or "not_required"),
         "quoted_at": str(row["quoted_at"]) if row["quoted_at"] else None,
         "accepted_at": str(row["accepted_at"]) if row["accepted_at"] else None,
         "due_at": str(row["due_at"]) if row["due_at"] else None,
@@ -175,6 +202,10 @@ def create_request(
     title: str,
     address: str,
     service_types: list[str],
+    property_type: str,
+    estimated_square_feet: int,
+    estimate_low_cents: int,
+    estimate_high_cents: int,
     boundary: dict[str, Any] | None,
     notes: str,
 ) -> dict[str, Any]:
@@ -187,8 +218,9 @@ def create_request(
             """
             INSERT INTO takeoff_requests (
                 id, organization_id, created_by, title, address, service_types_json,
-                boundary_json, notes, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)
+                property_type, estimated_square_feet, estimate_low_cents,
+                estimate_high_cents, boundary_json, notes, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)
             """,
             (
                 request_id,
@@ -197,6 +229,10 @@ def create_request(
                 title,
                 address,
                 json.dumps(service_types, ensure_ascii=True),
+                property_type,
+                max(1_000, int(estimated_square_feet)),
+                max(0, int(estimate_low_cents)),
+                max(0, int(estimate_high_cents)),
                 json.dumps(boundary, ensure_ascii=True) if boundary else None,
                 notes,
                 now,
@@ -222,7 +258,7 @@ def list_requests(
     *, organization_id: str | None = None, include_all: bool = False, limit: int = 100
 ) -> list[dict[str, Any]]:
     ensure_db_ready()
-    safe_limit = max(1, min(500, int(limit)))
+    safe_limit = max(1, min(10_000, int(limit)))
     with _connect() as conn:
         if include_all:
             rows = conn.execute(
@@ -283,6 +319,9 @@ def update_request(
             if status == "quoted":
                 fields.append("quoted_at = ?")
                 values.append(now)
+                if quote_cents is not None:
+                    fields.append("payment_status = ?")
+                    values.append("pending" if int(quote_cents) > 0 else "not_required")
             elif status == "accepted":
                 fields.extend(["accepted_at = ?", "due_at = ?"])
                 values.extend([now, _iso(_now() + timedelta(hours=24))])
@@ -328,6 +367,72 @@ def accept_quote(request_id: str, organization_id: str, user_id: str) -> dict[st
     if not request or request.get("status") != "quoted" or request.get("quote_cents") is None:
         return None
     return update_request(request_id, actor_user_id=user_id, status="accepted")
+
+
+def record_takeoff_checkout(request_id: str, checkout_session_id: str) -> None:
+    ensure_db_ready()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE takeoff_requests
+            SET stripe_checkout_session_id = ?, payment_status = 'pending', updated_at = ?
+            WHERE id = ?
+            """,
+            (str(checkout_session_id), _iso(), str(request_id)),
+        )
+        conn.commit()
+
+
+def mark_takeoff_paid(
+    request_id: str,
+    *,
+    checkout_session_id: str,
+    payment_intent_id: str,
+) -> dict[str, Any] | None:
+    ensure_db_ready()
+    now = _iso()
+    due_at = _iso(_now() + timedelta(hours=24))
+    with _connect() as conn:
+        current = conn.execute(
+            "SELECT status FROM takeoff_requests WHERE id = ?", (str(request_id),)
+        ).fetchone()
+        if current is None:
+            return None
+        next_status = "accepted" if str(current["status"]) == "quoted" else str(current["status"])
+        conn.execute(
+            """
+            UPDATE takeoff_requests
+            SET payment_status = 'paid', stripe_checkout_session_id = ?,
+                stripe_payment_intent_id = ?, status = ?,
+                accepted_at = CASE WHEN accepted_at IS NULL THEN ? ELSE accepted_at END,
+                due_at = CASE WHEN due_at IS NULL THEN ? ELSE due_at END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                str(checkout_session_id),
+                str(payment_intent_id),
+                next_status,
+                now,
+                due_at,
+                now,
+                str(request_id),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO takeoff_request_events (
+                request_id, actor_user_id, event_type, details_json, created_at
+            ) VALUES (?, 'stripe', 'payment_received', ?, ?)
+            """,
+            (
+                str(request_id),
+                json.dumps({"checkout_session_id": checkout_session_id}, ensure_ascii=True),
+                now,
+            ),
+        )
+        conn.commit()
+    return get_request(request_id, include_all=True)
 
 
 def add_file(
@@ -378,3 +483,23 @@ def get_file(file_id: str) -> dict[str, Any] | None:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM takeoff_files WHERE id = ?", (str(file_id),)).fetchone()
     return dict(row) if row else None
+
+
+def list_organization_storage_keys(organization_id: str) -> list[str]:
+    ensure_db_ready()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT storage_key FROM takeoff_files WHERE organization_id = ?",
+            (str(organization_id),),
+        ).fetchall()
+    return [str(row["storage_key"]) for row in rows]
+
+
+def delete_organization_requests(organization_id: str) -> None:
+    ensure_db_ready()
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM takeoff_requests WHERE organization_id = ?",
+            (str(organization_id),),
+        )
+        conn.commit()

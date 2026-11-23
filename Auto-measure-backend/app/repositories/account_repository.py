@@ -2,10 +2,10 @@ import hashlib
 import hmac
 import os
 import secrets
-import sqlite3
-from datetime import UTC, datetime
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from app.repositories.database import connect_database
 
 
 DEFAULT_DB_PATH = "./data/measurements.db"
@@ -17,26 +17,8 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _db_path() -> str:
-    configured = os.getenv(
-        "AUTO_MEASURE_ACCOUNT_DB_PATH",
-        os.getenv("AUTO_MEASURE_DB_PATH", DEFAULT_DB_PATH),
-    )
-    path = Path(configured).expanduser()
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parents[2] / path
-    return str(path)
-
-
-def _connect() -> sqlite3.Connection:
-    db_file = _db_path()
-    Path(db_file).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_file, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def _connect():
+    return connect_database(DEFAULT_DB_PATH)
 
 
 def _slug(value: str) -> str:
@@ -73,6 +55,13 @@ def init_db() -> None:
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'owner',
                 is_active INTEGER NOT NULL DEFAULT 1,
+                email_verified_at TEXT,
+                mfa_secret TEXT,
+                mfa_enabled INTEGER NOT NULL DEFAULT 0,
+                failed_login_count INTEGER NOT NULL DEFAULT 0,
+                locked_until TEXT,
+                terms_accepted_at TEXT,
+                terms_version TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
@@ -93,13 +82,54 @@ def init_db() -> None:
                 processed_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS account_tokens (
+                token_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS rate_limit_events (
+                bucket_key TEXT NOT NULL,
+                occurred_at_ms BIGINT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_users_organization
             ON users(organization_id);
 
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower
+            ON users(LOWER(email));
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower
+            ON users(LOWER(username));
+
             CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry
             ON auth_sessions(expires_at);
+
+            CREATE INDEX IF NOT EXISTS idx_account_tokens_user_purpose
+            ON account_tokens(user_id, purpose, expires_at);
+
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_bucket_time
+            ON rate_limit_events(bucket_key, occurred_at_ms);
             """
         )
+        existing_user_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        for column, ddl in {
+            "email_verified_at": "TEXT",
+            "mfa_secret": "TEXT",
+            "mfa_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "failed_login_count": "INTEGER NOT NULL DEFAULT 0",
+            "locked_until": "TEXT",
+            "terms_accepted_at": "TEXT",
+            "terms_version": "TEXT",
+        }.items():
+            if column not in existing_user_columns:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {column} {ddl}")
         now = _now_iso()
         conn.execute(
             """
@@ -160,12 +190,13 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
-def _decode_account(row: sqlite3.Row | None) -> dict[str, Any] | None:
+def _decode_account(row: Any | None) -> dict[str, Any] | None:
     if row is None:
         return None
     item = dict(row)
     item["is_internal"] = bool(item.get("is_internal"))
     item["is_active"] = bool(item.get("is_active"))
+    item["mfa_enabled"] = bool(item.get("mfa_enabled"))
     item["subscription_cancel_at_period_end"] = bool(
         item.get("subscription_cancel_at_period_end")
     )
@@ -186,6 +217,13 @@ ACCOUNT_SELECT = """
         u.password_hash,
         u.role,
         u.is_active,
+        u.email_verified_at,
+        u.mfa_secret,
+        u.mfa_enabled,
+        u.failed_login_count,
+        u.locked_until,
+        u.terms_accepted_at,
+        u.terms_version,
         o.name AS organization_name,
         o.slug AS organization_slug,
         o.is_internal,
@@ -207,7 +245,7 @@ def get_user_by_identifier(identifier: str) -> dict[str, Any] | None:
         return None
     with _connect() as conn:
         row = conn.execute(
-            ACCOUNT_SELECT + " WHERE u.username = ? COLLATE NOCASE OR u.email = ? COLLATE NOCASE",
+            ACCOUNT_SELECT + " WHERE LOWER(u.username) = LOWER(?) OR LOWER(u.email) = LOWER(?)",
             (normalized, normalized),
         ).fetchone()
     return _decode_account(row)
@@ -226,6 +264,7 @@ def create_customer_account(
     password: str,
     display_name: str,
     organization_name: str,
+    terms_version: str | None = None,
 ) -> dict[str, Any]:
     ensure_db_ready()
     normalized_email = str(email or "").strip().lower()
@@ -250,8 +289,8 @@ def create_customer_account(
             """
             INSERT INTO users (
                 id, organization_id, email, username, display_name, password_hash,
-                role, is_active, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'owner', 1, ?, ?)
+                role, is_active, terms_accepted_at, terms_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'owner', 1, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -260,6 +299,8 @@ def create_customer_account(
                 normalized_email,
                 display_name,
                 hash_password(password),
+                now if terms_version else None,
+                str(terms_version or "") or None,
                 now,
                 now,
             ),
@@ -368,6 +409,130 @@ def delete_session(token_hash: str) -> None:
         conn.commit()
 
 
+def delete_user_sessions(user_id: str) -> None:
+    ensure_db_ready()
+    with _connect() as conn:
+        conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (str(user_id),))
+        conn.commit()
+
+
+def mark_email_verified(user_id: str) -> None:
+    ensure_db_ready()
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE users SET email_verified_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, str(user_id)),
+        )
+        conn.commit()
+
+
+def update_user_password(user_id: str, password: str) -> None:
+    ensure_db_ready()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, failed_login_count = 0, locked_until = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (hash_password(password), _now_iso(), str(user_id)),
+        )
+        conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (str(user_id),))
+        conn.commit()
+
+
+def create_account_token(user_id: str, purpose: str, expires_at: str) -> str:
+    ensure_db_ready()
+    token = secrets.token_urlsafe(36)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM account_tokens WHERE user_id = ? AND purpose = ?",
+            (str(user_id), str(purpose)),
+        )
+        conn.execute(
+            """
+            INSERT INTO account_tokens (
+                token_hash, user_id, purpose, created_at, expires_at, used_at
+            ) VALUES (?, ?, ?, ?, ?, NULL)
+            """,
+            (token_hash, str(user_id), str(purpose), now, str(expires_at)),
+        )
+        conn.commit()
+    return token
+
+
+def consume_account_token(token: str, purpose: str) -> dict[str, Any] | None:
+    ensure_db_ready()
+    token_hash = hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+    now = _now_iso()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT user_id FROM account_tokens
+            WHERE token_hash = ? AND purpose = ? AND used_at IS NULL AND expires_at > ?
+            """,
+            (token_hash, str(purpose), now),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE account_tokens SET used_at = ? WHERE token_hash = ?",
+            (now, token_hash),
+        )
+        conn.commit()
+    return get_user_by_id(str(row["user_id"]))
+
+
+def record_login_failure(identifier: str) -> None:
+    account = get_user_by_identifier(identifier)
+    if not account:
+        return
+    failures = max(0, int(account.get("failed_login_count") or 0)) + 1
+    locked_until = None
+    if failures >= 8:
+        locked_until = (datetime.now(UTC) + timedelta(minutes=15)).isoformat().replace("+00:00", "Z")
+        failures = 0
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE users SET failed_login_count = ?, locked_until = ?, updated_at = ? WHERE id = ?",
+            (failures, locked_until, _now_iso(), str(account["user_id"])),
+        )
+        conn.commit()
+
+
+def record_login_success(user_id: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE users SET failed_login_count = 0, locked_until = NULL, updated_at = ? WHERE id = ?",
+            (_now_iso(), str(user_id)),
+        )
+        conn.commit()
+
+
+def set_user_mfa(user_id: str, secret: str | None, enabled: bool) -> None:
+    ensure_db_ready()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE users SET mfa_secret = ?, mfa_enabled = ?, updated_at = ? WHERE id = ?",
+            (str(secret or "") or None, 1 if enabled else 0, _now_iso(), str(user_id)),
+        )
+        conn.commit()
+
+
+def delete_customer_account(user_id: str) -> str | None:
+    account = get_user_by_id(user_id)
+    if not account or account.get("is_internal"):
+        return None
+    organization_id = str(account.get("organization_id") or "")
+    with _connect() as conn:
+        conn.execute("DELETE FROM organizations WHERE id = ?", (organization_id,))
+        conn.commit()
+    return organization_id
+
+
 def get_organization(organization_id: str) -> dict[str, Any] | None:
     ensure_db_ready()
     with _connect() as conn:
@@ -382,6 +547,17 @@ def get_organization(organization_id: str) -> dict[str, Any] | None:
         item.get("subscription_cancel_at_period_end")
     )
     return item
+
+
+def get_organization_owner(organization_id: str) -> dict[str, Any] | None:
+    ensure_db_ready()
+    with _connect() as conn:
+        row = conn.execute(
+            ACCOUNT_SELECT
+            + " WHERE u.organization_id = ? ORDER BY CASE WHEN u.role = 'owner' THEN 0 ELSE 1 END, u.created_at LIMIT 1",
+            (str(organization_id),),
+        ).fetchone()
+    return _decode_account(row)
 
 
 def get_organization_by_stripe_customer(customer_id: str) -> dict[str, Any] | None:

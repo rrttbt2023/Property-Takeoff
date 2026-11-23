@@ -1,10 +1,11 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   DEFAULT_PROJECT_FOLDER_NAME,
   WORKFLOW_MODE_LOCATION,
   WORKFLOW_MODE_PDF,
 } from "../projects/projectLibrary";
+import TakeoffBoundaryMap from "./TakeoffBoundaryMap";
 import "./home-dashboard.css";
 
 const PREVIEW_LAYER_COLORS = {
@@ -13,6 +14,44 @@ const PREVIEW_LAYER_COLORS = {
   turf: "#57b44a",
   mulch: "#b66bd8",
 };
+
+const TAKEOFF_SERVICE_OPTIONS = [
+  { value: "Plowable pavement", label: "Parking lots & plowable pavement", detail: "Parking fields, drive lanes, loading areas, and other paved snow-service surfaces." },
+  { value: "Sidewalks", label: "Sidewalks & walkways", detail: "Concrete walks, pedestrian connections, entrances, and accessible routes." },
+  { value: "Turf", label: "Turf & lawn", detail: "Mowable grass and maintained lawn areas inside the requested boundary." },
+  { value: "Landscape beds", label: "Landscape & mulch beds", detail: "Mulched, planted, or ornamental landscape areas." },
+  { value: "Other", label: "Other custom area", detail: "An additional surface or area you will describe in the instructions." },
+];
+
+const TAKEOFF_PROPERTY_OPTIONS = [
+  ["commercial_retail", "Commercial / retail"],
+  ["industrial_warehouse", "Industrial / warehouse"],
+  ["hoa_multifamily", "HOA / multifamily"],
+  ["office_medical", "Office / medical"],
+  ["school_campus", "School / campus"],
+  ["municipal", "Municipal / public"],
+  ["other", "Other"],
+];
+
+function formatMoney(cents) {
+  if (!Number.isFinite(Number(cents))) return "Pending";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(Number(cents) / 100);
+}
+
+function formatQuoteRange(lowCents, highCents) {
+  if (!Number.isFinite(Number(lowCents)) || !Number.isFinite(Number(highCents))) {
+    return "Calculated after details are entered";
+  }
+  return `${formatMoney(lowCents)} – ${formatMoney(highCents)}`;
+}
+
+function propertyTypeLabel(value) {
+  return TAKEOFF_PROPERTY_OPTIONS.find(([key]) => key === value)?.[1] || "Other";
+}
 
 function Icon({ name, size = 18, strokeWidth = 1.8 }) {
   const paths = {
@@ -304,11 +343,21 @@ function HomeDashboard({
   isStaff,
   billingStatus,
   billingWorking,
+  mapboxToken,
+  showMembershipPrompt,
+  onDismissMembershipPrompt,
   onStartSubscription,
   onOpenBillingPortal,
   onRefreshAccount,
+  emailVerified,
+  mfaEnabled,
+  onEnableMfa,
+  onResendVerification,
+  onExportAccount,
+  onDeleteAccount,
   takeoffRequests,
   takeoffRequestsLoading,
+  onEstimateTakeoffRequest,
   onCreateTakeoffRequest,
   onAcceptTakeoffQuote,
   onUpdateTakeoffRequest,
@@ -355,13 +404,71 @@ function HomeDashboard({
   const [takeoffForm, setTakeoffForm] = useState({
     title: "",
     address: "",
-    serviceTypes: "Plowable, Sidewalks",
-    boundaryText: "",
+    serviceTypes: [],
+    propertyType: "commercial_retail",
+    estimatedSquareFeet: "",
+    boundary: null,
     notes: "",
   });
   const [takeoffFile, setTakeoffFile] = useState(null);
   const [takeoffSubmitting, setTakeoffSubmitting] = useState(false);
   const [takeoffMessage, setTakeoffMessage] = useState("");
+  const [takeoffEstimate, setTakeoffEstimate] = useState(null);
+  const [takeoffEstimateLoading, setTakeoffEstimateLoading] = useState(false);
+  const [takeoffEstimateError, setTakeoffEstimateError] = useState("");
+  const [addressSearchNonce, setAddressSearchNonce] = useState(0);
+  const estimatePropertyType = takeoffForm.propertyType;
+  const estimateSquareFeet = takeoffForm.estimatedSquareFeet;
+  const estimateBoundary = takeoffForm.boundary;
+  const estimateServicesKey = takeoffForm.serviceTypes.join("|");
+
+  useEffect(() => {
+    const squareFeet = Number(estimateSquareFeet);
+    const serviceTypes = estimateServicesKey.split("|").filter(Boolean);
+    if (
+      isStaff
+      || typeof onEstimateTakeoffRequest !== "function"
+      || !Number.isFinite(squareFeet)
+      || squareFeet < 1_000
+      || !serviceTypes.length
+      || !estimateBoundary
+    ) {
+      setTakeoffEstimate(null);
+      setTakeoffEstimateError("");
+      setTakeoffEstimateLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setTakeoffEstimateLoading(true);
+    setTakeoffEstimateError("");
+    const timer = window.setTimeout(async () => {
+      try {
+        const estimate = await onEstimateTakeoffRequest({
+          propertyType: estimatePropertyType,
+          serviceTypes,
+          boundary: estimateBoundary,
+        });
+        if (active) setTakeoffEstimate(estimate || null);
+      } catch (error) {
+        if (active) {
+          setTakeoffEstimate(null);
+          setTakeoffEstimateError(error?.message || "Estimate unavailable");
+        }
+      } finally {
+        if (active) setTakeoffEstimateLoading(false);
+      }
+    }, 400);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [estimateBoundary, estimatePropertyType, estimateServicesKey, estimateSquareFeet, isStaff, onEstimateTakeoffRequest]);
+
+  const takeoffPropertyReady = takeoffForm.title.trim().length >= 2 && takeoffForm.address.trim().length >= 3;
+  const takeoffServicesReady = takeoffForm.serviceTypes.length > 0;
+  const takeoffBoundaryReady = !!takeoffForm.boundary && Number(takeoffForm.estimatedSquareFeet) >= 1_000;
+  const takeoffQuoteReady = takeoffBoundaryReady && !!takeoffEstimate && !takeoffEstimateLoading;
+
   const previewProject =
     recentProjects.find((entry) => entry.id === selectedPreviewProjectId) || recentProject;
   const activityProjects = recentProjects.slice(0, 4);
@@ -406,6 +513,7 @@ function HomeDashboard({
     recovery: { title: "Recovery Center", description: "Autosave snapshots and shared-sync health" },
     takeoffs: { title: "Managed Takeoffs", description: "Request, quote, and track 24-hour measurements" },
     billing: { title: "Plan & Billing", description: "Manage measuring access and subscription billing" },
+    account: { title: "Account & Security", description: "Protect, export, or remove your workspace" },
     admin: { title: "Admin Tools", description: "Security, access, and audit information" },
   };
   const currentPage = pageDetails[activeNavigation] || pageDetails.dashboard;
@@ -428,17 +536,29 @@ function HomeDashboard({
   };
   const startLocationProject = () => workspaceAccess ? onNewLocation() : showPage("billing");
   const startPdfProject = () => workspaceAccess ? onNewPdf() : showPage("billing");
+  const toggleTakeoffService = (service) => {
+    setTakeoffForm((previous) => ({
+      ...previous,
+      serviceTypes: previous.serviceTypes.includes(service)
+        ? previous.serviceTypes.filter((value) => value !== service)
+        : [...previous.serviceTypes, service],
+    }));
+  };
   const submitTakeoffRequest = async (event) => {
     event.preventDefault();
     setTakeoffMessage("");
-    let boundary = null;
-    if (takeoffForm.boundaryText.trim()) {
-      try {
-        boundary = JSON.parse(takeoffForm.boundaryText);
-      } catch {
-        setTakeoffMessage("The optional boundary must be valid GeoJSON.");
-        return;
-      }
+    const estimatedSquareFeet = Number(takeoffForm.estimatedSquareFeet);
+    if (!takeoffForm.serviceTypes.length) {
+      setTakeoffMessage("Choose at least one area to measure.");
+      return;
+    }
+    if (!takeoffForm.boundary) {
+      setTakeoffMessage("Find the property and draw the measurement boundary before submitting.");
+      return;
+    }
+    if (!Number.isFinite(estimatedSquareFeet) || estimatedSquareFeet < 1_000) {
+      setTakeoffMessage("Enter an estimated area of at least 1,000 square feet.");
+      return;
     }
     setTakeoffSubmitting(true);
     try {
@@ -446,13 +566,24 @@ function HomeDashboard({
         details: {
           title: takeoffForm.title,
           address: takeoffForm.address,
-          serviceTypes: takeoffForm.serviceTypes.split(",").map((value) => value.trim()).filter(Boolean),
-          boundary,
+          serviceTypes: takeoffForm.serviceTypes,
+          propertyType: takeoffForm.propertyType,
+          estimatedSquareFeet,
+          boundary: takeoffForm.boundary,
           notes: takeoffForm.notes,
         },
         file: takeoffFile,
       });
-      setTakeoffForm({ title: "", address: "", serviceTypes: "Plowable, Sidewalks", boundaryText: "", notes: "" });
+      setTakeoffForm({
+        title: "",
+        address: "",
+        serviceTypes: [],
+        propertyType: "commercial_retail",
+        estimatedSquareFeet: "",
+        boundary: null,
+        notes: "",
+      });
+      setTakeoffEstimate(null);
       setTakeoffFile(null);
       setTakeoffMessage("Request received. We will review the site and send a measurement quote.");
     } catch (error) {
@@ -588,6 +719,25 @@ function HomeDashboard({
 
   return (
     <div className="home-dashboard" data-theme={isDark ? "dark" : "light"}>
+      {showMembershipPrompt && !workspaceAccess && !isStaff ? (
+        <div className="hd-membership-backdrop" role="presentation">
+          <section className="hd-membership-modal" role="dialog" aria-modal="true" aria-labelledby="membership-welcome-title">
+            <button type="button" className="hd-membership-close" onClick={onDismissMembershipPrompt} aria-label="Close membership offer"><Icon name="close" size={18} /></button>
+            <span className="hd-membership-icon"><Icon name="credit" size={27} /></span>
+            <small>Account created successfully</small>
+            <h2 id="membership-welcome-title">Your workspace is ready.</h2>
+            <p>Unlock the full measuring workspace for <strong>$9.99 per month</strong>, or request a professionally completed takeoff without subscribing.</p>
+            <div className="hd-membership-benefits">
+              <span><Icon name="check" size={16} />Measure maps and PDF plans</span>
+              <span><Icon name="check" size={16} />Save projects, folders, and versions</span>
+              <span><Icon name="check" size={16} />Export client-ready reports</span>
+            </div>
+            <button type="button" className="hd-button hd-button-primary" onClick={onStartSubscription} disabled={billingWorking}>{billingWorking ? "Opening secure checkout..." : "Start Basic for $9.99/month"}</button>
+            <button type="button" className="hd-button hd-button-outline" onClick={() => { onDismissMembershipPrompt?.(); showPage("takeoffs"); }}>Request a Measurement Quote Instead</button>
+            <button type="button" className="hd-membership-later" onClick={onDismissMembershipPrompt}>Maybe later</button>
+          </section>
+        </div>
+      ) : null}
       <aside className="hd-sidebar">
         <div className="hd-brand">
           <img src="/logo.png" alt="McKenna Site Management" />
@@ -609,6 +759,7 @@ function HomeDashboard({
           <button type="button" className={activeNavigation === "activity" ? "active" : ""} onClick={() => showPage("activity")}><Icon name="report" />Project Activity</button>
           <button type="button" className={activeNavigation === "recovery" ? "active" : ""} onClick={() => showPage("recovery")}><Icon name="database" />Recovery Center</button>
           <button type="button" className={activeNavigation === "billing" ? "active" : ""} onClick={() => showPage("billing")}><Icon name="credit" />Plan & Billing</button>
+          <button type="button" className={activeNavigation === "account" ? "active" : ""} onClick={() => showPage("account")}><Icon name="shield" />Account & Security</button>
           {isStaff ? <button type="button" className={activeNavigation === "admin" ? "active" : ""} onClick={() => showPage("admin")}><Icon name="shield" />Admin Tools</button> : null}
         </nav>
 
@@ -885,13 +1036,70 @@ function HomeDashboard({
 
             {!isStaff ? <form className="hd-card hd-takeoff-form" onSubmit={submitTakeoffRequest}>
               <div className="hd-takeoff-form-heading"><span><Icon name="briefcase" size={24} /></span><div><h3>Request a measurement quote</h3><p>No subscription is required to request a quote.</p></div></div>
-              <label>Site or project name<input required value={takeoffForm.title} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, title: event.target.value }))} placeholder="Dover Commons snow takeoff" /></label>
-              <label>Property address<input required value={takeoffForm.address} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, address: event.target.value }))} placeholder="1200 N Dupont Hwy, Dover, DE" /></label>
-              <label>Areas to measure<input value={takeoffForm.serviceTypes} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, serviceTypes: event.target.value }))} placeholder="Plowable, sidewalks, turf" /></label>
-              <label>Plan, image, KML, or boundary file<input type="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.kml,.kmz,.json" onChange={(event) => setTakeoffFile(event.target.files?.[0] || null)} /></label>
-              <label className="hd-takeoff-wide">Boundary GeoJSON (optional)<textarea value={takeoffForm.boundaryText} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, boundaryText: event.target.value }))} placeholder='Paste a GeoJSON Polygon, MultiPolygon, or Feature when available.' /></label>
-              <label className="hd-takeoff-wide">Instructions<textarea value={takeoffForm.notes} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, notes: event.target.value }))} placeholder="Describe the property boundary, exclusions, required layers, and deadline." /></label>
-              <div className="hd-takeoff-submit"><small>Accepted files are private and limited to 25 MB each.</small><button type="submit" className="hd-button hd-button-primary" disabled={takeoffSubmitting}>{takeoffSubmitting ? "Submitting..." : "Submit for Quote"}</button></div>
+              <div className="hd-takeoff-progress hd-takeoff-wide" aria-label="Quote request progress">
+                <span className={takeoffPropertyReady ? "complete" : "active"}><i>1</i><b>Property</b><small>{takeoffPropertyReady ? "Complete" : "Add details"}</small></span>
+                <span className={takeoffServicesReady ? "complete" : takeoffPropertyReady ? "active" : ""}><i>2</i><b>Areas</b><small>{takeoffServicesReady ? `${takeoffForm.serviceTypes.length} selected` : "Choose areas"}</small></span>
+                <span className={takeoffBoundaryReady ? "complete" : takeoffServicesReady ? "active" : ""}><i>3</i><b>Boundary</b><small>{takeoffBoundaryReady ? "Drawn" : "Trace the site"}</small></span>
+                <span className={takeoffQuoteReady ? "complete" : takeoffBoundaryReady ? "active" : ""}><i>4</i><b>Estimate</b><small>{takeoffQuoteReady ? "Ready" : "Calculated live"}</small></span>
+              </div>
+
+              <section className="hd-takeoff-step hd-takeoff-wide">
+                <header><span>1</span><div><h4>Tell us which property to review</h4><p>Use a complete street address so the satellite map opens at the correct site.</p></div></header>
+                <div className="hd-takeoff-field-grid">
+                  <label>Site or project name<input required value={takeoffForm.title} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, title: event.target.value }))} placeholder="Dover Commons snow takeoff" /></label>
+                  <label>Property type<select required value={takeoffForm.propertyType} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, propertyType: event.target.value }))}>{TAKEOFF_PROPERTY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                  <label className="hd-takeoff-address">Property address<input required value={takeoffForm.address} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, address: event.target.value }))} onBlur={() => { if (takeoffForm.address.trim().length >= 3) setAddressSearchNonce((value) => value + 1); }} placeholder="1200 N Dupont Hwy, Dover, DE 19901" /><small>The map will locate this address when you finish entering it.</small></label>
+                </div>
+              </section>
+
+              <section className="hd-takeoff-step hd-takeoff-wide">
+                <header><span>2</span><div><h4>Choose every area that needs measurement</h4><p>Your estimate updates as services are selected. Select all that apply.</p></div></header>
+                <fieldset className="hd-takeoff-services">
+                  <legend className="sr-only">Areas to measure</legend>
+                  <div>{TAKEOFF_SERVICE_OPTIONS.map((service) => {
+                    const selected = takeoffForm.serviceTypes.includes(service.value);
+                    return <label key={service.value} className={selected ? "selected" : ""}>
+                      <input type="checkbox" checked={selected} onChange={() => toggleTakeoffService(service.value)} />
+                      <span className="hd-takeoff-service-check"><Icon name="check" size={15} /></span>
+                      <span><strong>{service.label}</strong><small>{service.detail}</small></span>
+                    </label>;
+                  })}</div>
+                </fieldset>
+              </section>
+
+              <section className="hd-takeoff-step hd-takeoff-wide">
+                <header><span>3</span><div><h4>Draw the measurement boundary</h4><p>Outline the full property or only the section you want measured. This boundary determines the quote area.</p></div></header>
+                <TakeoffBoundaryMap
+                  address={takeoffForm.address}
+                  addressSearchNonce={addressSearchNonce}
+                  mapboxToken={mapboxToken}
+                  value={takeoffForm.boundary}
+                  onChange={(boundary) => setTakeoffForm((previous) => ({ ...previous, boundary }))}
+                  onSquareFeetChange={(squareFeet) => setTakeoffForm((previous) => ({
+                    ...previous,
+                    estimatedSquareFeet: squareFeet > 0 ? String(squareFeet) : "",
+                  }))}
+                />
+              </section>
+
+              <section className="hd-takeoff-step hd-takeoff-wide">
+                <header><span>4</span><div><h4>Review the planning estimate</h4><p>The range uses the drawn boundary, property type, and selected measurement areas.</p></div></header>
+                <aside className={`hd-takeoff-estimate${takeoffEstimateError ? " error" : ""}`} aria-live="polite">
+                  <span><Icon name="report" size={22} /></span>
+                  <div>
+                    <small>Estimated measurement quote</small>
+                    <strong>{takeoffEstimateLoading ? "Calculating..." : takeoffEstimateError ? "Estimate temporarily unavailable" : formatQuoteRange(takeoffEstimate?.low_cents, takeoffEstimate?.high_cents)}</strong>
+                    {takeoffEstimate ? <div className="hd-takeoff-estimate-facts"><span><b>{Number(takeoffEstimate.estimated_square_feet).toLocaleString()}</b><small>square feet</small></span><span><b>{(Number(takeoffEstimate.estimated_square_feet) / 43560).toFixed(2)}</b><small>boundary acres</small></span><span><b>{takeoffForm.serviceTypes.length}</b><small>areas selected</small></span><span><b>{propertyTypeLabel(takeoffEstimate.property_type)}</b><small>property type</small></span></div> : <p>Choose an area and draw a boundary of at least 1,000 sq ft to calculate the range.</p>}
+                    {takeoffForm.serviceTypes.length ? <div className="hd-takeoff-estimate-services">{takeoffForm.serviceTypes.map((service) => <span key={service}><Icon name="check" size={13} />{service}</span>)}</div> : null}
+                    <em>{takeoffEstimate?.disclaimer || "Your final price is confirmed after our team reviews the boundary, imagery, requested measurements, and site complexity."}</em>
+                  </div>
+                </aside>
+                <div className="hd-takeoff-field-grid hd-takeoff-supporting">
+                  <label>Supporting plan or boundary file <small>Optional</small><input type="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.kml,.kmz,.json" onChange={(event) => setTakeoffFile(event.target.files?.[0] || null)} /></label>
+                  <label>Special instructions <small>Optional</small><textarea value={takeoffForm.notes} onChange={(event) => setTakeoffForm((previous) => ({ ...previous, notes: event.target.value }))} placeholder="Note exclusions, custom areas, access details, or your deadline." /></label>
+                </div>
+              </section>
+              <div className="hd-takeoff-submit"><small>{takeoffBoundaryReady ? "Your boundary and estimate details will be saved with this request." : "Complete the property, checklist, and boundary steps to submit."}</small><button type="submit" className="hd-button hd-button-primary" disabled={takeoffSubmitting || !takeoffPropertyReady || !takeoffServicesReady || !takeoffBoundaryReady}>{takeoffSubmitting ? "Submitting..." : takeoffQuoteReady ? "Submit Quote Request" : "Complete Steps Above"}</button></div>
             </form> : null}
 
             {takeoffMessage ? <div className="hd-takeoff-message" role="status">{takeoffMessage}</div> : null}
@@ -902,12 +1110,12 @@ function HomeDashboard({
                 return <article className="hd-card hd-takeoff-request" key={request.id}>
                   <div className="hd-takeoff-request-top"><div><span className={`hd-takeoff-status status-${request.status}`}>{String(request.status || "submitted").replaceAll("_", " ")}</span><h3>{request.title}</h3><p>{request.address}</p></div><strong>{quote}</strong></div>
                   {isStaff ? <small className="hd-takeoff-customer">{request.organization_name || "Customer workspace"}</small> : null}
-                  <div className="hd-takeoff-facts"><span><small>Requested</small><strong>{formatDate(request.created_at)}</strong></span><span><small>Services</small><strong>{request.service_types?.join(", ") || "As directed"}</strong></span><span><small>Delivery due</small><strong>{request.due_at ? formatDate(request.due_at) : "Starts after approval"}</strong></span><span><small>Files</small><strong>{request.files?.length || 0}</strong></span></div>
+                  <div className="hd-takeoff-facts"><span><small>Requested</small><strong>{formatDate(request.created_at)}</strong></span><span><small>Property</small><strong>{propertyTypeLabel(request.property_type)}</strong></span><span><small>Estimated area</small><strong>{request.estimated_square_feet ? `${Number(request.estimated_square_feet).toLocaleString()} sq ft` : "Not provided"}</strong></span><span><small>Planning range</small><strong>{formatQuoteRange(request.estimate_low_cents, request.estimate_high_cents)}</strong></span><span><small>Services</small><strong>{request.service_types?.join(", ") || "As directed"}</strong></span><span><small>Delivery due</small><strong>{request.due_at ? formatDate(request.due_at) : "Starts after approval"}</strong></span><span><small>Boundary</small><strong>{request.boundary ? "Drawn on map" : "Not provided"}</strong></span><span><small>Files</small><strong>{request.files?.length || 0}</strong></span></div>
                   {request.notes ? <p className="hd-takeoff-notes">{request.notes}</p> : null}
                   {request.quote_notes ? <div className="hd-takeoff-quote-note"><strong>Quote details</strong><p>{request.quote_notes}</p></div> : null}
                   {request.delivery_notes ? <div className="hd-takeoff-delivery"><strong>Delivery notes</strong><p>{request.delivery_notes}</p></div> : null}
                   <div className="hd-takeoff-actions">
-                    {!isStaff && request.status === "quoted" ? <button type="button" className="hd-button hd-button-primary" onClick={() => void onAcceptTakeoffQuote(request.id)}>Accept Quote & Start</button> : null}
+                    {!isStaff && request.status === "quoted" ? <button type="button" className="hd-button hd-button-primary" onClick={() => void onAcceptTakeoffQuote(request.id)}>{Number(request.quote_cents || 0) > 0 && request.payment_status !== "paid" ? "Pay Quote & Start" : "Accept Quote & Start"}</button> : null}
                     {!isStaff && request.status === "delivered" && request.delivered_project_id ? <button type="button" className="hd-button hd-button-primary" onClick={() => void onDownloadTakeoffDelivery(request.id)}>Download Delivered Project</button> : null}
                     {isStaff && request.status === "submitted" ? <button type="button" className="hd-button hd-button-outline" onClick={() => void onUpdateTakeoffRequest(request.id, { status: "reviewing" })}>Start Review</button> : null}
                     {isStaff && ["submitted", "reviewing", "quoted"].includes(request.status) ? <button type="button" className="hd-button hd-button-primary" onClick={() => void quoteTakeoffRequest(request)}>Send Quote</button> : null}
@@ -940,6 +1148,27 @@ function HomeDashboard({
               </div>
             </article>
             <article className="hd-card hd-managed-promo"><div><span>Need us to do the measuring?</span><h3>Request a managed takeoff without subscribing.</h3><p>Submit the property and boundary, review our quote, and receive finished measurements within 24 hours after approval.</p></div><button type="button" className="hd-button hd-button-primary" onClick={() => showPage("takeoffs")}>Request a Quote</button></article>
+          </section>
+        ) : null}
+
+        {activeNavigation === "account" ? (
+          <section className="hd-page hd-account-page">
+            <div className="hd-page-intro"><span className="hd-page-kicker">Workspace protection</span><h2>Account & Security</h2><p>Control authentication and obtain or remove the information associated with this company workspace.</p></div>
+            <div className="hd-recovery-summary-grid">
+              <article className="hd-card"><span><Icon name="shield" size={25} /></span><small>Email status</small><strong>{emailVerified || isStaff ? "Verified" : "Verification pending"}</strong><p>Verification protects recovery and billing notices.</p></article>
+              <article className="hd-card"><span><Icon name="shield" size={25} /></span><small>Authenticator</small><strong>{mfaEnabled ? "Enabled" : "Not enabled"}</strong><p>Authenticator codes are required for staff before public launch.</p></article>
+            </div>
+            <article className="hd-card hd-plan-card">
+              <div className="hd-plan-name"><span><Icon name="shield" size={26} /></span><div><small>Security controls</small><h3>Protect your workspace</h3></div></div>
+              <div className="hd-plan-actions">
+                {!emailVerified && !isStaff ? <button type="button" className="hd-button hd-button-primary" onClick={onResendVerification}>Resend Verification Email</button> : null}
+                {!mfaEnabled ? <button type="button" className="hd-button hd-button-primary" onClick={onEnableMfa}>Enable Authenticator MFA</button> : null}
+                <button type="button" className="hd-button hd-button-outline" onClick={onExportAccount}>Download Account Export</button>
+                {!isStaff ? <button type="button" className="hd-button hd-button-outline" onClick={onDeleteAccount}>Delete Company Workspace</button> : null}
+              </div>
+              <p>Need help? Visit <a href="/support.html" target="_blank" rel="noreferrer">Support</a> or email <a href="mailto:support@mckennasitemanagement.com">support@mckennasitemanagement.com</a>.</p>
+              <p><a href="/terms.html" target="_blank">Terms</a> · <a href="/privacy.html" target="_blank">Privacy</a> · <a href="/acceptable-use.html" target="_blank">Acceptable Use</a> · <a href="/refunds.html" target="_blank">Billing & Refunds</a></p>
+            </article>
           </section>
         ) : null}
 

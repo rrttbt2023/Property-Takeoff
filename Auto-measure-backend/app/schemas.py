@@ -176,6 +176,7 @@ class SharedProjectVersionRecord(SharedProjectVersionSummary):
 class SharedAuthLoginRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=120)
     password: str = Field(..., min_length=1, max_length=240)
+    mfa_code: str | None = Field(None, min_length=6, max_length=8)
 
 
 class SharedAuthRegisterRequest(BaseModel):
@@ -183,6 +184,8 @@ class SharedAuthRegisterRequest(BaseModel):
     password: str = Field(..., min_length=10, max_length=240)
     display_name: str = Field(..., min_length=2, max_length=120)
     organization_name: str = Field(..., min_length=2, max_length=180)
+    bot_token: str | None = Field(None, max_length=4000)
+    accepted_terms: Literal[True]
 
     @field_validator("email")
     @classmethod
@@ -204,7 +207,9 @@ class SharedAuthRegisterRequest(BaseModel):
 
 
 class SharedAuthLoginResponse(BaseModel):
-    token: str
+    token: str = ""
+    csrf_token: str = ""
+    authenticated: bool = True
     username: str
     expires_at: str
     email: str = ""
@@ -216,6 +221,8 @@ class SharedAuthLoginResponse(BaseModel):
     workspace_access: bool = False
     ai_access: bool = False
     is_staff: bool = False
+    email_verified: bool = False
+    mfa_enabled: bool = False
 
 
 class SharedAuthSessionResponse(BaseModel):
@@ -231,6 +238,44 @@ class SharedAuthSessionResponse(BaseModel):
     workspace_access: bool = False
     ai_access: bool = False
     is_staff: bool = False
+    csrf_token: str = ""
+    email_verified: bool = False
+    mfa_enabled: bool = False
+
+
+class AuthEmailRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+
+
+class AuthTokenRequest(BaseModel):
+    token: str = Field(..., min_length=20, max_length=500)
+
+
+class PasswordResetConfirmRequest(AuthTokenRequest):
+    password: str = Field(..., min_length=10, max_length=240)
+
+    @field_validator("password")
+    @classmethod
+    def password_must_be_strong(cls, value: str) -> str:
+        password = str(value or "")
+        if not any(char.isalpha() for char in password) or not any(
+            char.isdigit() for char in password
+        ):
+            raise ValueError("Password must include at least one letter and one number")
+        return password
+
+
+class MfaCodeRequest(BaseModel):
+    code: str = Field(..., min_length=6, max_length=8)
+
+
+class AccountDeleteRequest(BaseModel):
+    password: str = Field(..., min_length=1, max_length=240)
+
+
+class MfaSetupResponse(BaseModel):
+    secret: str
+    otpauth_url: str
 
 
 class SharedAuthLogoutResponse(BaseModel):
@@ -261,12 +306,42 @@ TakeoffRequestStatus = Literal[
     "canceled",
 ]
 
+TakeoffPropertyType = Literal[
+    "commercial_retail",
+    "industrial_warehouse",
+    "hoa_multifamily",
+    "office_medical",
+    "school_campus",
+    "municipal",
+    "other",
+]
+
+
+class TakeoffQuoteEstimateRequest(BaseModel):
+    property_type: TakeoffPropertyType = "commercial_retail"
+    service_types: list[str] = Field(..., min_length=1, max_length=20)
+    boundary: dict[str, Any]
+
+
+class TakeoffQuoteEstimateResponse(BaseModel):
+    low_cents: int = Field(..., ge=0)
+    high_cents: int = Field(..., ge=0)
+    midpoint_cents: int = Field(..., ge=0)
+    currency: str = "USD"
+    estimated_square_feet: int = Field(..., ge=1_000)
+    property_type: TakeoffPropertyType
+    service_types: list[str] = Field(default_factory=list)
+    area_source: Literal["boundary"] = "boundary"
+    disclaimer: str
+
 
 class TakeoffRequestCreate(BaseModel):
     title: str = Field(..., min_length=2, max_length=180)
     address: str = Field(..., min_length=3, max_length=300)
-    service_types: list[str] = Field(default_factory=list, max_length=20)
-    boundary: dict[str, Any] | None = None
+    service_types: list[str] = Field(..., min_length=1, max_length=20)
+    property_type: TakeoffPropertyType = "commercial_retail"
+    estimated_square_feet: int | None = Field(None, ge=1_000, le=100_000_000)
+    boundary: dict[str, Any]
     notes: str = Field("", max_length=5000)
 
 
@@ -294,11 +369,16 @@ class TakeoffRequestRecord(BaseModel):
     title: str
     address: str
     service_types: list[str] = Field(default_factory=list)
+    property_type: TakeoffPropertyType = "commercial_retail"
+    estimated_square_feet: int | None = Field(None, ge=1_000)
+    estimate_low_cents: int | None = Field(None, ge=0)
+    estimate_high_cents: int | None = Field(None, ge=0)
     boundary: dict[str, Any] | None = None
     notes: str = ""
     status: TakeoffRequestStatus
     quote_cents: int | None = None
     quote_notes: str = ""
+    payment_status: str = "not_required"
     quoted_at: str | None = None
     accepted_at: str | None = None
     due_at: str | None = None
